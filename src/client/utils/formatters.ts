@@ -154,6 +154,35 @@ export function formatDuration(seconds: number): string {
   return `${String(mins)}m ${String(secs).padStart(PAD_TWO, '0')}s`;
 }
 
+export interface ProbeSpecRow {
+  readonly label: string;
+  readonly value: string;
+  readonly mono?: boolean;
+}
+
+/** Formats a probed stream summary into structured key-value rows for comparison cards. */
+export function formatProbeSpecRows(probe: MediaProbeSummary): readonly ProbeSpecRow[] {
+  const video = probe.videoStreams[0];
+  const resText = video
+    ? `${String(video.width)}×${String(video.height)}${video.codecName ? ` (${video.codecName})` : ''}`
+    : 'No video';
+  const audioLangs =
+    probe.audioStreams.length > 0 ? probe.audioStreams.map((a) => a.language).join(', ') : 'None';
+  const subLangs =
+    probe.subtitleStreams.length > 0
+      ? `${String(probe.subtitleStreams.length)} (${probe.subtitleStreams.map((s) => s.language).join(', ')})`
+      : 'None';
+  return [
+    { label: 'Size', value: formatSizeMb(probe.sizeBytes), mono: true },
+    { label: 'Resolution', value: resText, mono: true },
+    { label: 'Bitrate', value: formatKbps(probe.bitrateBps), mono: true },
+    { label: 'Duration', value: formatDuration(probe.durationSeconds), mono: true },
+    { label: 'Container', value: probe.formatName, mono: true },
+    { label: 'Audio', value: audioLangs, mono: false },
+    { label: 'Subtitles', value: subLangs, mono: false }
+  ];
+}
+
 /** Formats a probed stream summary for conflict comparison panels. */
 export function formatProbeStreams(probe: MediaProbeSummary): string {
   const video = probe.videoStreams[0];

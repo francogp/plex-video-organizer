@@ -20,19 +20,24 @@ import type {
   ItemId,
   MediaKind,
   OutputCategory,
-  ScannedItem
+  ScannedItem,
+  SubtitleCandidate
 } from '../../domain/types.ts';
 import {
   CONFLICT_DECISION_OPTIONS,
+  extractExternalIdLinks,
   formatDuration,
   formatKbps,
   formatPlexOutputSegments,
   formatProbeStreams,
   formatSizeDeltaMb,
   formatSizeMb,
-  splitRelativePathSegments
+  splitRelativePathSegments,
+  type ExternalIdLink
 } from '../utils/formatters.ts';
+import ProviderLinks from './ProviderLinks.vue';
 import { areAllVisibleRowsSelected } from './table/tableQueryCore.ts';
+import TableResetCount from './table/TableResetCount.vue';
 import type { TableColumnDef, TableWorkerRowInput } from './table/tableTypes.js';
 import { useTableWorker } from './table/useTableWorker.js';
 import VirtualDataTable from './table/VirtualDataTable.vue';
@@ -77,11 +82,20 @@ const QUEUE_COLUMNS: readonly TableColumnDef<QueueColId>[] = [
 type SortKey = 'include' | 'title' | 'mediaKind' | 'category' | 'size';
 type SortDir = 'ascending' | 'descending';
 
+export interface SubtitlePickerViewState {
+  readonly itemId: ItemId;
+  readonly loading: boolean;
+  readonly downloadingId: string | null;
+  readonly error: string | null;
+  readonly candidates: readonly SubtitleCandidate[];
+}
+
 const props = defineProps<{
   readonly items: readonly ScannedItem[];
   readonly disabled: boolean;
   readonly conflicts?: readonly ConflictComparison[];
   readonly conflictResolutions?: Readonly<Partial<Record<ItemId, ConflictDecision>>>;
+  readonly subtitlePicker?: SubtitlePickerViewState | null;
 }>();
 
 const emit = defineEmits<{
@@ -96,6 +110,10 @@ const emit = defineEmits<{
   (e: 'bulk-media-kind', itemIds: readonly ItemId[], kind: MediaKind): void;
   (e: 'bulk-category', itemIds: readonly ItemId[], category: OutputCategory): void;
   (e: 'inspect-tracks', item: ScannedItem): void;
+  (e: 'search-subtitles', item: ScannedItem): void;
+  (e: 'download-subtitle', item: ScannedItem, candidate: SubtitleCandidate): void;
+  (e: 'close-subtitle-picker'): void;
+  (e: 'preview-subtitle', item: ScannedItem): void;
   (e: 'change-audio-normalization', item: ScannedItem, config: AudioNormalizationConfig): void;
   (e: 'bulk-audio-normalization', itemIds: readonly ItemId[], mode: AudioNormalizationMode): void;
   (e: 'resolve-conflict', itemId: ItemId, decision: ConflictDecision): void;
@@ -109,6 +127,10 @@ const conflictByItemId = computed<ReadonlyMap<ItemId, ConflictComparison>>(() =>
   }
   return map;
 });
+
+function isSubPickerOpenFor(itemId: ItemId): boolean {
+  return props.subtitlePicker?.itemId === itemId;
+}
 
 const CATEGORY_LABELS: Readonly<Record<OutputCategory, string>> = {
   movies: 'Movies',
@@ -528,6 +550,7 @@ interface TracksSummary {
   readonly isReplace: boolean;
   readonly hasConflict: boolean;
   readonly conflictText: string;
+  readonly missingSpanishSubs: boolean;
 }
 
 function formatSubTag(sub: {
@@ -554,6 +577,10 @@ function getTracksSummary(item: ScannedItem): TracksSummary {
     ? []
     : item.probe.subtitleStreams.filter((s): boolean => keptInternalIds.has(s.streamOrder));
 
+  const hasSpanishSubs =
+    addedSubs.some((s): boolean => s.language === 'spa') ||
+    keptInternal.some((s): boolean => s.language === 'spa');
+
   return {
     addedCount: addedSubs.length,
     addedText: addedSubs.map(formatSubTag).join(', '),
@@ -561,7 +588,8 @@ function getTracksSummary(item: ScannedItem): TracksSummary {
     keptText: keptInternal.map(formatSubTag).join(', '),
     isReplace,
     hasConflict: item.trackSelection.needsUserPrompt,
-    conflictText: item.trackSelection.promptReason ?? 'Resolve subtitle conflict'
+    conflictText: item.trackSelection.promptReason ?? 'Resolve subtitle conflict',
+    missingSpanishSubs: !hasSpanishSubs
   };
 }
 
@@ -577,6 +605,13 @@ function formatMetadataIds(cand: NonNullable<ScannedItem['selectedMetadata']>): 
     ids.push(`{tmdb-${cand.tmdbId}}`);
   }
   return ids.join(' ');
+}
+
+function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
+  if (!row.selectedMetadata) {
+    return [];
+  }
+  return extractExternalIdLinks(formatMetadataIds(row.selectedMetadata), row.mediaKind);
 }
 
 function updateAudioNorm(item: ScannedItem, partial: Partial<AudioNormalizationConfig>): void {
@@ -635,12 +670,11 @@ function onBulkAudioChange(event: Event): void {
           </option>
         </select>
       </template>
-      <button type="button" class="vo-btn" @click="vTableRef?.resetColumns()">
-        <span aria-hidden="true">🔄</span> Reset Columns
-      </button>
-      <span class="vo-table-count vo-mono" aria-live="polite">
-        Showing {{ filteredIndices.length }} of {{ props.items.length }}
-      </span>
+      <TableResetCount
+        :shown-count="filteredIndices.length"
+        :total-count="props.items.length"
+        @reset="vTableRef?.resetColumns()"
+      />
     </div>
 
     <div v-if="selectedCount > 0" class="vo-bulk-bar" role="region" aria-label="Bulk actions">
@@ -973,7 +1007,11 @@ function onBulkAudioChange(event: Event): void {
           >
             <div class="vo-audio-panel-head">
               <span class="vo-path-label">MATCH</span>
-              <span class="vo-path-pill vo-path-pill--folder vo-mono">{{
+              <ProviderLinks
+                v-if="getMetadataLinks(row).length > 0"
+                :links="getMetadataLinks(row)"
+              />
+              <span v-else class="vo-path-pill vo-path-pill--folder vo-mono">{{
                 row.selectedMetadata ? row.selectedMetadata.source.toUpperCase() : 'Unmatched'
               }}</span>
             </div>
@@ -1146,15 +1184,25 @@ function onBulkAudioChange(event: Event): void {
       <template #cell-tracks="{ row }">
         <div class="vo-audio-cell">
           <div
-            v-if="getTracksSummary(row).hasConflict || getTracksSummary(row).addedCount > 0"
+            v-if="
+              getTracksSummary(row).hasConflict ||
+              getTracksSummary(row).addedCount > 0 ||
+              getTracksSummary(row).missingSpanishSubs
+            "
             class="vo-audio-panel"
             :class="
-              getTracksSummary(row).hasConflict ? 'vo-audio-panel--bad' : 'vo-audio-panel--ok'
+              getTracksSummary(row).hasConflict
+                ? 'vo-audio-panel--bad'
+                : getTracksSummary(row).missingSpanishSubs
+                  ? 'vo-audio-panel--warning'
+                  : 'vo-audio-panel--ok'
             "
             :title="
               getTracksSummary(row).hasConflict
                 ? getTracksSummary(row).conflictText
-                : `Adding external subtitles: ${getTracksSummary(row).addedText}`
+                : getTracksSummary(row).missingSpanishSubs
+                  ? 'No Spanish (spa) subtitles in external files or embedded streams'
+                  : `Adding external subtitles: ${getTracksSummary(row).addedText}`
             "
           >
             <div class="vo-audio-panel-head">
@@ -1162,7 +1210,9 @@ function onBulkAudioChange(event: Event): void {
               <span class="vo-path-pill vo-path-pill--folder vo-mono">{{
                 getTracksSummary(row).hasConflict
                   ? 'Conflict'
-                  : `+${String(getTracksSummary(row).addedCount)} new`
+                  : getTracksSummary(row).addedCount > 0
+                    ? `+${String(getTracksSummary(row).addedCount)} new`
+                    : 'No spa'
               }}</span>
             </div>
             <div class="vo-audio-lines vo-mono">
@@ -1174,7 +1224,7 @@ function onBulkAudioChange(event: Event): void {
                 <span class="vo-audio-option-label">Conflict:</span>
                 <span>{{ getTracksSummary(row).conflictText }}</span>
               </div>
-              <template v-else>
+              <template v-else-if="getTracksSummary(row).addedCount > 0">
                 <div class="vo-audio-option vo-audio-option--good">
                   <span class="vo-audio-option-icon" aria-hidden="true">+</span>
                   <span class="vo-audio-option-label">Add:</span>
@@ -1197,18 +1247,103 @@ function onBulkAudioChange(event: Event): void {
                   <span>Replace existing</span>
                 </div>
               </template>
+              <div
+                v-if="getTracksSummary(row).missingSpanishSubs"
+                class="vo-audio-option vo-audio-option--warning"
+              >
+                <span class="vo-audio-option-icon" aria-hidden="true">⚠</span>
+                <span class="vo-audio-option-label">No spa:</span>
+                <span>No Spanish subtitles (file or embedded)</span>
+              </div>
             </div>
           </div>
-          <button
-            type="button"
-            class="vo-btn"
-            :class="{ 'vo-btn--danger': row.trackSelection.needsUserPrompt }"
-            :disabled="disabled"
-            @click="emit('inspect-tracks', row)"
+          <div class="vo-audio-controls">
+            <button
+              type="button"
+              class="vo-btn"
+              :class="{ 'vo-btn--danger': row.trackSelection.needsUserPrompt }"
+              :disabled="disabled"
+              @click="emit('inspect-tracks', row)"
+            >
+              <span aria-hidden="true">{{ row.trackSelection.needsUserPrompt ? '⚠️' : '🎛️' }}</span>
+              {{ row.trackSelection.needsUserPrompt ? 'Resolve Subs' : 'Tracks' }}
+            </button>
+            <button
+              type="button"
+              class="vo-btn"
+              :disabled="
+                disabled || Boolean(isSubPickerOpenFor(row.id) && props.subtitlePicker?.loading)
+              "
+              :title="
+                getTracksSummary(row).missingSpanishSubs
+                  ? 'Search & download Spanish (spa) subtitles'
+                  : 'Search another Spanish (spa) subtitle'
+              "
+              @click="
+                isSubPickerOpenFor(row.id)
+                  ? emit('close-subtitle-picker')
+                  : emit('search-subtitles', row)
+              "
+            >
+              <span aria-hidden="true">{{
+                isSubPickerOpenFor(row.id) &amp;&amp; props.subtitlePicker?.loading ? '⏳' : '⬇'
+              }}</span>
+              {{ getTracksSummary(row).missingSpanishSubs ? 'Find spa' : 'Sub spa' }}
+            </button>
+            <button
+              v-if="row.externalSubtitles.length > 0"
+              type="button"
+              class="vo-btn"
+              :disabled="disabled"
+              title="Open video + external subtitle in OS default player (or browser preview) to verify sync before remuxing"
+              @click="emit('preview-subtitle', row)"
+            >
+              <span aria-hidden="true">▶</span>
+              Test
+            </button>
+          </div>
+          <div
+            v-if="isSubPickerOpenFor(row.id) && props.subtitlePicker"
+            class="vo-audio-panel vo-audio-panel--neutral vo-mono"
           >
-            <span aria-hidden="true">{{ row.trackSelection.needsUserPrompt ? '⚠️' : '🎛️' }}</span>
-            {{ row.trackSelection.needsUserPrompt ? 'Resolve Subs' : 'Tracks' }}
-          </button>
+            <div class="vo-audio-panel-head">
+              <span class="vo-path-label">SPA SUBS</span>
+              <button
+                type="button"
+                class="vo-btn vo-btn--compact"
+                aria-label="Close subtitle picker"
+                @click="emit('close-subtitle-picker')"
+              >
+                <span aria-hidden="true">✕</span>
+              </button>
+            </div>
+            <div
+              v-if="props.subtitlePicker.loading"
+              class="vo-audio-option vo-audio-option--neutral"
+            >
+              Searching providers...
+            </div>
+            <div
+              v-else-if="props.subtitlePicker.error"
+              class="vo-audio-option vo-audio-option--warning"
+            >
+              {{ props.subtitlePicker.error }}
+            </div>
+            <div v-else class="vo-audio-lines">
+              <button
+                v-for="cand in props.subtitlePicker.candidates.slice(0, 5)"
+                :key="cand.id"
+                type="button"
+                class="vo-btn vo-btn--compact"
+                :disabled="props.subtitlePicker.downloadingId === cand.id"
+                :title="`${cand.provider} · ${cand.variant} · ${cand.releaseName}`"
+                @click="emit('download-subtitle', row, cand)"
+              >
+                <span>{{ cand.hashMatch ? '✓Hash' : cand.variant }}</span>
+                <span>{{ cand.releaseName.slice(0, 26) }}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -1573,7 +1708,8 @@ th[aria-sort='descending'] .vo-sort-indicator::after {
   border-color: color-mix(in oklch, var(--vo-accent) 52%, var(--vo-border));
 }
 
-.vo-audio-panel--loudnorm {
+.vo-audio-panel--loudnorm,
+.vo-audio-panel--warning {
   background-color: color-mix(in oklch, var(--vo-warning) 9%, var(--vo-surface));
   border-color: color-mix(in oklch, var(--vo-warning) 52%, var(--vo-border));
 }
@@ -1607,6 +1743,11 @@ th[aria-sort='descending'] .vo-sort-indicator::after {
 .vo-audio-option--good {
   background-color: color-mix(in oklch, var(--vo-success) 14%, transparent);
   color: var(--vo-success);
+}
+
+.vo-audio-option--warning {
+  background-color: color-mix(in oklch, var(--vo-warning) 14%, transparent);
+  color: var(--vo-warning);
 }
 
 .vo-audio-option--neutral {

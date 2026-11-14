@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
-import { asImdbId, asTvdbId } from '../../src/domain/types.ts';
+import { asImdbId, asTvdbId, type VerifierProgress } from '../../src/domain/types.ts';
 import { loadConfig, type AppConfig } from '../../src/server/config.ts';
 import {
   applyVerifierRenames,
@@ -469,5 +469,159 @@ describe('libraryVerifierService', () => {
     const fixResult = await applyVerifierRenames(config, ghostEntry ? [ghostEntry] : []);
     expect(fixResult.failures).toEqual([]);
     await expect(fs.access(ghostRoot)).rejects.toThrow(/ENOENT/);
+  });
+
+  it('emits slot-indexed activeTasks across concurrent folder scans and single-slot renames', async () => {
+    const config = await makeTempConfig();
+    const movieNames = [
+      'Alpha {imdb-tt0000001}',
+      'Bravo {imdb-tt0000002}',
+      'Charlie {imdb-tt0000003}',
+      'Delta {imdb-tt0000004}'
+    ];
+    for (const dirName of movieNames) {
+      const folder = path.join(config.outputMoviesDir, dirName);
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(path.join(folder, `${dirName}.mkv`), 'video');
+    }
+
+    const scanProgress: VerifierProgress[] = [];
+    const releases: (() => void)[] = [];
+    let allStarted!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      allStarted = resolve;
+    });
+
+    const scan = await scanLibrariesForCompliance(
+      config,
+      undefined,
+      {
+        lookupMovieByImdbId: async (imdbId) => {
+          await new Promise<void>((resolve) => {
+            releases.push(resolve);
+            if (releases.length === 4) {
+              allStarted();
+              queueMicrotask(() => {
+                for (const release of releases.splice(0)) {
+                  release();
+                }
+              });
+            }
+          });
+          const index = Number(imdbId.replace('tt', ''));
+          return {
+            title: ['Alpha', 'Bravo', 'Charlie', 'Delta'][index - 1] ?? 'Movie',
+            year: 2019 + index,
+            imdbId: asImdbId(imdbId),
+            source: 'imdb'
+          };
+        },
+        searchMovies: async () => []
+      },
+      (progress) => {
+        scanProgress.push(progress);
+      }
+    );
+    await barrier;
+
+    const peakProgress = scanProgress.find((p) => p.activeTasks.length === 4);
+    expect(peakProgress).toBeDefined();
+    expect(peakProgress?.activeTasks.map((t) => t.slot)).toEqual([0, 1, 2, 3]);
+    expect(new Set(peakProgress?.activeTasks.map((t) => t.fileName)).size).toBe(4);
+    expect(scanProgress.at(-1)?.activeTasks).toEqual([]);
+
+    const alphaEntry = scan.entries.find((e) => e.currentRootName === 'Alpha {imdb-tt0000001}');
+    expect(alphaEntry).toBeDefined();
+
+    const fixProgress: VerifierProgress[] = [];
+    await applyVerifierRenames(config, alphaEntry ? [alphaEntry] : [], undefined, (progress) => {
+      fixProgress.push(progress);
+    });
+    expect(
+      fixProgress.some(
+        (p) =>
+          p.activeTasks.length === 1 &&
+          p.activeTasks[0]?.slot === 0 &&
+          p.activeTasks[0]?.fileName === 'Alpha {imdb-tt0000001}'
+      )
+    ).toBe(true);
+    expect(fixProgress.at(-1)?.activeTasks).toEqual([]);
+  });
+
+  it('detects destination collisions during scan and aborts fix before renaming internal files', async () => {
+    const config = await makeTempConfig();
+
+    const oldDir = path.join(config.outputMoviesDir, 'Ant-Man (2015)');
+    const existingDest = path.join(config.outputMoviesDir, 'Ant-Man (2015) {imdb-tt0478970}');
+    const emptyHiddenDir = path.join(
+      config.outputAnimatedMoviesDir,
+      'Appleseed (1988) {imdb-tt0094668}'
+    );
+
+    await fs.mkdir(oldDir, { recursive: true });
+    await fs.mkdir(existingDest, { recursive: true });
+    await fs.mkdir(emptyHiddenDir, { recursive: true });
+    await fs.writeFile(path.join(oldDir, 'Ant-Man.mkv'), 'video');
+    await fs.writeFile(path.join(existingDest, 'Ant-Man (2015) {imdb-tt0478970}.mkv'), 'video');
+    await fs.writeFile(path.join(emptyHiddenDir, '.DS_Store'), 'junk');
+
+    const logs: string[] = [];
+    const scan = await scanLibrariesForCompliance(config, (_lvl, msg) => logs.push(msg), {
+      searchMovies: async () => [
+        {
+          title: 'Ant-Man',
+          year: 2015,
+          imdbId: asImdbId('tt0478970'),
+          source: 'imdb'
+        }
+      ]
+    });
+
+    const colliding = scan.entries.find((e) => e.currentRootName === 'Ant-Man (2015)');
+    expect(colliding).toBeDefined();
+    expect(colliding?.issues).toContain('DESTINATION_COLLISION');
+    expect(colliding?.collisionTarget).toBe('Ant-Man (2015) {imdb-tt0478970}');
+    expect(logs.some((m) => m.includes('Destination collision detected'))).toBe(true);
+
+    const emptyEntry = scan.entries.find(
+      (e) => e.currentRootName === 'Appleseed (1988) {imdb-tt0094668}'
+    );
+    expect(emptyEntry?.issues).toContain('EMPTY_DIRECTORY');
+
+    const fixResult = await applyVerifierRenames(config, [colliding!, emptyEntry!], (_lvl, msg) =>
+      logs.push(msg)
+    );
+    expect(fixResult.failures).toHaveLength(1);
+    expect(fixResult.failures[0]?.error).toContain('Destination already exists');
+    // Internal file inside Ant-Man (2015) must remain untouched (no partial file rename)
+    await expect(fs.access(path.join(oldDir, 'Ant-Man.mkv'))).resolves.toBeUndefined();
+    // Empty dir containing hidden OS file must be completely removed
+    await expect(fs.access(emptyHiddenDir)).rejects.toThrow(/ENOENT/i);
+
+    // Resolving with 'ignore' skips without failure
+    const ignoreResult = await applyVerifierRenames(
+      config,
+      [colliding!],
+      (_lvl, msg) => logs.push(msg),
+      undefined,
+      { [colliding!.id]: 'ignore' }
+    );
+    expect(ignoreResult.failures).toEqual([]);
+    await expect(fs.access(path.join(oldDir, 'Ant-Man.mkv'))).resolves.toBeUndefined();
+
+    // Resolving with 'overwrite' replaces the colliding destination directory
+    const overwriteResult = await applyVerifierRenames(
+      config,
+      [colliding!],
+      (_lvl, msg) => logs.push(msg),
+      undefined,
+      { [colliding!.id]: 'overwrite' }
+    );
+    expect(overwriteResult.failures).toEqual([]);
+    expect(overwriteResult.fixedEntries).toBe(1);
+    await expect(fs.access(oldDir)).rejects.toThrow(/ENOENT/i);
+    await expect(
+      fs.access(path.join(existingDest, 'Ant-Man (2015) {imdb-tt0478970}.mkv'))
+    ).resolves.toBeUndefined();
   });
 });

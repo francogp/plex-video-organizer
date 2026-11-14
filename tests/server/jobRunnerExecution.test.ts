@@ -8,7 +8,8 @@ import {
   asClientId,
   asIso639_2Code,
   asTvdbId,
-  type MediaProbeSummary
+  type MediaProbeSummary,
+  type SseProgressEvent
 } from '../../src/domain/types.ts';
 import { loadConfig } from '../../src/server/config.ts';
 
@@ -138,9 +139,13 @@ describe('JobRunner execution pipeline', () => {
     await runner.init();
 
     const events: string[] = [];
+    const progressEvents: SseProgressEvent[] = [];
     const unsub = runner.subscribe({
-      send(evt) {
+      send(evt, data) {
         events.push(evt);
+        if (evt === 'progress') {
+          progressEvents.push(data as SseProgressEvent);
+        }
       }
     });
 
@@ -195,6 +200,37 @@ describe('JobRunner execution pipeline', () => {
     expect(runner.getState().items.map((i) => i.id)).toEqual([ignoredItem.id]);
     expect(events).toContain('progress');
     expect(events).toContain('log');
+    expect(
+      progressEvents.some(
+        (evt) =>
+          evt.stageLabel?.startsWith('Analyzing audio') &&
+          evt.activeTasks.length > 0 &&
+          evt.activeTasks.every((task) => typeof task.slot === 'number' && task.fileName.length > 0)
+      )
+    ).toBe(true);
+    expect(
+      progressEvents.some(
+        (evt) =>
+          evt.stageLabel?.startsWith('Fetching metadata') &&
+          evt.activeTasks.length === 1 &&
+          evt.activeTasks[0]?.slot === 0
+      )
+    ).toBe(true);
+    expect(
+      progressEvents.some(
+        (evt) =>
+          evt.stageLabel?.startsWith('Loudnorm Pass 1/2') &&
+          evt.activeTasks.some(
+            (task) => task.fileName.includes('audio #1 (eng)') && task.percent === 50
+          )
+      )
+    ).toBe(true);
+    expect(
+      progressEvents.some((evt) => evt.stageLabel === 'Cleanup' || evt.stageLabel === 'Cleaning up')
+    ).toBe(true);
+    expect(
+      progressEvents.some((evt) => evt.stageLabel === 'Cleaning up' && evt.activeTasks.length === 1)
+    ).toBe(true);
 
     unsub();
     await fs.rm(tmpDir, { recursive: true, force: true });
@@ -307,7 +343,13 @@ describe('JobRunner execution pipeline', () => {
 
     const clientId = asClientId('c1:t1');
     runner.startScan(clientId);
-    for (let i = 0; i < 40 && (runner.getState().activeJob?.completedItems ?? 0) < 1; i += 1) {
+    for (
+      let i = 0;
+      i < 40 &&
+      (!(runner.getState().activeJob?.stageLabel?.startsWith('Analyzing audio') ?? false) ||
+        (runner.getState().activeJob?.completedItems ?? 0) < 1);
+      i += 1
+    ) {
       await new Promise((r) => setTimeout(r, 10));
     }
 
@@ -468,6 +510,130 @@ describe('JobRunner execution pipeline', () => {
       }
     );
     expect(patchedAnimatedMovie.items[0]?.category).toBe('animated-movies');
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('emits slot-indexed activeTasks for parallel audio tracks during Loudnorm Pass 1/2', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-loudnorm-slots-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const outputMovies = path.join(tmpDir, 'movies');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputMovies, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(inputDir, 'Dual.Audio.2024.mkv'), 'dual-audio-movie');
+
+    const dualProbe: MediaProbeSummary = {
+      ...MOCK_PROBE,
+      audioStreams: [
+        {
+          index: 1,
+          streamOrder: 0,
+          codecName: 'aac',
+          language: asIso639_2Code('eng'),
+          channels: 2,
+          isDefault: true
+        },
+        {
+          index: 2,
+          streamOrder: 1,
+          codecName: 'aac',
+          language: asIso639_2Code('spa'),
+          channels: 2,
+          isDefault: false
+        }
+      ]
+    };
+
+    const ffmpegMod = await import('../../src/server/services/media/ffmpegRunner.ts');
+    vi.mocked(ffmpegMod.probeMedia).mockResolvedValue(dualProbe);
+    const expectedConcurrency = Math.min(2, Math.max(1, os.cpus().length));
+    const releases: (() => void)[] = [];
+    vi.mocked(ffmpegMod.measureLoudnormPass1).mockImplementation(
+      async (_path, _stream, _downmix, _dur, onProgress) => {
+        onProgress?.({ percent: 40, etaSeconds: 8 });
+        if (expectedConcurrency > 1) {
+          await new Promise<void>((resolve) => {
+            releases.push(resolve);
+            if (releases.length === expectedConcurrency) {
+              queueMicrotask(() => {
+                for (const release of releases.splice(0)) {
+                  release();
+                }
+              });
+            }
+          });
+        }
+        return {
+          inputI: '-24.0',
+          inputTp: '-5.0',
+          inputLra: '8.0',
+          inputThresh: '-34.0',
+          targetOffset: '0.5'
+        };
+      }
+    );
+
+    const cfg = loadConfig({
+      CONFIG_DIR: configDir,
+      INPUT_DIR: inputDir,
+      OUTPUT_MOVIES_DIR: outputMovies,
+      OUTPUT_DOCUMENTARIES_DIR: outputMovies,
+      OUTPUT_ANIMATED_MOVIES_DIR: outputMovies,
+      OUTPUT_TV_SHOWS_DIR: outputMovies,
+      OUTPUT_ANIMATED_SERIES_DIR: outputMovies
+    });
+
+    const runner = new JobRunner(cfg);
+    await runner.init();
+    const progressEvents: SseProgressEvent[] = [];
+    const unsub = runner.subscribe({
+      send(evt, data) {
+        if (evt === 'progress') {
+          progressEvents.push(data as SseProgressEvent);
+        }
+      }
+    });
+
+    const clientId = asClientId('loudnorm:1');
+    runner.startScan(clientId);
+    for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+
+    const scannedItem = runner.getState().items[0]!;
+    const patched = await runner.patchItem(clientId, runner.getState().revision, scannedItem.id, {
+      trackSelection: {
+        audioTracks: [
+          { streamOrder: 0, include: true, language: asIso639_2Code('eng'), isDefault: true },
+          { streamOrder: 1, include: true, language: asIso639_2Code('spa'), isDefault: false }
+        ],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false,
+        audioNormalization: { mode: 'loudnorm', codec: 'auto', downmixStereo: false }
+      }
+    });
+
+    const report = await runner.preflight(clientId, patched.revision);
+    await runner.startJob(clientId, report.revision, {});
+    for (let i = 0; i < 50 && runner.getState().phase !== 'IDLE'; i += 1) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+
+    const loudnormEvents = progressEvents.filter((e) =>
+      e.stageLabel?.startsWith('Loudnorm Pass 1/2')
+    );
+    expect(loudnormEvents.length).toBeGreaterThan(0);
+    const peakEvent = loudnormEvents.find((e) => e.activeTasks.length === expectedConcurrency);
+    expect(peakEvent).toBeDefined();
+    expect(peakEvent?.activeTasks.some((t) => t.fileName.includes('audio #1 (eng)'))).toBe(true);
+    if (expectedConcurrency > 1) {
+      expect(peakEvent?.activeTasks.some((t) => t.fileName.includes('audio #2 (spa)'))).toBe(true);
+    }
+
+    unsub();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 });

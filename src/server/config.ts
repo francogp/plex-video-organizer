@@ -32,7 +32,11 @@ const EnvSchema = v.object({
   OUTPUT_TV_SHOWS_DIR: v.optional(v.string()),
   OUTPUT_ANIMATED_SERIES_DIR: v.optional(v.string()),
   OMDB_API_KEY: v.optional(v.string()),
-  TVDB_API_KEY: v.optional(v.string())
+  TVDB_API_KEY: v.optional(v.string()),
+  OPENSUBTITLES_API_KEY: v.optional(v.string()),
+  OPENSUBTITLES_USERNAME: v.optional(v.string()),
+  OPENSUBTITLES_PASSWORD: v.optional(v.string()),
+  SUBDL_API_KEY: v.optional(v.string())
 });
 
 export interface AppConfig {
@@ -49,6 +53,10 @@ export interface AppConfig {
   readonly outputAnimatedSeriesDir: string;
   readonly omdbApiKey?: string;
   readonly tvdbApiKey?: string;
+  readonly openSubtitlesApiKey?: string;
+  readonly openSubtitlesUsername?: string;
+  readonly openSubtitlesPassword?: string;
+  readonly subdlApiKey?: string;
 }
 
 /** Parses and validates environment variables into canonical server configuration. */
@@ -71,14 +79,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       parsed.OUTPUT_ANIMATED_SERIES_DIR || '/data/output/animated-series'
     ),
     omdbApiKey: parsed.OMDB_API_KEY?.trim() || undefined,
-    tvdbApiKey: parsed.TVDB_API_KEY?.trim() || undefined
+    tvdbApiKey: parsed.TVDB_API_KEY?.trim() || undefined,
+    openSubtitlesApiKey: parsed.OPENSUBTITLES_API_KEY?.trim() || undefined,
+    openSubtitlesUsername: parsed.OPENSUBTITLES_USERNAME?.trim() || undefined,
+    openSubtitlesPassword: parsed.OPENSUBTITLES_PASSWORD?.trim() || undefined,
+    subdlApiKey: parsed.SUBDL_API_KEY?.trim() || undefined
   };
 }
 
 /** Projects configured roots into the read-only `MountPathsMap` contract for `/api/state`. */
 export function buildMountPathsMap(config: AppConfig): MountPathsMap {
   return {
+    configDir: config.configDir,
     inputDir: config.inputDir,
+    backupDir: config.backupDir,
     movies: config.outputMoviesDir,
     'animated-movies': config.outputAnimatedMoviesDir,
     'tv-shows': config.outputTvShowsDir,

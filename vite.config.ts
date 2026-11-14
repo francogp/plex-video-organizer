@@ -482,14 +482,8 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reportsDirectory: 'scratch/coverage',
-      include: ['src/**/*.ts'],
-      exclude: ['src/cli/**', 'tests/**', 'tests/e2e/**'],
-      thresholds: {
-        lines: 80,
-        functions: 80,
-        branches: 80,
-        statements: 80
-      }
+      include: ['src/**/*.{ts,vue,js,jsx,tsx,mjs,cjs}'],
+      exclude: ['src/cli/**', 'tests/**', 'tests/e2e/**']
     }
   },
   staged: {

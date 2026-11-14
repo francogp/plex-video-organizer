@@ -7,8 +7,10 @@ import type {
   ClientId,
   ConflictComparison,
   ConflictDecision,
+  ConnectionStatus,
   DiskSpaceCheck,
   EpisodeOrderMode,
+  ExternalSubtitleFile,
   ItemId,
   ItemPatch,
   JobId,
@@ -19,8 +21,10 @@ import type {
   MountPathsMap,
   OrganizerStatePayload,
   ScannedItem,
+  ServerInitStatus,
   SseLogEvent,
   SseProgressEvent,
+  SubtitleCandidate,
   VerifierEntryId,
   VerifierState
 } from '../../domain/types.ts';
@@ -48,6 +52,8 @@ export const useOrganizerStore = defineStore('organizer', () => {
   const clientId = ref<ClientId>(getOrCreateClientId() as ClientId);
   const theme = ref<ThemeMode>(getInitialThemeMode());
   const preferredLanguages = ref<readonly MetadataLanguageCode[]>(getInitialPreferredLanguages());
+  const connectionStatus = ref<ConnectionStatus>('connecting');
+  const serverInitStatus = ref<ServerInitStatus>('initializing');
   const phase = ref<JobPhase>('IDLE');
   const revision = ref<number>(0);
   const lockOwnerClientId = ref<ClientId | null>(null);
@@ -76,6 +82,10 @@ export const useOrganizerStore = defineStore('organizer', () => {
     (): boolean => phase.value === 'SCANNING' || phase.value === 'PROCESSING'
   );
 
+  const isInitializing = computed(
+    (): boolean => connectionStatus.value !== 'ready' || serverInitStatus.value !== 'ready'
+  );
+
   const hasUnresolvedConflicts = computed((): boolean =>
     preflightConflicts.value.some(
       (c): boolean =>
@@ -85,7 +95,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
   );
 
   const canProcessQueue = computed((): boolean => {
-    if (isLockedByOther.value || isBusy.value) {
+    if (isInitializing.value || isLockedByOther.value || isBusy.value) {
       return false;
     }
     const included = items.value.filter((item) => item.include);
@@ -112,6 +122,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
 
   function applyServerState(state: OrganizerStatePayload): void {
     phase.value = state.phase;
+    serverInitStatus.value = state.initStatus ?? 'ready';
     revision.value = state.revision;
     lockOwnerClientId.value = state.lockOwnerClientId;
     mountPaths.value = state.mountPaths;
@@ -198,11 +209,18 @@ export const useOrganizerStore = defineStore('organizer', () => {
 
   async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
     errorMessage.value = null;
-    const { ok, status, data } = await executeJsonFetch<T>(url, init);
-    if (!ok) {
-      throwApiError(status, data);
+    try {
+      const { ok, status, data } = await executeJsonFetch<T>(url, init);
+      if (!ok) {
+        throwApiError(status, data);
+      }
+      return data;
+    } catch (err) {
+      if (errorMessage.value === null) {
+        errorMessage.value = err instanceof Error ? err.message : String(err);
+      }
+      throw err;
     }
-    return data;
   }
 
   async function requestRevisionMutation<T>(url: string, buildInit: () => RequestInit): Promise<T> {
@@ -232,6 +250,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
   async function fetchState(): Promise<void> {
     applyThemeToDocument(theme.value);
     const state = await requestJson<OrganizerStatePayload>('/api/state');
+    connectionStatus.value = 'ready';
     applyServerState(state);
     const savedLangs = loadSavedPreferredLanguages();
     if (
@@ -239,6 +258,24 @@ export const useOrganizerStore = defineStore('organizer', () => {
       JSON.stringify(savedLangs) !== JSON.stringify(state.preferredLanguages ?? [])
     ) {
       await setPreferredLanguages(savedLangs);
+    }
+  }
+
+  let bootstrapCall: gsap.core.Tween | null = null;
+  const BOOTSTRAP_RETRY_SECONDS = 0.5;
+
+  async function bootstrapConnection(): Promise<void> {
+    try {
+      await fetchState();
+      connectSse();
+      await refreshPreflightSafely();
+    } catch {
+      errorMessage.value = null;
+      bootstrapCall?.kill();
+      bootstrapCall = gsap.delayedCall(BOOTSTRAP_RETRY_SECONDS, (): void => {
+        bootstrapCall = null;
+        void bootstrapConnection();
+      });
     }
   }
 
@@ -325,8 +362,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
       if (activeJob.value && activeJob.value.jobId === prog.jobId) {
         activeJob.value = {
           ...activeJob.value,
-          currentItemId: prog.itemId ?? activeJob.value.currentItemId,
-          currentFile: prog.currentFile ?? activeJob.value.currentFile,
+          activeTasks: prog.activeTasks,
           totalItems: prog.totalItems ?? activeJob.value.totalItems,
           completedItems: prog.completedItems ?? activeJob.value.completedItems,
           currentPercent: prog.percent,
@@ -380,10 +416,20 @@ export const useOrganizerStore = defineStore('organizer', () => {
     clearConflictResolutions();
     lastSseActivityAt = performance.now();
     await requestJson<{ readonly revision: number }>('/api/scan', { method: 'POST' });
+    if (phase.value !== 'SCANNING') {
+      phase.value = 'SCANNING';
+    }
     ensureSyncFallback();
   }
 
-  async function scanVerifier(): Promise<void> {
+  async function skipScanTask(itemId: ItemId): Promise<void> {
+    await requestJson<{ readonly skipped: boolean }>('/api/scan/skip', {
+      method: 'POST',
+      body: JSON.stringify({ itemId })
+    });
+  }
+
+  async function scanVerifier(recalculateTags = false): Promise<void> {
     lastSseActivityAt = performance.now();
     verifierState.value = {
       ...verifierState.value,
@@ -392,15 +438,22 @@ export const useOrganizerStore = defineStore('organizer', () => {
         completed: 0,
         total: 0,
         percent: 0,
-        stageLabel: 'Discovering libraries...'
+        stageLabel: 'Discovering libraries...',
+        activeTasks: []
       },
       lastFixResult: null
     };
-    await requestJson<{ readonly revision: number }>('/api/verifier/scan', { method: 'POST' });
+    await requestJson<{ readonly revision: number }>('/api/verifier/scan', {
+      method: 'POST',
+      body: JSON.stringify({ recalculateTags })
+    });
     ensureSyncFallback();
   }
 
-  async function fixVerifier(entryIds: readonly VerifierEntryId[]): Promise<void> {
+  async function fixVerifier(
+    entryIds: readonly VerifierEntryId[],
+    conflictResolutions?: Readonly<Partial<Record<VerifierEntryId, ConflictDecision>>>
+  ): Promise<void> {
     if (entryIds.length === 0) {
       return;
     }
@@ -412,13 +465,14 @@ export const useOrganizerStore = defineStore('organizer', () => {
         completed: 0,
         total: entryIds.length,
         percent: 0,
-        stageLabel: 'Applying bottom-up renames...'
+        stageLabel: 'Applying bottom-up renames...',
+        activeTasks: []
       },
       lastFixResult: null
     };
     await requestJson<{ readonly revision: number }>('/api/verifier/fix', {
       method: 'POST',
-      body: JSON.stringify({ entryIds })
+      body: JSON.stringify({ entryIds, conflictResolutions })
     });
     ensureSyncFallback();
   }
@@ -499,6 +553,38 @@ export const useOrganizerStore = defineStore('organizer', () => {
     return res.candidates;
   }
 
+  async function searchItemSubtitles(itemId: ItemId): Promise<readonly SubtitleCandidate[]> {
+    const res = await requestJson<{ readonly candidates: readonly SubtitleCandidate[] }>(
+      `/api/queue/items/${encodeURIComponent(itemId)}/subtitles/search`,
+      { method: 'POST', body: JSON.stringify({}) }
+    );
+    return res.candidates;
+  }
+
+  async function downloadItemSubtitle(
+    itemId: ItemId,
+    candidate?: SubtitleCandidate
+  ): Promise<ExternalSubtitleFile> {
+    const res = await requestJson<{
+      readonly state: OrganizerStatePayload;
+      readonly downloaded: ExternalSubtitleFile;
+    }>(`/api/queue/items/${encodeURIComponent(itemId)}/subtitles/download`, {
+      method: 'POST',
+      body: JSON.stringify({ revision: revision.value, candidate })
+    });
+    applyServerState(res.state);
+    return res.downloaded;
+  }
+
+  async function openItemInPlayer(
+    itemId: ItemId
+  ): Promise<{ readonly launched: boolean; readonly reason?: string }> {
+    return requestJson<{ readonly launched: boolean; readonly reason?: string }>(
+      `/api/queue/items/${encodeURIComponent(itemId)}/open-player`,
+      { method: 'POST', body: JSON.stringify({}) }
+    );
+  }
+
   async function runPreflight(): Promise<boolean> {
     return enqueueMutation(async () => {
       const res = await requestRevisionMutation<{
@@ -540,6 +626,9 @@ export const useOrganizerStore = defineStore('organizer', () => {
     clientId,
     theme,
     preferredLanguages,
+    connectionStatus,
+    serverInitStatus,
+    isInitializing,
     phase,
     revision,
     lockOwnerClientId,
@@ -559,15 +648,20 @@ export const useOrganizerStore = defineStore('organizer', () => {
     toggleTheme,
     setPreferredLanguages,
     fetchState,
+    bootstrapConnection,
     connectSse,
     disconnectSse,
     startScan,
+    skipScanTask,
     scanVerifier,
     fixVerifier,
     patchItem,
     patchItemsBulk,
     applyTracksToSeries,
     searchMetadata,
+    searchItemSubtitles,
+    downloadItemSubtitle,
+    openItemInPlayer,
     runPreflight,
     refreshPreflightSafely,
     setConflictResolutions,

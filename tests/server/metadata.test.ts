@@ -761,30 +761,39 @@ describe('metadata clients', () => {
       return origAccess(p, mode);
     });
 
+    const { createHash } = await import('node:crypto');
+    const readonlyDir = pathMod.join(osMod.tmpdir(), 'readonly-config-dir');
+    const fallbackHash = createHash('sha256')
+      .update(pathMod.resolve(readonlyDir))
+      .digest('hex')
+      .slice(0, 8);
+    const fallbackDbPath = pathMod.join(
+      osMod.tmpdir(),
+      `plex-video-organizer-${fallbackHash}.sqlite`
+    );
+    await fsPromises.rm(fallbackDbPath, { force: true });
+
     try {
-      await configureMetadataCache(pathMod.join(osMod.tmpdir(), 'readonly-config-dir'));
+      await configureMetadataCache(readonlyDir);
       setCachedMetadata('movieSearch', 'test-eacces-1', []);
       setCachedMetadata('movieSearch', 'test-eacces-2', []);
-      await new Promise((r) => setTimeout(r, 320));
+      await new Promise((r) => setTimeout(r, 50));
       expect(warnSpy).toHaveBeenCalledTimes(1);
 
       // Re-configuring with unwritable configDir rehydrates fallback cache without duplicate warnings
-      await configureMetadataCache(pathMod.join(osMod.tmpdir(), 'readonly-config-dir'));
+      await configureMetadataCache(readonlyDir);
       expect(getCachedMetadata('movieSearch', 'test-eacces-1')).toEqual([]);
       expect(warnSpy).toHaveBeenCalledTimes(2);
       setCachedMetadata('movieSearch', 'test-eacces-3', []);
-      await new Promise((r) => setTimeout(r, 320));
+      await new Promise((r) => setTimeout(r, 50));
       expect(warnSpy).toHaveBeenCalledTimes(2);
     } finally {
       accessSpy.mockRestore();
       writeSpy.mockRestore();
       warnSpy.mockRestore();
-      await fsPromises.rm(
-        pathMod.join(osMod.tmpdir(), 'plex-video-organizer-metadata-cache.json'),
-        {
-          force: true
-        }
-      );
+      await fsPromises.rm(fallbackDbPath, { force: true });
+      await fsPromises.rm(`${fallbackDbPath}-wal`, { force: true });
+      await fsPromises.rm(`${fallbackDbPath}-shm`, { force: true });
     }
   });
 });

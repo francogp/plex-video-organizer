@@ -9,6 +9,7 @@ import {
 } from '../domain/constants.ts';
 import type {
   AudioNormalizationConfig,
+  ConflictComparison,
   ConflictDecision,
   EpisodeOrderMode,
   ItemId,
@@ -17,17 +18,22 @@ import type {
   MetadataLanguageCode,
   OutputCategory,
   ScannedItem,
+  SubtitleCandidate,
   TrackSelection,
+  VerifierEntry,
   VerifierEntryId
 } from '../domain/types.ts';
 import ConflictResolutionModal from './components/ConflictResolutionModal.vue';
 import MetadataSearchModal from './components/MetadataSearchModal.vue';
-import QueueTable from './components/QueueTable.vue';
+import OrganizerStatusBar from './components/OrganizerStatusBar.vue';
+import QueueTable, { type SubtitlePickerViewState } from './components/QueueTable.vue';
+import ServerLogsPanel from './components/ServerLogsPanel.vue';
+import SubtitlePreviewModal from './components/SubtitlePreviewModal.vue';
 import TrackInspectorModal from './components/TrackInspectorModal.vue';
 import VerifierView from './components/VerifierView.vue';
 import { useGsapMotion } from './composables/useGsapMotion.ts';
 import { useOrganizerStore } from './stores/organizerStore.ts';
-import { formatBuenosAiresTimestamp, formatEta } from './utils/formatters.ts';
+import { formatEta } from './utils/formatters.ts';
 
 declare const __APP_SEMVER__: string;
 
@@ -51,6 +57,79 @@ const inspectingItem = ref<ScannedItem | null>(null);
 const searchingItem = ref<ScannedItem | null>(null);
 const bulkSearchingItems = ref<readonly ScannedItem[] | null>(null);
 const selectedVerifierIds = ref<readonly VerifierEntryId[]>([]);
+const recalculateVerifierTags = ref(false);
+const previewingSubtitleItem = ref<ScannedItem | null>(null);
+const subtitlePicker = ref<SubtitlePickerViewState | null>(null);
+
+async function handleSearchSubtitles(item: ScannedItem): Promise<void> {
+  subtitlePicker.value = {
+    itemId: item.id,
+    loading: true,
+    downloadingId: null,
+    error: null,
+    candidates: []
+  };
+  try {
+    const candidates = await store.searchItemSubtitles(item.id);
+    if (subtitlePicker.value?.itemId !== item.id) {
+      return;
+    }
+    subtitlePicker.value = {
+      itemId: item.id,
+      loading: false,
+      downloadingId: null,
+      error: candidates.length === 0 ? 'No Spanish subtitles found.' : null,
+      candidates
+    };
+  } catch (err) {
+    if (subtitlePicker.value?.itemId !== item.id) {
+      return;
+    }
+    subtitlePicker.value = {
+      itemId: item.id,
+      loading: false,
+      downloadingId: null,
+      error: err instanceof Error ? err.message : String(err),
+      candidates: []
+    };
+  }
+}
+
+async function handleDownloadSubtitle(
+  item: ScannedItem,
+  candidate: SubtitleCandidate
+): Promise<void> {
+  if (subtitlePicker.value) {
+    subtitlePicker.value = {
+      ...subtitlePicker.value,
+      downloadingId: candidate.id,
+      error: null
+    };
+  }
+  try {
+    await store.downloadItemSubtitle(item.id, candidate);
+    subtitlePicker.value = null;
+  } catch (err) {
+    if (subtitlePicker.value?.itemId === item.id) {
+      subtitlePicker.value = {
+        ...subtitlePicker.value,
+        downloadingId: null,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+}
+
+function closeSubtitlePicker(): void {
+  subtitlePicker.value = null;
+}
+
+async function handleTestSubtitleInPlayer(item: ScannedItem): Promise<void> {
+  const result = await store.openItemInPlayer(item.id);
+  if (!result.launched) {
+    previewingSubtitleItem.value = item;
+  }
+}
 const conflictsOpen = ref(false);
 const confirmUnlockOpen = ref(false);
 const mountsExpanded = ref(false);
@@ -59,11 +138,15 @@ const activeTab = ref<'organizer' | 'verifier'>('organizer');
 const { animateShellTimeline, animateEntrance } = useGsapMotion(rootRef);
 
 onMounted(async (): Promise<void> => {
-  await store.fetchState();
-  store.connectSse();
   animateShellTimeline();
-  await store.refreshPreflightSafely();
+  await store.bootstrapConnection();
 });
+
+const initBannerText = computed((): string =>
+  store.connectionStatus === 'connecting'
+    ? 'Connecting to backend server... Controls will unlock automatically once ready.'
+    : 'Server is initializing mounts, cache, and workspace cleanup... Controls will unlock automatically when ready.'
+);
 
 watch(
   () => store.phase,
@@ -223,50 +306,86 @@ async function handleCancelJob(): Promise<void> {
   }
 }
 
-const activeStageParts = computed<{ readonly step: string; readonly fileName: string }>(() => {
-  const job = store.activeJob;
-  if (!job?.stageLabel && !job?.currentFile) {
-    return { step: '', fileName: '' };
-  }
-  const label = job.stageLabel ?? '';
-  if (job.currentFile) {
-    return {
-      step: label,
-      fileName: job.currentFile
-    };
-  }
-  const dotIdx = label.lastIndexOf(' · ');
-  if (dotIdx !== -1) {
-    return {
-      step: label.slice(0, dotIdx),
-      fileName: label.slice(dotIdx + 3)
-    };
-  }
-  const colonIdx = label.indexOf(': ');
-  if (colonIdx !== -1) {
-    return {
-      step: label.slice(0, colonIdx),
-      fileName: label.slice(colonIdx + 2)
-    };
-  }
-  const currentItem = job.currentItemId
-    ? store.items.find((item): boolean => item.id === job.currentItemId)
-    : undefined;
-  if (currentItem && label.endsWith(currentItem.fileName)) {
-    return {
-      step: label.slice(0, label.length - currentItem.fileName.length).trim(),
-      fileName: currentItem.fileName
-    };
-  }
-  return {
-    step: label,
-    fileName: currentItem?.fileName ?? ''
-  };
-});
-
 async function handleForceUnlock(): Promise<void> {
   confirmUnlockOpen.value = false;
   await store.unlock(true);
+}
+
+const verifierConflictResolutions = ref<Partial<Record<VerifierEntryId, ConflictDecision>>>({});
+const verifierConflictsOpen = ref(false);
+const verifierConflictEntries = ref<readonly VerifierEntry[]>([]);
+const verifierFixAfterResolve = ref(false);
+
+watch(
+  () => store.verifierState.entries,
+  (): void => {
+    verifierConflictResolutions.value = {};
+    verifierConflictsOpen.value = false;
+    verifierConflictEntries.value = [];
+    verifierFixAfterResolve.value = false;
+  }
+);
+
+const verifierConflictComparisons = computed<readonly ConflictComparison<VerifierEntryId>[]>(() =>
+  verifierConflictEntries.value
+    .map((e) => e.collisionComparison)
+    .filter((c): c is ConflictComparison<VerifierEntryId> => c !== undefined)
+);
+
+function handleResolveVerifierConflict(entry: VerifierEntry): void {
+  if (!entry.collisionComparison) {
+    return;
+  }
+  verifierConflictEntries.value = [entry];
+  verifierFixAfterResolve.value = false;
+  verifierConflictsOpen.value = true;
+}
+
+async function handleFixVerifierSelected(): Promise<void> {
+  const selectedSet = new Set(selectedVerifierIds.value);
+  const unresolvedCollisions = store.verifierState.entries.filter(
+    (entry) =>
+      selectedSet.has(entry.id) &&
+      entry.issues.includes('DESTINATION_COLLISION') &&
+      entry.collisionComparison !== undefined &&
+      verifierConflictResolutions.value[entry.id] === undefined
+  );
+  if (unresolvedCollisions.length > 0) {
+    verifierConflictEntries.value = unresolvedCollisions;
+    verifierFixAfterResolve.value = true;
+    verifierConflictsOpen.value = true;
+    return;
+  }
+  await store.fixVerifier(selectedVerifierIds.value, verifierConflictResolutions.value);
+}
+
+function applyVerifierConflictMap(
+  resolutions: Partial<Record<VerifierEntryId, ConflictDecision>>
+): void {
+  verifierConflictResolutions.value = {
+    ...verifierConflictResolutions.value,
+    ...resolutions
+  };
+}
+
+function handleSaveVerifierConflicts(
+  resolutions: Partial<Record<VerifierEntryId, ConflictDecision>>
+): void {
+  applyVerifierConflictMap(resolutions);
+  verifierConflictsOpen.value = false;
+  verifierFixAfterResolve.value = false;
+}
+
+async function handleConfirmVerifierConflicts(
+  resolutions: Partial<Record<VerifierEntryId, ConflictDecision>>
+): Promise<void> {
+  applyVerifierConflictMap(resolutions);
+  const shouldFix = verifierFixAfterResolve.value;
+  verifierConflictsOpen.value = false;
+  verifierFixAfterResolve.value = false;
+  if (shouldFix) {
+    await store.fixVerifier(selectedVerifierIds.value, verifierConflictResolutions.value);
+  }
 }
 const availableExtraLanguages = computed<readonly MetadataLanguageCode[]>(() =>
   METADATA_LANGUAGE_CODES.filter((code) => !store.preferredLanguages.includes(code))
@@ -305,6 +424,52 @@ function handleAddPreferredLanguage(evt: Event): void {
   void store.setPreferredLanguages([...store.preferredLanguages, value]);
   select.value = '';
 }
+
+const phaseBadgeTitle = computed<string | undefined>(() =>
+  store.phase === 'PREFLIGHT_BLOCKED'
+    ? 'Pre-flight check found destination conflicts or insufficient disk space'
+    : undefined
+);
+
+const processQueueTitle = computed<string>(() => {
+  if (store.hasUnresolvedConflicts) {
+    return 'Resolve all output conflicts in the table first';
+  }
+  return store.canProcessQueue
+    ? 'Process included items'
+    : 'Resolve Match Candidate and Tracks for all included items first';
+});
+
+const activeJobSummaryText = computed<string>(() => {
+  const job = store.activeJob;
+  const label = phaseLabel(store.phase);
+  if (!job || job.totalItems <= 0) {
+    return `${label} · Scanning...`;
+  }
+  const etaPart = job.etaSeconds !== undefined ? ` · ${formatEta(job.etaSeconds)}` : '';
+  const stagePart = job.stageLabel ? ` · ${job.stageLabel}` : '';
+  return `${label} (${job.jobId}) · ${String(job.completedItems)}/${String(job.totalItems)} (${String(job.currentPercent)}%)${etaPart}${stagePart}`;
+});
+
+const mountsToggle = computed(() =>
+  mountsExpanded.value ? { icon: '📂', label: 'Hide Mounts' } : { icon: '📁', label: 'Mounts' }
+);
+
+const themeToggle = computed(() =>
+  store.theme === 'dark' ? { icon: '☀️', label: 'Light Mode' } : { icon: '🌙', label: 'Dark Mode' }
+);
+
+const verifierBusy = computed<boolean>(
+  () => store.isLockedByOther || store.verifierState.scanning || store.verifierState.fixing
+);
+
+const verifierScanButton = computed(() =>
+  store.verifierState.scanning
+    ? { icon: '⏳', label: 'Scanning Libraries...' }
+    : { icon: '🔍', label: 'Scan Libraries' }
+);
+
+const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(store.mountPaths));
 </script>
 
 <template>
@@ -328,11 +493,7 @@ function handleAddPreferredLanguage(evt: Event): void {
             <span
               class="vo-badge vo-phase-badge"
               :data-phase="store.phase"
-              :title="
-                store.phase === 'PREFLIGHT_BLOCKED'
-                  ? 'Pre-flight check found destination conflicts or insufficient disk space'
-                  : undefined
-              "
+              :title="phaseBadgeTitle"
             >
               {{ phaseLabel(store.phase) }}
             </span>
@@ -373,19 +534,19 @@ function handleAddPreferredLanguage(evt: Event): void {
       </div>
       <div class="vo-header-actions">
         <button type="button" class="vo-btn" @click="mountsExpanded = !mountsExpanded">
-          <span aria-hidden="true">{{ mountsExpanded ? '📂' : '📁' }}</span>
-          {{ mountsExpanded ? 'Hide Mounts' : 'Mounts' }}
+          <span aria-hidden="true">{{ mountsToggle.icon }}</span>
+          {{ mountsToggle.label }}
         </button>
         <button type="button" class="vo-btn" @click="store.toggleTheme()">
-          <span aria-hidden="true">{{ store.theme === 'dark' ? '☀️' : '🌙' }}</span>
-          {{ store.theme === 'dark' ? 'Light Mode' : 'Dark Mode' }}
+          <span aria-hidden="true">{{ themeToggle.icon }}</span>
+          {{ themeToggle.label }}
         </button>
         <template v-if="activeTab === 'organizer'">
           <button
             type="button"
             class="vo-btn vo-btn--scan"
-            :disabled="store.isLockedByOther || store.isBusy"
-            @click="store.startScan()"
+            :disabled="store.isInitializing || store.isLockedByOther || store.isBusy"
+            @click="void store.startScan().catch(() => undefined)"
           >
             <span aria-hidden="true">🔍</span> Scan Input
           </button>
@@ -393,13 +554,7 @@ function handleAddPreferredLanguage(evt: Event): void {
             type="button"
             class="vo-btn vo-btn--primary"
             :disabled="!store.canProcessQueue || store.hasUnresolvedConflicts"
-            :title="
-              store.hasUnresolvedConflicts
-                ? 'Resolve all output conflicts in the table first'
-                : store.canProcessQueue
-                  ? 'Process included items'
-                  : 'Resolve Match Candidate and Tracks for all included items first'
-            "
+            :title="processQueueTitle"
             @click="handleProcess()"
           >
             <span aria-hidden="true">⚡</span>
@@ -408,27 +563,29 @@ function handleAddPreferredLanguage(evt: Event): void {
           </button>
         </template>
         <template v-else>
+          <label
+            class="vo-btn vo-toggle-pill"
+            :data-active="recalculateVerifierTags"
+            :aria-disabled="verifierBusy"
+            title="Run FFprobe on output movie files to recalculate Plex [tags] (DV, HDR10+, audio channels, Spanish Audio)"
+          >
+            <input v-model="recalculateVerifierTags" type="checkbox" :disabled="verifierBusy" />
+            <span>Recalculate [tags]</span>
+          </label>
           <button
             type="button"
             class="vo-btn vo-btn--scan"
-            :disabled="
-              store.isLockedByOther || store.verifierState.scanning || store.verifierState.fixing
-            "
-            @click="store.scanVerifier()"
+            :disabled="store.isInitializing || verifierBusy"
+            @click="store.scanVerifier(recalculateVerifierTags)"
           >
-            <span aria-hidden="true">{{ store.verifierState.scanning ? '⏳' : '🔍' }}</span>
-            {{ store.verifierState.scanning ? 'Scanning Libraries...' : 'Scan Libraries' }}
+            <span aria-hidden="true">{{ verifierScanButton.icon }}</span>
+            {{ verifierScanButton.label }}
           </button>
           <button
             type="button"
             class="vo-btn vo-btn--primary"
-            :disabled="
-              store.isLockedByOther ||
-              store.verifierState.scanning ||
-              store.verifierState.fixing ||
-              selectedVerifierIds.length === 0
-            "
-            @click="store.fixVerifier(selectedVerifierIds)"
+            :disabled="store.isInitializing || verifierBusy || selectedVerifierIds.length === 0"
+            @click="handleFixVerifierSelected"
           >
             <template v-if="store.verifierState.fixing">
               <span aria-hidden="true">⏳</span> Renaming...
@@ -443,12 +600,14 @@ function handleAddPreferredLanguage(evt: Event): void {
       </div>
     </header>
 
-    <section v-if="mountsExpanded && store.mountPaths" class="vo-mounts vo-panel vo-mono">
-      <div>input: {{ store.mountPaths.inputDir }}</div>
-      <div>movies: {{ store.mountPaths.movies }}</div>
-      <div>animated-movies: {{ store.mountPaths['animated-movies'] }}</div>
-      <div>tv-shows: {{ store.mountPaths['tv-shows'] }}</div>
-      <div>animated-series: {{ store.mountPaths['animated-series'] }}</div>
+    <section v-if="mountsVisible" class="vo-mounts vo-panel vo-mono">
+      <div>config: {{ store.mountPaths!.configDir }}</div>
+      <div>input: {{ store.mountPaths!.inputDir }}</div>
+      <div>backup: {{ store.mountPaths!.backupDir }}</div>
+      <div>movies: {{ store.mountPaths!.movies }}</div>
+      <div>animated-movies: {{ store.mountPaths!['animated-movies'] }}</div>
+      <div>tv-shows: {{ store.mountPaths!['tv-shows'] }}</div>
+      <div>animated-series: {{ store.mountPaths!['animated-series'] }}</div>
     </section>
 
     <section class="vo-lang-bar vo-panel" aria-label="Preferred Title Language Order">
@@ -493,6 +652,7 @@ function handleAddPreferredLanguage(evt: Event): void {
           v-if="availableExtraLanguages.length > 0"
           class="vo-lang-bar__select"
           aria-label="Add preferred title language"
+          :disabled="store.isInitializing"
           @change="handleAddPreferredLanguage"
         >
           <option value="">+ Add language</option>
@@ -501,6 +661,18 @@ function handleAddPreferredLanguage(evt: Event): void {
           </option>
         </select>
       </div>
+    </section>
+
+    <section
+      v-if="store.isInitializing"
+      class="vo-banner vo-banner--initializing vo-panel"
+      role="status"
+      aria-live="polite"
+    >
+      <span>
+        <span aria-hidden="true">⏳</span>
+        {{ initBannerText }}
+      </span>
     </section>
 
     <section v-if="store.isLockedByOther" class="vo-banner vo-panel">
@@ -524,72 +696,32 @@ function handleAddPreferredLanguage(evt: Event): void {
     </section>
 
     <template v-if="activeTab === 'organizer'">
-      <section
-        class="vo-status-bar vo-panel"
-        :class="{
-          'vo-status-bar--busy': store.isBusy || store.activeJob,
-          'vo-status-bar--error': Boolean(store.errorMessage)
-        }"
-        aria-live="polite"
-      >
-        <template v-if="store.isBusy || store.activeJob">
-          <div class="vo-progress__stack">
-            <div class="vo-progress__row">
-              <button
-                v-if="!store.isLockedByOther"
-                type="button"
-                class="vo-btn vo-btn--danger vo-progress__cancel"
-                :disabled="isCancellingJob"
-                @click="handleCancelJob"
-              >
-                <span aria-hidden="true">🛑</span>
-                {{ isCancellingJob ? 'Cancelling...' : 'Cancel Job' }}
-              </button>
-              <div class="vo-progress__meta vo-mono">
-                <template v-if="store.activeJob && store.activeJob.totalItems > 0">
-                  {{ phaseLabel(store.phase) }} ({{ store.activeJob.jobId }}) ·
-                  {{ store.activeJob.completedItems }}/{{ store.activeJob.totalItems }} ({{
-                    store.activeJob.currentPercent
-                  }}%){{
-                    store.activeJob.etaSeconds !== undefined
-                      ? ` · ${formatEta(store.activeJob.etaSeconds)}`
-                      : ''
-                  }}{{ activeStageParts.step ? ` · ${activeStageParts.step}` : '' }}
-                </template>
-                <template v-else> {{ phaseLabel(store.phase) }} · Scanning... </template>
-              </div>
-            </div>
-            <div v-if="activeStageParts.fileName" class="vo-progress__file vo-mono">
-              {{ activeStageParts.fileName }}
-            </div>
-            <progress
-              v-if="store.activeJob && store.activeJob.totalItems > 0"
-              class="vo-progress__bar"
-              :value="store.activeJob.currentPercent"
-              max="100"
-            />
-            <progress v-else class="vo-progress__bar" />
-          </div>
-        </template>
-        <template v-else-if="store.errorMessage">
-          <span class="vo-status-bar__error" role="alert">{{ store.errorMessage }}</span>
-          <button type="button" class="vo-btn" @click="store.clearError()">
-            <span aria-hidden="true">✖️</span> Dismiss
-          </button>
-        </template>
-        <template v-else>
-          <span class="vo-status-bar__idle vo-mono">
-            Ready · {{ store.items.length }} item(s) in queue
-          </span>
-        </template>
-      </section>
+      <OrganizerStatusBar
+        :is-busy="store.isBusy"
+        :active-job="store.activeJob"
+        :error-message="store.errorMessage"
+        :is-locked-by-other="store.isLockedByOther"
+        :is-cancelling-job="isCancellingJob"
+        :can-skip-tasks="store.activeJob?.jobId === 'scan' && !store.isLockedByOther"
+        :item-count="store.items.length"
+        :summary-text="activeJobSummaryText"
+        :phase="store.phase"
+        @cancel="handleCancelJob"
+        @dismiss-error="store.clearError()"
+        @skip-task="void store.skipScanTask($event).catch(() => undefined)"
+      />
 
       <section class="vo-panel">
         <QueueTable
           :items="store.items"
-          :disabled="store.isLockedByOther || store.isBusy"
+          :disabled="store.isInitializing || store.isLockedByOther || store.isBusy"
           :conflicts="store.preflightConflicts"
           :conflict-resolutions="store.savedConflictResolutions"
+          :subtitle-picker="subtitlePicker"
+          @search-subtitles="handleSearchSubtitles"
+          @download-subtitle="handleDownloadSubtitle"
+          @close-subtitle-picker="closeSubtitlePicker"
+          @preview-subtitle="handleTestSubtitleInPlayer"
           @toggle-include="(item, inc) => patchItemAndRefresh(item.id, { include: inc })"
           @change-media-kind="
             (item, kind: MediaKind) => patchItemAndRefresh(item.id, { mediaKind: kind })
@@ -628,44 +760,14 @@ function handleAddPreferredLanguage(evt: Event): void {
     <VerifierView
       v-else
       :state="store.verifierState"
-      :disabled="store.isLockedByOther"
+      :disabled="store.isInitializing || store.isLockedByOther"
+      :conflict-resolutions="verifierConflictResolutions"
       @update:selected-ids="(ids: readonly VerifierEntryId[]) => (selectedVerifierIds = ids)"
       @dismiss-error="store.clearVerifierErrors()"
+      @resolve-conflict="handleResolveVerifierConflict"
     />
 
-    <section class="vo-logs vo-panel" aria-label="Server logs">
-      <div class="vo-logs__header">
-        <h2>
-          Server Logs
-          <span class="vo-badge vo-badge--compact">{{ store.logs.length }}</span>
-        </h2>
-        <button
-          type="button"
-          class="vo-btn"
-          :disabled="store.logs.length === 0"
-          @click="store.clearLogs()"
-        >
-          <span aria-hidden="true">🧹</span> Clear
-        </button>
-      </div>
-      <div v-if="store.logs.length === 0" class="vo-logs__empty vo-mono">
-        No server logs yet. Click Scan Input or Process Queue to see activity.
-      </div>
-      <ul v-else class="vo-logs__list vo-mono">
-        <li
-          v-for="(entry, idx) in store.logs"
-          :key="`${entry.timestamp}-${idx}`"
-          class="vo-logs__item"
-          :data-level="entry.level"
-        >
-          <time class="vo-logs__time" :datetime="entry.timestamp">{{
-            formatBuenosAiresTimestamp(entry.timestamp)
-          }}</time>
-          <span class="vo-logs__level">[{{ entry.level.toUpperCase() }}]</span>
-          <span class="vo-logs__msg">{{ entry.message }}</span>
-        </li>
-      </ul>
-    </section>
+    <ServerLogsPanel :logs="store.logs" @clear="store.clearLogs()" />
 
     <MetadataSearchModal
       :item="searchingItem"
@@ -686,12 +788,30 @@ function handleAddPreferredLanguage(evt: Event): void {
       @save="handleSaveTracks"
     />
 
+    <SubtitlePreviewModal :item="previewingSubtitleItem" @close="previewingSubtitleItem = null" />
+
     <ConflictResolutionModal
       :open="conflictsOpen"
       :conflicts="store.preflightConflicts"
       :disk-space="store.preflightDiskSpace"
       @close="conflictsOpen = false"
       @confirm="handleConfirmConflicts"
+    />
+
+    <ConflictResolutionModal
+      :open="verifierConflictsOpen"
+      title="Destination Conflicts"
+      :conflicts="verifierConflictComparisons"
+      :initial-resolutions="verifierConflictResolutions"
+      :allow-save-only="true"
+      @close="
+        () => {
+          verifierConflictsOpen = false;
+          verifierFixAfterResolve = false;
+        }
+      "
+      @save="handleSaveVerifierConflicts"
+      @confirm="handleConfirmVerifierConflicts"
     />
   </main>
 </template>
@@ -858,27 +978,6 @@ function handleAddPreferredLanguage(evt: Event): void {
   margin-inline-start: auto;
 }
 
-.vo-progress__row {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-start;
-  align-items: center;
-  gap: var(--vo-space-3);
-  width: 100%;
-}
-
-.vo-progress__file {
-  width: 100%;
-  min-width: 0;
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-  overflow-wrap: anywhere;
-}
-
-.vo-progress__cancel {
-  flex-shrink: 0;
-}
-
 .vo-tabs {
   display: inline-flex;
   gap: var(--vo-space-1);
@@ -908,74 +1007,6 @@ function handleAddPreferredLanguage(evt: Event): void {
   }
 }
 
-.vo-logs {
-  display: grid;
-  gap: var(--vo-space-3);
-  padding: var(--vo-space-4);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-lg);
-  background: var(--vo-surface-gradient);
-  box-shadow: var(--vo-shadow-panel);
-}
-
-.vo-logs__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-2);
-
-  h2 {
-    margin: 0;
-    font-size: var(--vo-text-md);
-  }
-}
-
-.vo-logs__empty {
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-}
-
-.vo-logs__list {
-  display: grid;
-  gap: var(--vo-space-1);
-  max-height: 240px;
-  margin: 0;
-  padding: var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background-color: var(--vo-bg);
-  font-size: var(--vo-text-xs);
-  overflow-y: auto;
-  list-style: none;
-}
-
-.vo-logs__item {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--vo-space-2);
-  line-height: 1.4;
-
-  &[data-level='error'] {
-    color: var(--vo-danger);
-  }
-
-  &[data-level='warn'] {
-    color: var(--vo-warning);
-  }
-}
-
-.vo-logs__time {
-  color: var(--vo-text-muted);
-}
-
-.vo-logs__level {
-  font-weight: var(--vo-weight-semibold);
-}
-
-.vo-logs__msg {
-  overflow-wrap: anywhere;
-}
-
 .vo-mounts {
   display: grid;
   gap: var(--vo-space-2);
@@ -984,5 +1015,25 @@ function handleAddPreferredLanguage(evt: Event): void {
   border-radius: var(--vo-radius-md);
   background-color: var(--vo-surface);
   font-size: var(--vo-text-xs);
+}
+
+.vo-toggle-pill {
+  user-select: none;
+
+  input[type='checkbox'] {
+    margin: 0;
+    accent-color: var(--vo-accent);
+    cursor: inherit;
+  }
+
+  &[data-active='true'] {
+    background-color: color-mix(in oklch, var(--vo-accent) 14%, var(--vo-surface-elevated));
+    border-color: var(--vo-accent);
+  }
+
+  &[aria-disabled='true'] {
+    color: var(--vo-text-muted);
+    cursor: not-allowed;
+  }
 }
 </style>

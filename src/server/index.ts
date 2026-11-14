@@ -7,13 +7,7 @@ import { JobRunner } from './services/jobRunner.ts';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const mountErrors = await validateMountDirectories(config);
-  if (mountErrors.length > 0) {
-    process.stderr.write(`Mount warnings:\n${mountErrors.join('\n')}\n`);
-  }
-
   const runner = new JobRunner(config);
-  await runner.init();
 
   const distDir = path.resolve(process.cwd(), 'dist');
   const server = http.createServer(createRequestHandler(runner, distDir));
@@ -23,6 +17,13 @@ async function main(): Promise<void> {
       `Plex Video Organizer listening on http://0.0.0.0:${String(config.appPort)}\n`
     );
   });
+
+  const mountErrors = await validateMountDirectories(config);
+  if (mountErrors.length > 0) {
+    process.stderr.write(`Mount warnings:\n${mountErrors.join('\n')}\n`);
+  }
+
+  await runner.init();
 }
 
 void main();

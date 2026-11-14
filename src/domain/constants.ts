@@ -19,6 +19,10 @@ export const JOB_PHASES = [
   'ERROR'
 ] as const;
 
+/** Server startup initialization readiness states. */
+export const SERVER_INIT_STATUSES = ['initializing', 'ready'] as const;
+export const CONNECTION_STATUSES = ['connecting', 'ready'] as const;
+
 /** Pre-flight conflict resolution decisions. */
 export const CONFLICT_DECISIONS = ['overwrite', 'ignore'] as const;
 
@@ -30,6 +34,25 @@ export const EPISODE_ORDER_MODES = ['aired', 'dvd', 'absolute'] as const;
 
 /** Active sub-stage labels emitted during scanning, remuxing, verification, moving, and cleanup. */
 export const JOB_STAGE_KINDS = ['scanning', 'remuxing', 'verifying', 'moving', 'cleanup'] as const;
+
+export const SUBTITLE_PROVIDER_IDS = [
+  'opensubtitles-stremio',
+  'gestdown',
+  'yify',
+  'podnapisi',
+  'opensubtitles-rest',
+  'subdl'
+] as const;
+
+export const SUBTITLE_VARIANTS = ['latam', 'spain', 'neutral'] as const;
+
+export const AUTO_SUBTITLE_STATUSES = [
+  'idle',
+  'searching',
+  'downloaded',
+  'not_found',
+  'failed'
+] as const;
 
 /**
  * Maximum safe relative Plex path length (`ShowFolder/Season XX/FileName.mkv`)
@@ -225,6 +248,11 @@ export const VIDEO_EXTENSION_SET: ReadonlySet<VideoExtension> = new Set<VideoExt
   VIDEO_EXTENSIONS
 );
 
+/** Type guard narrowing a lowercase extension string to `VideoExtension`. */
+export function isVideoExtension(ext: string): ext is VideoExtension {
+  return (VIDEO_EXTENSION_SET as ReadonlySet<string>).has(ext);
+}
+
 /** Supported external text/bitmap subtitle extensions. */
 const SUBTITLE_EXTENSIONS = ['.srt', '.smi', '.ssa', '.ass', '.vtt', '.idx', '.sub'] as const;
 
@@ -407,6 +435,9 @@ export const AUDIO_LOUDNORM_TARGET_LRA = 11;
 /** Retention window (7 days in ms) for processed originals stored in backupDir. */
 export const BACKUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Retention window (14 days in ms) for SQLite probe/audio scan cache entries since last_seen_at. */
+export const SCAN_CACHE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
 /** Metadata provider rate limiting, retry, and persistent cache settings. */
 export const IMDB_MIN_INTERVAL_MS = 400;
 export const TVDB_MIN_INTERVAL_MS = 350;
@@ -531,3 +562,15 @@ export function isPermissionOrReadOnlyError(err: unknown): boolean {
   }
   return typeof err.code === 'string' && Object.hasOwn(PERMISSION_ERROR_CODE_MAP, err.code);
 }
+
+/** Canonical library verifier compliance issue codes. */
+export const VERIFIER_ISSUE_CODES = [
+  'EMPTY_DIRECTORY',
+  'DESTINATION_COLLISION',
+  'MISSING_YEAR',
+  'MISSING_PROVIDER_ID',
+  'NON_STANDARD_SEASON_DIR',
+  'NON_STANDARD_FILENAME',
+  'SUBTITLE_STEM_MISMATCH',
+  'UNRESOLVED_METADATA'
+] as const;

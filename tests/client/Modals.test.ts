@@ -7,6 +7,7 @@ import { defineComponent, ref } from 'vue';
 import App from '../../src/client/App.vue';
 import ConflictResolutionModal from '../../src/client/components/ConflictResolutionModal.vue';
 import MetadataSearchModal from '../../src/client/components/MetadataSearchModal.vue';
+import SubtitlePreviewModal from '../../src/client/components/SubtitlePreviewModal.vue';
 import TrackInspectorModal from '../../src/client/components/TrackInspectorModal.vue';
 import { useGsapMotion } from '../../src/client/composables/useGsapMotion.ts';
 import {
@@ -81,9 +82,10 @@ describe('Client Modals & App', () => {
     const confirmBtn = wrapper.find('.vo-btn--primary');
     expect((confirmBtn.element as HTMLButtonElement).disabled).toBe(true);
 
-    const selects = wrapper.findAll('select');
-    await selects[0]!.setValue('overwrite');
-    await selects[1]!.setValue('ignore');
+    const overwriteButtons = wrapper.findAll('button[data-decision="overwrite"]');
+    const ignoreButtons = wrapper.findAll('button[data-decision="ignore"]');
+    await overwriteButtons[0]!.trigger('click');
+    await ignoreButtons[1]!.trigger('click');
     await confirmBtn.trigger('click');
 
     const emitted = wrapper.emitted('confirm');
@@ -176,7 +178,9 @@ describe('Client Modals & App', () => {
           revision: 1,
           lockOwnerClientId: null,
           mountPaths: {
+            configDir: '/config',
             inputDir: '/data/input',
+            backupDir: '/data/backup',
             movies: '/data/output/movies',
             documentaries: '/data/output/documentaries',
             'animated-movies': '/data/output/animated-movies',
@@ -209,6 +213,60 @@ describe('Client Modals & App', () => {
       }
     });
     mount(NullMotion).unmount();
+  });
+
+  it('App renders one stable row per parallel active task during SCANNING', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          phase: 'SCANNING',
+          revision: 2,
+          lockOwnerClientId: 'c1:t1',
+          mountPaths: {
+            configDir: '/config',
+            inputDir: '/data/input',
+            backupDir: '/data/backup',
+            movies: '/data/output/movies',
+            documentaries: '/data/output/documentaries',
+            'animated-movies': '/data/output/animated-movies',
+            'tv-shows': '/data/output/tv-shows',
+            'animated-series': '/data/output/animated-series'
+          },
+          items: [],
+          activeJob: {
+            jobId: 'scan',
+            totalItems: 10,
+            completedItems: 6,
+            currentPercent: 51,
+            stage: 'scanning',
+            stageLabel: 'Analyzing audio (6/10)',
+            etaSeconds: 900,
+            activeTasks: [
+              { slot: 0, itemId: 'item-1', fileName: 'Supergirl.2026.2160p.mp4', percent: 82 },
+              { slot: 1, itemId: 'item-2', fileName: 'Dune.2021.1080p.mkv', percent: 34 },
+              { slot: 2, itemId: 'item-3', fileName: 'Arrival.2016.1080p.mkv', percent: 15 }
+            ]
+          }
+        }),
+        { status: 200 }
+      )
+    );
+
+    const wrapper = mount(App);
+    await new Promise((r) => setTimeout(r, 20));
+    const metaText = wrapper.find('.vo-progress__meta').text();
+    expect(metaText).toContain('Analyzing audio (6/10)');
+    expect(metaText).not.toContain('Supergirl.2026.2160p.mp4');
+
+    const rows = wrapper.findAll('.vo-progress__files .vo-progress__file');
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.find('.vo-progress__file-name').text()).toBe('Supergirl.2026.2160p.mp4');
+    expect(rows[0]?.find('.vo-progress__file-pct').text()).toBe('82%');
+    expect(rows[1]?.find('.vo-progress__file-name').text()).toBe('Dune.2021.1080p.mkv');
+    expect(rows[1]?.find('.vo-progress__file-pct').text()).toBe('34%');
+    expect(rows[2]?.find('.vo-progress__file-name').text()).toBe('Arrival.2016.1080p.mkv');
+    expect(rows[2]?.find('.vo-progress__file-pct').text()).toBe('15%');
+    wrapper.unmount();
   });
 
   it('MetadataSearchModal searches providers and applies candidate', async () => {
@@ -305,5 +363,41 @@ describe('Client Modals & App', () => {
 
     expect(wrapper.text()).toContain('3 selected');
     expect(wrapper.text()).toContain('Applying match to 3 selected items');
+  });
+
+  it('SubtitlePreviewModal renders video and track URLs and emits close', async () => {
+    const wrapper = mount(SubtitlePreviewModal, {
+      props: {
+        item: {
+          id: asItemId('preview-1'),
+          sourcePath: '/data/input/Movie.mkv',
+          relativePath: 'Movie.mkv',
+          fileName: 'Movie.mkv',
+          mediaKind: 'movie',
+          category: 'movies',
+          parsedTitle: 'Movie',
+          include: true,
+          tags: [],
+          probe: { durationSeconds: 90, videoStreams: [], audioStreams: [], subtitleStreams: [] },
+          externalSubtitles: [],
+          candidates: [],
+          trackSelection: {
+            audioTracks: [],
+            subtitleMergeMode: 'keep-and-add',
+            includedInternalSubtitles: [],
+            externalSubtitleOrder: [],
+            needsUserPrompt: false
+          },
+          warnings: []
+        }
+      }
+    });
+
+    expect(wrapper.find('video').attributes('src')).toBe('/api/queue/items/preview-1/stream');
+    expect(wrapper.find('track').attributes('src')).toBe(
+      '/api/queue/items/preview-1/subtitles/preview.vtt'
+    );
+    await wrapper.find('button[aria-label="Close subtitle preview"]').trigger('click');
+    expect(wrapper.emitted('close')).toHaveLength(1);
   });
 });

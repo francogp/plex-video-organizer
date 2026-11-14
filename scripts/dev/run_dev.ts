@@ -8,6 +8,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fsPromises from 'node:fs/promises';
 import { enableCompileCache } from 'node:module';
+import net from 'node:net';
 import path from 'node:path';
 import { styleText } from 'node:util';
 
@@ -17,6 +18,38 @@ import { defineCommand, runMain } from 'citty';
 enableCompileCache();
 
 const ROOT_DIR = process.cwd();
+const DEFAULT_APP_PORT = 3000;
+const PORT_POLL_INTERVAL_MS = 100;
+const PORT_WAIT_TIMEOUT_MS = 15_000;
+
+function resolveAppPort(env: NodeJS.ProcessEnv): number {
+  const parsed = Number(env.APP_PORT);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_APP_PORT;
+}
+
+function canConnectTcp(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function waitForServerPort(host: string, port: number, timeoutMs: number): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (await canConnectTcp(host, port)) {
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, PORT_POLL_INTERVAL_MS));
+  }
+}
 
 function isCommandInPath(cmd: string, env: NodeJS.ProcessEnv): boolean {
   try {
@@ -104,6 +137,8 @@ const main = defineCommand({
         env: serverEnv
       }
     );
+
+    await waitForServerPort('127.0.0.1', resolveAppPort(serverEnv), PORT_WAIT_TIMEOUT_MS);
 
     const vpCmd = path.resolve(
       ROOT_DIR,

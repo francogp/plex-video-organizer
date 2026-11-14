@@ -9,6 +9,7 @@ Frontend Maintainers.
 ## Local Contracts
 
 - Uses `<script setup lang="ts">` and Pinia Composition API stores.
+- Initialization readiness gate: `organizerStore` tracks `connectionStatus` and `serverInitStatus` via `bootstrapConnection()` and disables interactive UI controls with an initialization banner in [App.vue](App.vue) until both are `'ready'`.
 - All `localStorage` and `sessionStorage` access goes through [utils/storage.ts](utils/storage.ts) with `try/catch`.
 - All SCSS follows Dart Sass `@use` syntax, semantic `oklch`/`color-mix` tokens, and max 3 nesting levels.
 

@@ -14,6 +14,7 @@ Project Maintainers.
 ## Key Files
 
 - [designs/plex-video-organizer.md](designs/plex-video-organizer.md): Approved architecture and implementation blueprint.
+- [opensubtitles-api.md](opensubtitles-api.md): OpenSubtitles REST API v1 authentication, headers, quotas, and `.env` configuration guide.
 
 ## Work Guidance
 

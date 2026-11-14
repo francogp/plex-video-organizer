@@ -71,7 +71,9 @@ describe('preflight', () => {
       const moviesDir = path.join(tmpDir, 'movies');
       await fs.mkdir(moviesDir, { recursive: true });
       const mounts: MountPathsMap = {
+        configDir: tmpDir,
         inputDir: tmpDir,
+        backupDir: tmpDir,
         movies: moviesDir,
         'animated-movies': tmpDir,
         'tv-shows': tmpDir,

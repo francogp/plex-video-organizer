@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
+import type { Dirent } from 'node:fs';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
+import { runSlotWorkerPool } from '../../domain/concurrency.ts';
 import {
   AUDIO_SCAN_CONCURRENCY,
   DISK_IMAGE_EXTENSION_SET,
@@ -11,28 +12,32 @@ import {
   LANGUAGE_CODE_MAP,
   ORGANIZING_TEMP_MARKER,
   ORGANIZING_TEMP_SUFFIX,
+  PERCENT_MAX,
   PLEX_EXTRA_FOLDER_SET,
   PLEX_INLINE_EXTRA_SUFFIXES,
   PLEX_SAMPLE_MAX_BYTES,
   SUBTITLE_EXTENSION_SET,
   SUBTITLE_FOLDER_SET,
-  VIDEO_EXTENSION_SET,
   isHiddenOrTempEntryName,
-  isPermissionOrReadOnlyError,
+  isVideoExtension,
   type LanguageAlias
 } from '../../domain/constants.ts';
-import { extractPlexTags, extractSplitPart } from '../../domain/plexFormatter.ts';
+import { extractSplitPart } from '../../domain/plexFormatter.ts';
+import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
 import {
   asImdbId,
   asIso639_2Code,
   asItemId,
   asTmdbId,
   asTvdbId,
+  collectActiveTasks,
+  type ActiveParallelTask,
   type AudioTrackAnalysis,
   type EpisodeInfo,
   type ExternalSubtitleFile,
   type ImdbId,
   type Iso639_2Code,
+  type ItemId,
   type MediaKind,
   type MediaProbeSummary,
   type MetadataCandidate,
@@ -42,7 +47,13 @@ import {
   type TrackSelection,
   type TvdbId
 } from '../../domain/types.ts';
-import { hasIgnoredAncestorSegment, isDirUnwritable } from './fileMover.ts';
+import { hasIgnoredAncestorSegment } from './fileMover.ts';
+import {
+  buildFileStatCacheEntry,
+  openScanCacheDb,
+  probeVideoWithCache,
+  type ScanCacheDb
+} from './scanCacheDb.ts';
 
 const SEASON_FOLDER_REGEX = /\b(?:season|temporada|specials)\s*(\d{0,2})\b/i;
 const SXXEXX_REGEX = /\bs(\d{1,2})e(\d{1,3})(?:-?e(\d{1,3}))?\b/i;
@@ -95,15 +106,86 @@ function matchesPlexignore(
   return false;
 }
 
+interface MutablePlexmatchHints {
+  title?: string;
+  year?: number;
+  season?: number;
+  tvdbId?: TvdbId;
+  tmdbId?: TmdbId;
+  imdbId?: ImdbId;
+  pattern?: string;
+  readonly episodes: Map<string, string>;
+}
+
+function applyPlexmatchGuid(hints: MutablePlexmatchHints, val: string): void {
+  const imdbMatch = /^imdb:\/\/(tt\d+)/i.exec(val);
+  if (imdbMatch?.[1]) {
+    hints.imdbId = asImdbId(imdbMatch[1]);
+    return;
+  }
+  const tvdbMatch = /^tvdb:\/\/(\d+)/i.exec(val);
+  if (tvdbMatch?.[1]) {
+    hints.tvdbId = asTvdbId(tvdbMatch[1]);
+    return;
+  }
+  const tmdbMatch = /^tmdb:\/\/(\d+)/i.exec(val);
+  if (tmdbMatch?.[1]) {
+    hints.tmdbId = asTmdbId(tmdbMatch[1]);
+  }
+}
+
+function applyPlexmatchKeyVal(hints: MutablePlexmatchHints, key: string, val: string): void {
+  if (key === 'title' || key === 'show') {
+    hints.title = val;
+    return;
+  }
+  if (key === 'year') {
+    const y = Number(val);
+    if (Number.isInteger(y) && y >= MIN_MEDIA_YEAR) {
+      hints.year = y;
+    }
+    return;
+  }
+  if (key === 'season') {
+    const s = Number(val);
+    if (Number.isInteger(s) && s >= 0) {
+      hints.season = s;
+    }
+    return;
+  }
+  if (key === 'tvdbid' && /^\d+$/.test(val)) {
+    hints.tvdbId = asTvdbId(val);
+    return;
+  }
+  if (key === 'tmdbid' && /^\d+$/.test(val)) {
+    hints.tmdbId = asTmdbId(val);
+    return;
+  }
+  if (key === 'imdbid') {
+    const normalized = val.startsWith('tt') ? val : `tt${val}`;
+    if (/^tt\d+$/.test(normalized)) {
+      hints.imdbId = asImdbId(normalized);
+    }
+    return;
+  }
+  if (key === 'guid') {
+    applyPlexmatchGuid(hints, val);
+    return;
+  }
+  if (key === 'pattern' || key === 'pt') {
+    hints.pattern = val;
+    return;
+  }
+  if (key === 'ep' || key === 'episode') {
+    const epColon = val.indexOf(':');
+    if (epColon > 0) {
+      hints.episodes.set(val.slice(epColon + 1).trim(), val.slice(0, epColon).trim());
+    }
+  }
+}
+
 function parsePlexmatchContent(raw: string): PlexmatchHints {
-  let title: string | undefined;
-  let year: number | undefined;
-  let season: number | undefined;
-  let tvdbId: TvdbId | undefined;
-  let tmdbId: TmdbId | undefined;
-  let imdbId: ImdbId | undefined;
-  let pattern: string | undefined;
-  const episodes = new Map<string, string>();
+  const hints: MutablePlexmatchHints = { episodes: new Map<string, string>() };
 
   for (const rawLine of raw.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -114,53 +196,14 @@ function parsePlexmatchContent(raw: string): PlexmatchHints {
     if (colonIdx <= 0) {
       continue;
     }
-    const key = line.slice(0, colonIdx).trim().toLowerCase();
-    const val = line.slice(colonIdx + 1).trim();
-    if (key === 'title' || key === 'show') {
-      title = val;
-    } else if (key === 'year') {
-      const y = Number(val);
-      if (Number.isInteger(y) && y >= MIN_MEDIA_YEAR) {
-        year = y;
-      }
-    } else if (key === 'season') {
-      const s = Number(val);
-      if (Number.isInteger(s) && s >= 0) {
-        season = s;
-      }
-    } else if (key === 'tvdbid' && /^\d+$/.test(val)) {
-      tvdbId = asTvdbId(val);
-    } else if (key === 'tmdbid' && /^\d+$/.test(val)) {
-      tmdbId = asTmdbId(val);
-    } else if (key === 'imdbid') {
-      const normalized = val.startsWith('tt') ? val : `tt${val}`;
-      if (/^tt\d+$/.test(normalized)) {
-        imdbId = asImdbId(normalized);
-      }
-    } else if (key === 'guid') {
-      const imdbMatch = /^imdb:\/\/(tt\d+)/i.exec(val);
-      const tvdbMatch = /^tvdb:\/\/(\d+)/i.exec(val);
-      const tmdbMatch = /^tmdb:\/\/(\d+)/i.exec(val);
-      if (imdbMatch?.[1]) {
-        imdbId = asImdbId(imdbMatch[1]);
-      } else if (tvdbMatch?.[1]) {
-        tvdbId = asTvdbId(tvdbMatch[1]);
-      } else if (tmdbMatch?.[1]) {
-        tmdbId = asTmdbId(tmdbMatch[1]);
-      }
-    } else if (key === 'pattern' || key === 'pt') {
-      pattern = val;
-    } else if (key === 'ep' || key === 'episode') {
-      const epColon = val.indexOf(':');
-      if (epColon > 0) {
-        const epCode = val.slice(0, epColon).trim();
-        const epTarget = val.slice(epColon + 1).trim();
-        episodes.set(epTarget, epCode);
-      }
-    }
+    applyPlexmatchKeyVal(
+      hints,
+      line.slice(0, colonIdx).trim().toLowerCase(),
+      line.slice(colonIdx + 1).trim()
+    );
   }
 
-  return { title, year, season, tvdbId, tmdbId, imdbId, pattern, episodes };
+  return hints;
 }
 
 function resolveCascadedPlexmatchHints(
@@ -303,6 +346,79 @@ async function isBinarySubFile(subPath: string): Promise<boolean> {
   }
 }
 
+function detectSubtitleLanguageAndFlags(tokens: readonly string[]): {
+  readonly isForced: boolean;
+  readonly isHearingImpaired: boolean;
+  readonly detectedLang: Iso639_2Code | undefined;
+} {
+  const isForced = tokens.includes('forced');
+  const isHearingImpaired = tokens.includes('sdh') || tokens.includes('cc');
+  let detectedLang: Iso639_2Code | undefined;
+  for (const tok of tokens) {
+    if (tok === 'forced' || tok === 'sdh' || tok === 'cc') {
+      continue;
+    }
+    detectedLang = normalizeIsoLanguage(tok);
+    if (detectedLang) {
+      break;
+    }
+  }
+  return { isForced, isHearingImpaired, detectedLang };
+}
+
+async function resolveExternalSubtitleEntry(
+  entry: { readonly name: string },
+  dir: string,
+  videoDir: string,
+  videoStem: string,
+  inputDir: string,
+  hasMultipleVideosInDir: boolean,
+  idxFiles: ReadonlySet<string>
+): Promise<ExternalSubtitleFile | null> {
+  const ext = path.extname(entry.name).toLowerCase();
+  if (
+    ext === '.idx' ||
+    !SUBTITLE_EXTENSION_SET.has(
+      ext as typeof SUBTITLE_EXTENSION_SET extends ReadonlySet<infer U> ? U : never
+    )
+  ) {
+    return null;
+  }
+
+  const fullPath = path.join(dir, entry.name);
+  const baseName = path.basename(entry.name, ext);
+  const lowerBase = baseName.toLowerCase();
+  if (dir === videoDir && !lowerBase.startsWith(videoStem) && hasMultipleVideosInDir) {
+    return null;
+  }
+
+  const { isForced, isHearingImpaired, detectedLang } = detectSubtitleLanguageAndFlags(
+    lowerBase.split('.').slice(1)
+  );
+
+  let idxPairPath: string | undefined;
+  let missingIdxWarning: string | undefined;
+  if (ext === '.sub') {
+    if (idxFiles.has(lowerBase)) {
+      idxPairPath = path.join(dir, `${baseName}.idx`);
+    } else if (await isBinarySubFile(fullPath)) {
+      missingIdxWarning = `Binary VobSub file "${entry.name}" is missing its companion .idx file.`;
+    }
+  }
+
+  return {
+    path: fullPath,
+    relativePath: path.relative(inputDir, fullPath),
+    extension: ext,
+    language: detectedLang ?? asIso639_2Code('und'),
+    isForced,
+    isHearingImpaired,
+    isLanguageAmbiguous: !detectedLang,
+    idxPairPath,
+    missingIdxWarning
+  };
+}
+
 async function collectExternalSubtitles(
   videoPath: string,
   inputDir: string
@@ -335,85 +451,31 @@ async function collectExternalSubtitles(
       continue;
     }
 
+    const fileEntries = entries.filter(
+      (e): boolean => e.isFile() && !isHiddenOrTempEntryName(e.name)
+    );
     const idxFiles = new Set(
-      entries
-        .filter(
-          (e): boolean =>
-            e.isFile() &&
-            !isHiddenOrTempEntryName(e.name) &&
-            path.extname(e.name).toLowerCase() === '.idx'
-        )
+      fileEntries
+        .filter((e): boolean => path.extname(e.name).toLowerCase() === '.idx')
         .map((e): string => path.basename(e.name, path.extname(e.name)).toLowerCase())
     );
+    const hasMultipleVideosInDir =
+      fileEntries.filter((e): boolean => isVideoExtension(path.extname(e.name).toLowerCase()))
+        .length > 1;
 
-    for (const entry of entries) {
-      if (!entry.isFile() || isHiddenOrTempEntryName(entry.name)) {
-        continue;
+    for (const entry of fileEntries) {
+      const sub = await resolveExternalSubtitleEntry(
+        entry,
+        dir,
+        videoDir,
+        videoStem,
+        inputDir,
+        hasMultipleVideosInDir,
+        idxFiles
+      );
+      if (sub) {
+        results.push(sub);
       }
-      const ext = path.extname(entry.name).toLowerCase();
-      if (
-        !SUBTITLE_EXTENSION_SET.has(
-          ext as typeof SUBTITLE_EXTENSION_SET extends ReadonlySet<infer U> ? U : never
-        )
-      ) {
-        continue;
-      }
-      if (ext === '.idx') {
-        continue;
-      }
-      const fullPath = path.join(dir, entry.name);
-      const baseName = path.basename(entry.name, ext);
-      const lowerBase = baseName.toLowerCase();
-
-      if (
-        dir === videoDir &&
-        !lowerBase.startsWith(videoStem) &&
-        entries.filter(
-          (e): boolean =>
-            e.isFile() &&
-            !isHiddenOrTempEntryName(e.name) &&
-            VIDEO_EXTENSION_SET.has(path.extname(e.name).toLowerCase() as never)
-        ).length > 1
-      ) {
-        continue;
-      }
-
-      const tokens = lowerBase.split('.').slice(1);
-      const isForced = tokens.includes('forced');
-      const isHearingImpaired = tokens.includes('sdh') || tokens.includes('cc');
-      let detectedLang: Iso639_2Code | undefined;
-      for (const tok of tokens) {
-        if (tok === 'forced' || tok === 'sdh' || tok === 'cc') {
-          continue;
-        }
-        detectedLang = normalizeIsoLanguage(tok);
-        if (detectedLang) {
-          break;
-        }
-      }
-
-      let idxPairPath: string | undefined;
-      let missingIdxWarning: string | undefined;
-      if (ext === '.sub') {
-        const hasIdx = idxFiles.has(lowerBase);
-        if (hasIdx) {
-          idxPairPath = path.join(dir, `${baseName}.idx`);
-        } else if (await isBinarySubFile(fullPath)) {
-          missingIdxWarning = `Binary VobSub file "${entry.name}" is missing its companion .idx file.`;
-        }
-      }
-
-      results.push({
-        path: fullPath,
-        relativePath: path.relative(inputDir, fullPath),
-        extension: ext,
-        language: detectedLang ?? asIso639_2Code('und'),
-        isForced,
-        isHearingImpaired,
-        isLanguageAmbiguous: !detectedLang,
-        idxPairPath,
-        missingIdxWarning
-      });
     }
   }
 
@@ -570,14 +632,26 @@ function buildInitialTrackSelection(
 
 export type ProbeFn = (filePath: string) => Promise<MediaProbeSummary>;
 
-/** Walks `inputDir` with Node 26 native recursive `readdir` and produces `ScannedItem[]`. */
-export async function scanInputDirectory(
+interface PlexignoreRule {
+  readonly dirPosix: string;
+  readonly pattern: string;
+}
+
+interface ScanEntryLike {
+  isFile(): boolean;
+  readonly name: string;
+  readonly parentPath: string;
+}
+
+async function collectDirectoryHints(
+  entries: readonly ScanEntryLike[],
   inputDir: string,
-  probeFile: ProbeFn,
   shouldCancel?: () => boolean
-): Promise<readonly ScannedItem[]> {
-  const entries = await fs.readdir(inputDir, { recursive: true, withFileTypes: true });
-  const plexignoreRules: { readonly dirPosix: string; readonly pattern: string }[] = [];
+): Promise<{
+  readonly plexignoreRules: readonly PlexignoreRule[];
+  readonly plexmatchByDir: ReadonlyMap<string, PlexmatchHints>;
+}> {
+  const plexignoreRules: PlexignoreRule[] = [];
   const plexmatchByDir = new Map<string, PlexmatchHints>();
 
   for (const entry of entries) {
@@ -600,186 +674,274 @@ export async function scanInputDirectory(
     }
   }
 
-  const items: ScannedItem[] = [];
+  return { plexignoreRules, plexmatchByDir };
+}
 
-  for (const entry of entries) {
-    if (shouldCancel?.()) {
-      break;
-    }
-    if (
-      !entry.isFile() ||
-      isHiddenOrTempEntryName(entry.name) ||
-      hasIgnoredAncestorSegment(inputDir, entry.parentPath)
-    ) {
-      continue;
-    }
-    if (
-      entry.name.includes(ORGANIZING_TEMP_MARKER) &&
-      entry.name.endsWith(ORGANIZING_TEMP_SUFFIX)
-    ) {
-      continue;
-    }
+function isSkippableVideoEntry(entry: ScanEntryLike, inputDir: string): boolean {
+  if (
+    !entry.isFile() ||
+    isHiddenOrTempEntryName(entry.name) ||
+    hasIgnoredAncestorSegment(inputDir, entry.parentPath)
+  ) {
+    return true;
+  }
+  return entry.name.includes(ORGANIZING_TEMP_MARKER) && entry.name.endsWith(ORGANIZING_TEMP_SUFFIX);
+}
 
-    const fullPath = path.join(entry.parentPath, entry.name);
-    const relPath = path.relative(inputDir, fullPath);
-    const relPosix = relPath.split(path.sep).join('/');
-    const ext = path.extname(entry.name).toLowerCase();
-    const baseNoExt = path.basename(entry.name, ext);
+interface CandidateEntryPaths {
+  readonly fullPath: string;
+  readonly relPath: string;
+  readonly relPosix: string;
+  readonly baseNoExt: string;
+  readonly dirSegments: readonly string[];
+}
 
-    if (DISK_IMAGE_EXTENSION_SET.has(ext as never)) {
-      continue;
-    }
-    if (!VIDEO_EXTENSION_SET.has(ext as never)) {
-      continue;
-    }
-    if (INLINE_EXTRA_REGEX.test(baseNoExt)) {
-      continue;
-    }
+function resolveCandidateEntryPaths(
+  entry: ScanEntryLike,
+  inputDir: string,
+  plexignoreRules: readonly PlexignoreRule[]
+): CandidateEntryPaths | null {
+  if (isSkippableVideoEntry(entry, inputDir)) {
+    return null;
+  }
 
-    const dirSegments = path
-      .dirname(relPath)
-      .split(path.sep)
-      .filter((s): boolean => s !== '.');
-    if (dirSegments.some((seg): boolean => isExcludedFolderSegment(seg))) {
-      continue;
-    }
-    if (matchesPlexignore(relPosix, entry.name, plexignoreRules)) {
-      continue;
-    }
+  const fullPath = path.join(entry.parentPath, entry.name);
+  const relPath = path.relative(inputDir, fullPath);
+  const relPosix = relPath.split(path.sep).join('/');
+  const ext = path.extname(entry.name).toLowerCase();
+  const baseNoExt = path.basename(entry.name, ext);
 
-    const stat = await fs.stat(fullPath);
-    if (entry.name.toLowerCase().includes('sample') && stat.size < PLEX_SAMPLE_MAX_BYTES) {
-      continue;
-    }
+  if (
+    DISK_IMAGE_EXTENSION_SET.has(ext as never) ||
+    !isVideoExtension(ext) ||
+    INLINE_EXTRA_REGEX.test(baseNoExt)
+  ) {
+    return null;
+  }
 
-    const dirHints = resolveCascadedPlexmatchHints(entry.parentPath, inputDir, plexmatchByDir);
+  const dirSegments = path
+    .dirname(relPath)
+    .split(path.sep)
+    .filter((s): boolean => s !== '.');
+  if (
+    dirSegments.some((seg): boolean => isExcludedFolderSegment(seg)) ||
+    matchesPlexignore(relPosix, entry.name, plexignoreRules)
+  ) {
+    return null;
+  }
 
-    const parsedEpisode = parseEpisodeInfo(relPath, baseNoExt, dirHints?.season);
-    const episode = applyPlexmatchEpisodeOverride(
-      entry.name,
-      baseNoExt,
-      relPosix,
-      dirHints,
-      parsedEpisode
-    );
-    const mediaKind: MediaKind = episode ? 'tv' : 'movie';
-    const category: OutputCategory = mediaKind === 'tv' ? 'tv-shows' : 'movies';
+  return { fullPath, relPath, relPosix, baseNoExt, dirSegments };
+}
 
-    const probe = await probeFile(fullPath);
-    const externalSubtitles = await collectExternalSubtitles(fullPath, inputDir);
-    const warnings: string[] = [];
-    for (const sub of externalSubtitles) {
-      if (sub.missingIdxWarning) {
-        warnings.push(sub.missingIdxWarning);
-      }
-    }
+async function buildScannedItemFromEntry(
+  entry: ScanEntryLike,
+  inputDir: string,
+  probeFile: ProbeFn,
+  plexignoreRules: readonly PlexignoreRule[],
+  plexmatchByDir: ReadonlyMap<string, PlexmatchHints>
+): Promise<ScannedItem | null> {
+  const paths = resolveCandidateEntryPaths(entry, inputDir, plexignoreRules);
+  if (!paths) {
+    return null;
+  }
+  const { fullPath, relPath, relPosix, baseNoExt, dirSegments } = paths;
 
-    const nameHintSource = mediaKind === 'tv' && dirSegments[0] ? dirSegments[0] : baseNoExt;
-    const parsedFromPath = cleanTitleFromName(nameHintSource);
-    const parsedTitle = dirHints?.title ?? parsedFromPath.title;
-    const parsedYear = dirHints?.year ?? parsedFromPath.year;
+  const stat = await fs.stat(fullPath);
+  if (entry.name.toLowerCase().includes('sample') && stat.size < PLEX_SAMPLE_MAX_BYTES) {
+    return null;
+  }
 
-    const candidates: MetadataCandidate[] = [];
-    if (dirHints?.imdbId || dirHints?.tvdbId || dirHints?.tmdbId) {
-      candidates.push({
-        title: parsedTitle,
-        year: parsedYear,
-        imdbId: dirHints.imdbId,
-        tvdbId: dirHints.tvdbId,
-        tmdbId: dirHints.tmdbId,
-        source: 'plexmatch'
-      });
-    }
+  const dirHints = resolveCascadedPlexmatchHints(entry.parentPath, inputDir, plexmatchByDir);
+  const parsedEpisode = parseEpisodeInfo(relPath, baseNoExt, dirHints?.season);
+  const episode = applyPlexmatchEpisodeOverride(
+    entry.name,
+    baseNoExt,
+    relPosix,
+    dirHints,
+    parsedEpisode
+  );
+  const mediaKind: MediaKind = episode ? 'tv' : 'movie';
+  const category: OutputCategory = mediaKind === 'tv' ? 'tv-shows' : 'movies';
 
-    const idHash = crypto.createHash('sha1').update(relPosix).digest('hex').slice(0, 12);
-    items.push({
-      id: asItemId(idHash),
-      sourcePath: fullPath,
-      relativePath: relPath,
-      fileName: entry.name,
-      mediaKind,
-      category,
-      include: true,
-      parsedTitle,
-      parsedYear,
-      tags: extractPlexTags(baseNoExt, probe),
-      splitPart: extractSplitPart(baseNoExt),
-      episode,
-      probe,
-      externalSubtitles,
-      candidates,
-      selectedMetadata: candidates[0],
-      episodeOrder: 'aired',
-      trackSelection: buildInitialTrackSelection(probe, externalSubtitles),
-      warnings
+  const probe = await probeFile(fullPath);
+  const externalSubtitles = await collectExternalSubtitles(fullPath, inputDir);
+  const warnings = externalSubtitles
+    .map((sub) => sub.missingIdxWarning)
+    .filter((w): w is string => Boolean(w));
+
+  const nameHintSource = mediaKind === 'tv' && dirSegments[0] ? dirSegments[0] : baseNoExt;
+  const parsedFromPath = cleanTitleFromName(nameHintSource);
+  const parsedTitle = dirHints?.title ?? parsedFromPath.title;
+  const parsedYear = dirHints?.year ?? parsedFromPath.year;
+
+  const candidates: MetadataCandidate[] = [];
+  if (dirHints?.imdbId || dirHints?.tvdbId || dirHints?.tmdbId) {
+    candidates.push({
+      title: parsedTitle,
+      year: parsedYear,
+      imdbId: dirHints.imdbId,
+      tvdbId: dirHints.tvdbId,
+      tmdbId: dirHints.tmdbId,
+      source: 'plexmatch'
     });
   }
 
-  return items;
+  const trackSelection = buildInitialTrackSelection(probe, externalSubtitles);
+  const idHash = crypto.createHash('sha1').update(relPosix).digest('hex').slice(0, 12);
+  return {
+    id: asItemId(idHash),
+    sourcePath: fullPath,
+    relativePath: relPath,
+    fileName: entry.name,
+    mediaKind,
+    category,
+    include: true,
+    parsedTitle,
+    parsedYear,
+    tags: extractPlexTags(baseNoExt, probe, { trackSelection }),
+    splitPart: extractSplitPart(baseNoExt),
+    episode,
+    probe,
+    externalSubtitles,
+    candidates,
+    selectedMetadata: candidates[0],
+    episodeOrder: 'aired',
+    trackSelection,
+    warnings
+  };
+}
+
+/** Options for `scanInputDirectory` enabling persistent `ffprobe` caching and progress callbacks. */
+export interface ScanInputOptions {
+  readonly configDir?: string;
+  readonly onProgress?: (completed: number, total: number) => void;
+}
+
+function isCandidateVideoEntry(
+  entry: Dirent,
+  inputDir: string,
+  plexignoreRules: readonly PlexignoreRule[]
+): boolean {
+  return resolveCandidateEntryPaths(entry, inputDir, plexignoreRules) !== null;
+}
+
+/** Walks `inputDir` with Node 26 native recursive `readdir` and produces `ScannedItem[]`. */
+export async function scanInputDirectory(
+  inputDir: string,
+  probeFile: ProbeFn,
+  shouldCancel?: () => boolean,
+  options?: ScanInputOptions
+): Promise<readonly ScannedItem[]> {
+  const entries = await fs.readdir(inputDir, { recursive: true, withFileTypes: true });
+  const { plexignoreRules, plexmatchByDir } = await collectDirectoryHints(
+    entries,
+    inputDir,
+    shouldCancel
+  );
+
+  const candidateEntries = entries.filter((entry) =>
+    isCandidateVideoEntry(entry, inputDir, plexignoreRules)
+  );
+  if (candidateEntries.length === 0) {
+    return [];
+  }
+
+  const probeDb = options?.configDir ? await openScanCacheDb(options.configDir) : null;
+  const cachedProbeFile: ProbeFn = (filePath) =>
+    probeVideoWithCache(
+      probeDb,
+      filePath,
+      path.relative(inputDir, filePath).split(path.sep).join('/'),
+      probeFile
+    );
+
+  const results = Array.from<ScannedItem | null>({ length: candidateEntries.length }).fill(null);
+  const completedIndices = new Set<number>();
+  const workerCount = Math.min(AUDIO_SCAN_CONCURRENCY, candidateEntries.length);
+  let nextIndex = 0;
+  let completed = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < candidateEntries.length) {
+      if (shouldCancel?.()) {
+        break;
+      }
+      const currentIdx = nextIndex;
+      nextIndex += 1;
+      const entry = candidateEntries[currentIdx]!;
+      const item = await buildScannedItemFromEntry(
+        entry,
+        inputDir,
+        cachedProbeFile,
+        plexignoreRules,
+        plexmatchByDir
+      );
+      if (!shouldCancel?.()) {
+        results[currentIdx] = item;
+        completedIndices.add(currentIdx);
+        completed += 1;
+        options?.onProgress?.(completed, candidateEntries.length);
+      }
+    }
+  }
+
+  try {
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  } finally {
+    probeDb?.close();
+  }
+
+  const finalItems: ScannedItem[] = [];
+  for (let i = 0; i < results.length; i += 1) {
+    if (shouldCancel?.() && !completedIndices.has(i)) {
+      continue;
+    }
+    const item = results[i];
+    if (item) {
+      finalItems.push(item);
+    }
+  }
+  return finalItems;
 }
 
 export type AudioAnalysisFn = (
   filePath: string,
   streamOrder: number,
   durationSeconds?: number,
-  onProgress?: (update: { readonly percent: number; readonly etaSeconds?: number }) => void
+  onProgress?: (update: { readonly percent: number; readonly etaSeconds?: number }) => void,
+  itemId?: ItemId
 ) => Promise<AudioTrackAnalysis | null>;
-
-const FALLBACK_AUDIO_CACHE_FILENAME = 'plex-video-organizer-audio-cache.json';
-
-type AudioCacheMap = Map<string, readonly AudioTrackAnalysis[]>;
-
-async function readAudioCacheFile(targetPath: string): Promise<AudioCacheMap> {
-  const raw = await fs.readFile(targetPath, 'utf8');
-  const parsed = JSON.parse(raw) as [string, readonly AudioTrackAnalysis[]][];
-  return Array.isArray(parsed) ? new Map(parsed) : new Map();
-}
-
-async function loadAudioCache(cachePath: string): Promise<AudioCacheMap> {
-  const fallbackPath = path.join(os.tmpdir(), FALLBACK_AUDIO_CACHE_FILENAME);
-  try {
-    return await readAudioCacheFile(cachePath);
-  } catch (err) {
-    const code = err instanceof Error && 'code' in err ? err.code : undefined;
-    const shouldCheckFallback =
-      isPermissionOrReadOnlyError(err) ||
-      (code === 'ENOENT' && (await isDirUnwritable(path.dirname(cachePath))));
-    if (shouldCheckFallback && cachePath !== fallbackPath) {
-      try {
-        return await readAudioCacheFile(fallbackPath);
-      } catch {
-        // Ignore missing or corrupt fallback cache; it will be rebuilt.
-      }
-    }
-  }
-  return new Map();
-}
 
 async function analyzeItemAudio(
   item: ScannedItem,
-  cache: AudioCacheMap,
+  db: ScanCacheDb,
   analyzeAudio: AudioAnalysisFn,
-  onItemProgress?: (fraction: number) => void
-): Promise<{ readonly item: ScannedItem; readonly cacheUpdated: boolean }> {
+  onItemProgress?: (fraction: number) => void,
+  shouldSkipItem?: (itemId: ItemId) => boolean
+): Promise<{
+  readonly item: ScannedItem;
+  readonly cacheHit: boolean;
+  readonly skipped: boolean;
+}> {
+  if (shouldSkipItem?.(item.id)) {
+    return { item, cacheHit: false, skipped: true };
+  }
   const includedTracks = item.trackSelection.audioTracks.filter((t) => t.include);
   if (includedTracks.length === 0) {
-    return { item, cacheUpdated: false };
+    return { item, cacheHit: false, skipped: false };
   }
 
-  let cacheKey: string | null;
-  try {
-    const stat = await fs.stat(item.sourcePath);
-    cacheKey = `${item.sourcePath}::${String(stat.size)}::${String(Math.round(stat.mtimeMs))}`;
-  } catch {
-    cacheKey = null;
-  }
+  const relPosix = item.relativePath.split(path.sep).join('/');
+  const statEntry = await buildFileStatCacheEntry(item.sourcePath, relPosix);
 
-  const cached = cacheKey ? cache.get(cacheKey) : undefined;
+  const cached = statEntry ? db.getAudio(statEntry.key) : undefined;
   const analyses: AudioTrackAnalysis[] = cached ? [...cached] : [];
-  let cacheUpdated = false;
 
   if (!cached) {
     for (const [trackIdx, track] of includedTracks.entries()) {
+      if (shouldSkipItem?.(item.id)) {
+        return { item, cacheHit: false, skipped: true };
+      }
       try {
         const res = await analyzeAudio(
           item.sourcePath,
@@ -788,23 +950,29 @@ async function analyzeItemAudio(
           (update) => {
             const trackFraction = Math.max(0, Math.min(1, update.percent / 100));
             onItemProgress?.((trackIdx + trackFraction) / includedTracks.length);
-          }
+          },
+          item.id
         );
+        if (shouldSkipItem?.(item.id)) {
+          return { item, cacheHit: false, skipped: true };
+        }
         if (res) {
           analyses.push(res);
         }
       } catch {
+        if (shouldSkipItem?.(item.id)) {
+          return { item, cacheHit: false, skipped: true };
+        }
         // Non-fatal: item remains usable without volumedetect metrics.
       }
     }
-    if (cacheKey && analyses.length > 0) {
-      cache.set(cacheKey, analyses);
-      cacheUpdated = true;
+    if (statEntry && analyses.length > 0) {
+      db.setAudio(statEntry.key, statEntry.meta, analyses);
     }
   }
 
   if (analyses.length === 0) {
-    return { item, cacheUpdated };
+    return { item, cacheHit: false, skipped: false };
   }
   return {
     item: {
@@ -814,40 +982,53 @@ async function analyzeItemAudio(
         audioAnalysis: analyses
       }
     },
-    cacheUpdated
+    cacheHit: cached !== undefined,
+    skipped: false
   };
+}
+
+/** Progress callback emitted when concurrent audio analysis starts, updates, or finishes a slot. */
+export type AudioScanProgressCallback = (
+  completed: number,
+  total: number,
+  activeTasks: readonly ActiveParallelTask[],
+  overallFraction?: number,
+  activeFraction?: number
+) => void;
+
+export interface AudioScanStats {
+  readonly cacheHits: number;
+  readonly analyzed: number;
+  readonly pruned: number;
 }
 
 /**
  * Runs `volumedetect` analysis across scanned items with bounded concurrency and
- * persistent disk caching keyed by `(sourcePath, sizeBytes, mtimeMs)`.
+ * immediate per-file SQLite caching keyed by `(relativePath, sizeBytes, mtimeMs)`.
  */
 export async function enrichItemsWithAudioAnalysis(
   items: readonly ScannedItem[],
   configDir: string,
   analyzeAudio: AudioAnalysisFn,
-  onProgress?: (
-    completed: number,
-    total: number,
-    item: ScannedItem,
-    overallFraction?: number
-  ) => void,
-  shouldCancel?: () => boolean
+  onProgress?: AudioScanProgressCallback,
+  shouldCancel?: () => boolean,
+  onStats?: (stats: AudioScanStats) => void,
+  shouldSkipItem?: (itemId: ItemId) => boolean
 ): Promise<readonly ScannedItem[]> {
   if (items.length === 0) {
     return items;
   }
 
-  const cachePath = path.join(configDir, 'audio-cache.json');
-  const cache = await loadAudioCache(cachePath);
+  const db = await openScanCacheDb(configDir);
   const results = [...items];
   const completedIndices = new Set<number>();
+  const cachedIndices = new Set<number>();
   const itemBytes = items.map((item) => Math.max(1, item.probe.sizeBytes));
   const totalBytes = itemBytes.reduce((sum, bytes) => sum + bytes, 0);
   const itemFractions = items.map(() => 0);
-  let nextIndex = 0;
   let completed = 0;
-  let cacheDirty = false;
+  let cacheHits = 0;
+  let analyzed = 0;
 
   function computeOverallFraction(): number {
     if (totalBytes <= 0) {
@@ -860,57 +1041,105 @@ export async function enrichItemsWithAudioAnalysis(
     return Math.max(0, Math.min(1, doneBytes / totalBytes));
   }
 
-  async function worker(): Promise<void> {
-    while (nextIndex < items.length) {
-      if (shouldCancel?.()) {
-        break;
+  function computeActiveFraction(): number {
+    let activeTotal = 0;
+    let activeDone = 0;
+    for (let i = 0; i < itemBytes.length; i++) {
+      if (cachedIndices.has(i)) {
+        continue;
       }
-      const currentIdx = nextIndex;
-      nextIndex += 1;
-      const item = items[currentIdx]!;
-      const outcome = await analyzeItemAudio(item, cache, analyzeAudio, (fraction) => {
-        if (!shouldCancel?.()) {
-          itemFractions[currentIdx] = fraction;
-          onProgress?.(completed, items.length, item, computeOverallFraction());
-        }
-      });
-      if (shouldCancel?.()) {
-        break;
-      }
-      results[currentIdx] = outcome.item;
-      completedIndices.add(currentIdx);
-      itemFractions[currentIdx] = 1;
-      if (outcome.cacheUpdated) {
-        cacheDirty = true;
-      }
-      completed += 1;
-      onProgress?.(completed, items.length, results[currentIdx], computeOverallFraction());
+      const bytes = itemBytes[i] ?? 0;
+      activeTotal += bytes;
+      activeDone += bytes * (itemFractions[i] ?? 0);
     }
+    if (activeTotal <= 0) {
+      return 1;
+    }
+    return Math.max(0, Math.min(1, activeDone / activeTotal));
   }
 
   const workerCount = Math.min(AUDIO_SCAN_CONCURRENCY, items.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  const activeBySlot = Array.from<ActiveParallelTask | undefined>({ length: workerCount });
 
-  if (cacheDirty) {
-    const serializedCache = JSON.stringify([...cache.entries()], null, 2);
-    try {
-      await fs.mkdir(configDir, { recursive: true });
-      await fs.writeFile(cachePath, serializedCache, 'utf8');
-    } catch (err) {
-      if (isPermissionOrReadOnlyError(err)) {
-        const fallbackPath = path.join(os.tmpdir(), FALLBACK_AUDIO_CACHE_FILENAME);
-        console.warn(
-          `Audio cache path is not writable (${cachePath}). Falling back to ${fallbackPath}.`
+  try {
+    await runSlotWorkerPool(
+      items,
+      workerCount,
+      async (item, currentIdx, slot) => {
+        activeBySlot[slot] = {
+          slot,
+          itemId: item.id,
+          fileName: item.fileName,
+          percent: 0
+        };
+        onProgress?.(
+          completed,
+          items.length,
+          collectActiveTasks(activeBySlot),
+          computeOverallFraction(),
+          computeActiveFraction()
         );
-        try {
-          await fs.writeFile(fallbackPath, serializedCache, 'utf8');
-        } catch (fallbackErr) {
-          console.warn('Audio cache fallback persistence failed:', fallbackErr);
+        const outcome = await analyzeItemAudio(
+          item,
+          db,
+          analyzeAudio,
+          (fraction) => {
+            if (!shouldCancel?.() && !shouldSkipItem?.(item.id)) {
+              itemFractions[currentIdx] = fraction;
+              activeBySlot[slot] = {
+                slot,
+                itemId: item.id,
+                fileName: item.fileName,
+                percent: Math.min(PERCENT_MAX, Math.round(fraction * PERCENT_MAX))
+              };
+              onProgress?.(
+                completed,
+                items.length,
+                collectActiveTasks(activeBySlot),
+                computeOverallFraction(),
+                computeActiveFraction()
+              );
+            }
+          },
+          shouldSkipItem
+        );
+        activeBySlot[slot] = undefined;
+        if (shouldCancel?.()) {
+          return;
         }
-      } else {
-        console.warn('Audio cache persistence failed:', err);
-      }
+        results[currentIdx] = outcome.item;
+        completedIndices.add(currentIdx);
+        itemFractions[currentIdx] = 1;
+        if (outcome.cacheHit || outcome.skipped) {
+          cachedIndices.add(currentIdx);
+        }
+        if (outcome.cacheHit) {
+          cacheHits += 1;
+        } else if (!outcome.skipped) {
+          analyzed += 1;
+        }
+        completed += 1;
+        onProgress?.(
+          completed,
+          items.length,
+          collectActiveTasks(activeBySlot),
+          computeOverallFraction(),
+          computeActiveFraction()
+        );
+      },
+      shouldCancel
+    );
+
+    if (!shouldCancel?.()) {
+      const pruned = db.pruneExpired();
+      onStats?.({
+        cacheHits,
+        analyzed,
+        pruned: pruned.probeDeleted + pruned.audioDeleted
+      });
     }
+  } finally {
+    db.close();
   }
 
   if (shouldCancel?.()) {

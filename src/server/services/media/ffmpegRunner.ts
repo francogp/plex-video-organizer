@@ -29,15 +29,21 @@ import {
   type VideoStreamInfo
 } from '../../../domain/types.ts';
 
+interface FfprobeSideData {
+  readonly side_data_type?: string;
+}
+
 interface FfprobeRawStream {
   readonly index?: number;
   readonly codec_type?: string;
   readonly codec_name?: string;
+  readonly profile?: string;
   readonly width?: number;
   readonly height?: number;
   readonly bits_per_raw_sample?: string;
   readonly color_transfer?: string;
   readonly channels?: number;
+  readonly side_data_list?: readonly FfprobeSideData[];
   readonly disposition?: {
     readonly default?: number;
     readonly forced?: number;
@@ -62,6 +68,7 @@ interface FfprobeRawOutput {
 
 const PERCENT_MAX = 100;
 const MICROSECONDS_PER_SECOND = 1_000_000;
+const DEFAULT_FFMPEG_STALL_TIMEOUT_MS = 120_000;
 const UTF8_BOM_FIRST = 0xef;
 const UTF8_BOM_SECOND = 0xbb;
 const UTF8_BOM_THIRD = 0xbf;
@@ -117,19 +124,32 @@ export async function probeMedia(filePath: string): Promise<MediaProbeSummary> {
   for (const stream of parsed.streams ?? []) {
     if (stream.codec_type === 'video' && stream.disposition?.attached_pic !== 1) {
       const bitDepth = stream.bits_per_raw_sample ? Number(stream.bits_per_raw_sample) : undefined;
+      const sideDataTypes = (stream.side_data_list ?? []).map((sd) =>
+        (sd.side_data_type ?? '').toLowerCase()
+      );
+      const hasDolbyVision = sideDataTypes.some(
+        (type) => type.includes('dovi') || type.includes('dolby vision')
+      );
+      const hasHdr10Plus = sideDataTypes.some(
+        (type) => type.includes('2094') || type.includes('hdr10+') || type.includes('hdr dynamic')
+      );
       videoStreams.push({
         index: stream.index ?? 0,
         codecName: stream.codec_name ?? 'unknown',
+        profile: stream.profile,
         width: stream.width ?? 0,
         height: stream.height ?? 0,
         bitDepth: bitDepth && Number.isInteger(bitDepth) ? bitDepth : undefined,
-        colorTransfer: stream.color_transfer
+        colorTransfer: stream.color_transfer,
+        hasDolbyVision: hasDolbyVision || undefined,
+        hasHdr10Plus: hasHdr10Plus || undefined
       });
     } else if (stream.codec_type === 'audio') {
       audioStreams.push({
         index: stream.index ?? 0,
         streamOrder: audioOrder,
         codecName: stream.codec_name ?? 'unknown',
+        profile: stream.profile,
         language: resolveIsoCode(stream.tags?.language),
         title: stream.tags?.title,
         channels: stream.channels ?? 2,
@@ -314,7 +334,8 @@ function runFfmpegProcess(
   args: readonly string[],
   durationSeconds: number,
   onProgress?: (update: FfmpegProgressUpdate) => void,
-  registerChild?: (child: ChildProcess | null) => void
+  registerChild?: (child: ChildProcess | null) => void,
+  stallTimeoutMs = DEFAULT_FFMPEG_STALL_TIMEOUT_MS
 ): Promise<string> {
   return new Promise((resolve, reject): void => {
     const ffmpegBin = process.env['FFMPEG_BIN'] ?? 'ffmpeg';
@@ -326,8 +347,42 @@ function runFfmpegProcess(
     let lastSpeed: number | undefined;
     let lastPercent = -1;
     let lastEmitAtMs = 0;
+    let settled = false;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function clearStallTimer(): void {
+      if (stallTimer !== undefined) {
+        clearTimeout(stallTimer);
+        stallTimer = undefined;
+      }
+    }
+
+    function resetStallTimer(): void {
+      clearStallTimer();
+      if (stallTimeoutMs <= 0 || settled) {
+        return;
+      }
+      stallTimer = setTimeout((): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        registerChild?.(null);
+        try {
+          if (!child.kill('SIGKILL')) {
+            child.kill();
+          }
+        } catch {
+          // Process already exited before watchdog fired.
+        }
+        reject(new Error(`ffmpeg stalled with no output for ${String(stallTimeoutMs)}ms`));
+      }, stallTimeoutMs);
+    }
+
+    resetStallTimer();
 
     child.stdout?.on('data', (chunk: Buffer): void => {
+      resetStallTimer();
       buffer += chunk.toString('utf8');
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? '';
@@ -364,12 +419,25 @@ function runFfmpegProcess(
       }
     });
 
-    child.stderr?.on('data', (chunk: Buffer) => errChunks.push(chunk));
+    child.stderr?.on('data', (chunk: Buffer): void => {
+      resetStallTimer();
+      errChunks.push(chunk);
+    });
     child.on('error', (err): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearStallTimer();
       registerChild?.(null);
       reject(err);
     });
     child.on('close', (code): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearStallTimer();
       registerChild?.(null);
       const stderr = Buffer.concat(errChunks).toString('utf8');
       if (code === 0) {
@@ -384,9 +452,10 @@ function runFfmpegProcess(
 
 function runFfmpegStderr(
   args: readonly string[],
-  registerChild?: (child: ChildProcess | null) => void
+  registerChild?: (child: ChildProcess | null) => void,
+  stallTimeoutMs = DEFAULT_FFMPEG_STALL_TIMEOUT_MS
 ): Promise<string> {
-  return runFfmpegProcess(args, 0, undefined, registerChild);
+  return runFfmpegProcess(args, 0, undefined, registerChild, stallTimeoutMs);
 }
 
 /** Runs `ffmpeg -vn -sn -dn -af volumedetect` for a single audio stream. */
@@ -395,9 +464,11 @@ export async function analyzeAudioVolume(
   streamOrder: number,
   durationSeconds = 0,
   onProgress?: (update: FfmpegProgressUpdate) => void,
-  registerChild?: (child: ChildProcess | null) => void
+  registerChild?: (child: ChildProcess | null) => void,
+  stallTimeoutMs = DEFAULT_FFMPEG_STALL_TIMEOUT_MS
 ): Promise<AudioTrackAnalysis | null> {
   const args = [
+    '-nostdin',
     '-hide_banner',
     '-nostats',
     '-threads',
@@ -421,9 +492,10 @@ export async function analyzeAudioVolume(
           [...args, '-progress', 'pipe:1'],
           durationSeconds,
           onProgress,
-          registerChild
+          registerChild,
+          stallTimeoutMs
         )
-      : await runFfmpegStderr(args, registerChild);
+      : await runFfmpegStderr(args, registerChild, stallTimeoutMs);
   const parsed = parseVolumedetectStderr(stderr);
   if (!parsed) {
     return null;

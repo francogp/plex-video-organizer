@@ -1,8 +1,10 @@
 import * as v from 'valibot';
 
 import {
+  AUTO_SUBTITLE_STATUSES,
   CONFLICT_DECISIONS,
   CONFLICT_KINDS,
+  CONNECTION_STATUSES,
   EPISODE_ORDER_MODES,
   ISO_639_2_PRESETS,
   JOB_PHASES,
@@ -13,7 +15,11 @@ import {
   METADATA_CANDIDATE_SOURCES,
   METADATA_LANGUAGE_CODES,
   OUTPUT_CATEGORIES,
+  SERVER_INIT_STATUSES,
   SUBTITLE_MERGE_MODES,
+  SUBTITLE_PROVIDER_IDS,
+  SUBTITLE_VARIANTS,
+  VERIFIER_ISSUE_CODES,
   type AudioNormalizationMode,
   type AudioOutputCodec,
   type AudioSuggestionKind
@@ -111,16 +117,20 @@ export function asIso639_2Code(raw: string): Iso639_2Code {
 export interface VideoStreamInfo {
   readonly index: number;
   readonly codecName: string;
+  readonly profile?: string;
   readonly width: number;
   readonly height: number;
   readonly bitDepth?: number;
   readonly colorTransfer?: string;
+  readonly hasDolbyVision?: boolean;
+  readonly hasHdr10Plus?: boolean;
 }
 
 export interface AudioStreamInfo {
   readonly index: number;
   readonly streamOrder: number;
   readonly codecName: string;
+  readonly profile?: string;
   readonly language: Iso639_2Code;
   readonly title?: string;
   readonly channels: number;
@@ -172,6 +182,43 @@ export interface ExternalSubtitleFile {
   readonly isLanguageAmbiguous: boolean;
   readonly idxPairPath?: string;
   readonly missingIdxWarning?: string;
+  readonly downloadedFrom?: SubtitleProviderId;
+}
+
+const SubtitleProviderIdSchema = v.picklist(SUBTITLE_PROVIDER_IDS);
+const SubtitleVariantSchema = v.picklist(SUBTITLE_VARIANTS);
+const AutoSubtitleStatusSchema = v.picklist(AUTO_SUBTITLE_STATUSES);
+
+export type SubtitleProviderId = v.InferOutput<typeof SubtitleProviderIdSchema>;
+
+export type SubtitleVariant = v.InferOutput<typeof SubtitleVariantSchema>;
+
+export interface SubtitleCandidate {
+  readonly id: string;
+  readonly provider: SubtitleProviderId;
+  readonly language: Iso639_2Code;
+  readonly variant: SubtitleVariant;
+  readonly releaseName: string;
+  readonly downloadUrl: string;
+  readonly remoteFileId?: number;
+  readonly hashMatch: boolean;
+  readonly downloadCount?: number;
+  readonly isArchive?: boolean;
+  readonly score: number;
+}
+
+export type AutoSubtitleStatus = v.InferOutput<typeof AutoSubtitleStatusSchema>;
+
+export interface AutoSubtitleInfo {
+  readonly status: AutoSubtitleStatus;
+  readonly provider?: SubtitleProviderId;
+  readonly variant?: SubtitleVariant;
+  readonly message?: string;
+}
+
+export interface PlexTagContext {
+  readonly trackSelection?: TrackSelection;
+  readonly audioNormalization?: AudioNormalizationConfig;
 }
 
 export interface MetadataCandidate {
@@ -242,10 +289,11 @@ export interface ScannedItem {
   readonly trackSelection: TrackSelection;
   readonly warnings: readonly string[];
   readonly projectedDestination?: string;
+  readonly subtitleStatus?: AutoSubtitleInfo;
 }
 
-export interface ConflictComparison {
-  readonly itemId: ItemId;
+export interface ConflictComparison<TId extends string = ItemId> {
+  readonly itemId: TId;
   readonly sourceFileName?: string;
   readonly kind: ConflictKind;
   readonly destinationPath: string;
@@ -267,12 +315,25 @@ export interface DiskSpaceCheck {
 
 export type JobStageKind = (typeof JOB_STAGE_KINDS)[number];
 
+export interface ActiveParallelTask {
+  readonly slot: number;
+  readonly fileName: string;
+  readonly itemId?: ItemId;
+  readonly percent?: number;
+}
+
+/** Collects active worker slots in deterministic ascending slot order for multi-row progress UI. */
+export function collectActiveTasks(
+  slots: readonly (ActiveParallelTask | undefined)[]
+): readonly ActiveParallelTask[] {
+  return slots.filter((task): task is ActiveParallelTask => task !== undefined);
+}
+
 export interface ActiveJobProgress {
   readonly jobId: JobId;
   readonly totalItems: number;
   readonly completedItems: number;
-  readonly currentItemId?: ItemId;
-  readonly currentFile?: string;
+  readonly activeTasks: readonly ActiveParallelTask[];
   readonly currentPercent: number;
   readonly stage?: JobStageKind;
   readonly stageLabel?: string;
@@ -286,7 +347,9 @@ export interface BulkItemPatchRequest {
 }
 
 export type MountPathsMap = Readonly<Record<OutputCategory, string>> & {
+  readonly configDir: string;
   readonly inputDir: string;
+  readonly backupDir: string;
 };
 
 export type VerifierEntryId = Brand<string, 'VerifierEntryId'>;
@@ -295,14 +358,7 @@ export function asVerifierEntryId(value: string): VerifierEntryId {
   return value as VerifierEntryId;
 }
 
-export type VerifierIssueCode =
-  | 'EMPTY_DIRECTORY'
-  | 'MISSING_YEAR'
-  | 'MISSING_PROVIDER_ID'
-  | 'NON_STANDARD_SEASON_DIR'
-  | 'NON_STANDARD_FILENAME'
-  | 'SUBTITLE_STEM_MISMATCH'
-  | 'UNRESOLVED_METADATA';
+export type VerifierIssueCode = (typeof VERIFIER_ISSUE_CODES)[number];
 
 export type VerifierRenameKind = 'file' | 'season-dir' | 'root-dir' | 'delete-dir';
 
@@ -320,6 +376,8 @@ export interface VerifierEntry {
   readonly expectedRootName: string;
   readonly issues: readonly VerifierIssueCode[];
   readonly steps: readonly VerifierRenameStep[];
+  readonly collisionTarget?: string;
+  readonly collisionComparison?: ConflictComparison<VerifierEntryId>;
   readonly providerTag?: string;
   readonly resolvedTitle?: string;
   readonly resolvedYear?: number;
@@ -340,7 +398,7 @@ export interface VerifierProgress {
   readonly total: number;
   readonly percent: number;
   readonly stageLabel: string;
-  readonly currentFile?: string;
+  readonly activeTasks: readonly ActiveParallelTask[];
   readonly etaSeconds?: number;
 }
 
@@ -357,8 +415,15 @@ export interface VerifierState {
   } | null;
 }
 
+const ServerInitStatusSchema = v.picklist(SERVER_INIT_STATUSES);
+export type ServerInitStatus = v.InferOutput<typeof ServerInitStatusSchema>;
+
+const ConnectionStatusSchema = v.picklist(CONNECTION_STATUSES);
+export type ConnectionStatus = v.InferOutput<typeof ConnectionStatusSchema>;
+
 export interface OrganizerStatePayload {
   readonly phase: JobPhase;
+  readonly initStatus?: ServerInitStatus;
   readonly revision: number;
   readonly lockOwnerClientId: ClientId | null;
   readonly mountPaths: MountPathsMap;
@@ -372,8 +437,7 @@ export interface OrganizerStatePayload {
 
 export interface SseProgressEvent {
   readonly jobId: JobId;
-  readonly itemId?: ItemId;
-  readonly currentFile?: string;
+  readonly activeTasks: readonly ActiveParallelTask[];
   readonly totalItems?: number;
   readonly completedItems?: number;
   readonly percent: number;

@@ -578,4 +578,176 @@ describe('QueueTable', () => {
       true
     ]);
   });
+
+  it('shows No spa subtitle warning in Tracks column only when neither external nor embedded spa subtitles exist', () => {
+    const noSpaItem: ScannedItem = {
+      ...SAMPLE_ITEM,
+      id: asItemId('no-spa-1'),
+      externalSubtitles: [],
+      probe: {
+        ...SAMPLE_ITEM.probe,
+        subtitleStreams: [
+          {
+            index: 2,
+            streamOrder: 0,
+            codecName: 'subrip',
+            language: asIso639_2Code('eng'),
+            isForced: false,
+            isHearingImpaired: false
+          }
+        ]
+      },
+      trackSelection: {
+        ...SAMPLE_ITEM.trackSelection,
+        includedInternalSubtitles: [0],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false,
+        promptReason: undefined
+      }
+    };
+
+    const withExternalSpaItem: ScannedItem = {
+      ...noSpaItem,
+      id: asItemId('ext-spa-1'),
+      externalSubtitles: [
+        {
+          path: '/input/Movie.spa.srt',
+          relativePath: 'Movie.spa.srt',
+          extension: '.srt',
+          language: asIso639_2Code('spa'),
+          isForced: false,
+          isHearingImpaired: false,
+          isLanguageAmbiguous: false
+        }
+      ],
+      trackSelection: {
+        ...noSpaItem.trackSelection,
+        externalSubtitleOrder: ['/input/Movie.spa.srt']
+      }
+    };
+
+    const withEmbeddedSpaItem: ScannedItem = {
+      ...noSpaItem,
+      id: asItemId('int-spa-1'),
+      probe: {
+        ...noSpaItem.probe,
+        subtitleStreams: [
+          {
+            index: 2,
+            streamOrder: 0,
+            codecName: 'subrip',
+            language: asIso639_2Code('spa'),
+            isForced: false,
+            isHearingImpaired: false
+          }
+        ]
+      }
+    };
+
+    const noSpaWrapper = mount(QueueTable, {
+      props: { items: [noSpaItem], disabled: false }
+    });
+    expect(noSpaWrapper.text()).toContain('No spa');
+    expect(noSpaWrapper.text()).toContain('No Spanish subtitles (file or embedded)');
+    expect(noSpaWrapper.find('.vo-audio-panel--warning').exists()).toBe(true);
+
+    const extSpaWrapper = mount(QueueTable, {
+      props: { items: [withExternalSpaItem], disabled: false }
+    });
+    expect(extSpaWrapper.text()).not.toContain('No Spanish subtitles (file or embedded)');
+    expect(extSpaWrapper.find('.vo-audio-panel--ok').exists()).toBe(true);
+
+    const intSpaWrapper = mount(QueueTable, {
+      props: { items: [withEmbeddedSpaItem], disabled: false }
+    });
+    expect(intSpaWrapper.text()).not.toContain('No Spanish subtitles (file or embedded)');
+    expect(intSpaWrapper.find('.vo-audio-panel--warning').exists()).toBe(false);
+  });
+
+  it('emits subtitle search, download, close, and preview events declaratively', async () => {
+    const candidate = {
+      id: 'c1',
+      provider: 'opensubtitles-stremio' as const,
+      language: asIso639_2Code('spa'),
+      variant: 'latam' as const,
+      releaseName: 'Movie.Latino.WEB-DL.srt',
+      downloadUrl: 'https://subs.example/1.srt',
+      hashMatch: true,
+      score: 1080
+    };
+
+    const item: ScannedItem = {
+      ...SAMPLE_ITEM,
+      id: asItemId('sub-picker-1'),
+      externalSubtitles: [
+        {
+          path: '/data/input/Movie.2026.spa.srt',
+          relativePath: 'Movie.2026.spa.srt',
+          extension: '.srt',
+          language: asIso639_2Code('spa'),
+          isForced: false,
+          isHearingImpaired: false,
+          isLanguageAmbiguous: false
+        }
+      ],
+      trackSelection: {
+        ...SAMPLE_ITEM.trackSelection,
+        externalSubtitleOrder: ['/data/input/Movie.2026.spa.srt']
+      }
+    };
+
+    const wrapper = mount(QueueTable, {
+      props: {
+        items: [item],
+        disabled: false,
+        subtitlePicker: {
+          itemId: item.id,
+          loading: false,
+          downloadingId: null,
+          error: null,
+          candidates: [candidate]
+        }
+      }
+    });
+
+    const closePickerBtn = wrapper.find('button[aria-label="Close subtitle picker"]');
+    expect(closePickerBtn.exists()).toBe(true);
+    await closePickerBtn.trigger('click');
+    expect(wrapper.emitted('close-subtitle-picker')).toHaveLength(1);
+
+    const candBtn = wrapper.findAll('button').find((b) => b.text().includes('Hash'));
+    expect(candBtn).toBeDefined();
+    await candBtn!.trigger('click');
+    expect(wrapper.emitted('download-subtitle')?.[0]).toEqual([item, candidate]);
+
+    const testBtn = wrapper.findAll('button').find((b) => b.text().includes('Test'));
+    expect(testBtn).toBeDefined();
+    await testBtn!.trigger('click');
+    expect(wrapper.emitted('preview-subtitle')?.[0]?.[0]).toEqual(item);
+
+    const closedWrapper = mount(QueueTable, {
+      props: {
+        items: [item],
+        disabled: false,
+        subtitlePicker: null
+      }
+    });
+    const subBtn = closedWrapper.findAll('button').find((b) => b.text().includes('Sub spa'));
+    expect(subBtn).toBeDefined();
+    await subBtn!.trigger('click');
+    expect(closedWrapper.emitted('search-subtitles')?.[0]?.[0]).toEqual(item);
+  });
+
+  it('renders clickable provider links in Metadata Match using shared ProviderLinks', () => {
+    const wrapper = mount(QueueTable, {
+      props: {
+        items: [SAMPLE_ITEM],
+        disabled: false
+      }
+    });
+    const providerLink = wrapper.find('.vo-provider-link--imdb');
+    expect(providerLink.exists()).toBe(true);
+    expect(providerLink.attributes('href')).toBe('https://www.imdb.com/title/tt8579674/');
+    expect(providerLink.attributes('target')).toBe('_blank');
+  });
 });

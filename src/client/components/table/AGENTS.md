@@ -18,6 +18,7 @@ Frontend Maintainers.
 - [tableQueryCore.ts](tableQueryCore.ts): Pure filtering, sorting, and projection helpers.
 - [tableQuery.worker.ts](tableQuery.worker.ts): Web Worker entrypoint for off-main-thread table queries.
 - [VirtualDataTable.vue](VirtualDataTable.vue): Shared virtualized table shell with opaque sticky headers and `#row-after` conflict slot.
+- [TableResetCount.vue](TableResetCount.vue): Shared `Reset Columns` button and `Showing X of Y` table count control.
 - [useTableVirtualizer.ts](useTableVirtualizer.ts): `FenwickHeightTree` prefix-sum virtualizer.
 - [useTableColumns.ts](useTableColumns.ts): Drag-and-drop column reordering, pointer resizing, and `Reset Columns`.
 - [useTableWorker.ts](useTableWorker.ts): Stale-safe Web Worker bridge for table queries.

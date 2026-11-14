@@ -6,6 +6,7 @@ import VerifierView from '../../src/client/components/VerifierView.vue';
 import {
   asVerifierEntryId,
   type VerifierEntry,
+  type VerifierEntryId,
   type VerifierState
 } from '../../src/domain/types.ts';
 
@@ -248,7 +249,7 @@ describe('VerifierView', () => {
     ]);
   });
 
-  it('renders 3-line progress stack with ETA and currentFile while scanning', () => {
+  it('renders parallel activeTasks rows with ETA while scanning', () => {
     const state: VerifierState = {
       scanning: true,
       fixing: false,
@@ -257,7 +258,10 @@ describe('VerifierView', () => {
         total: 100,
         percent: 12,
         stageLabel: 'movies',
-        currentFile: 'Elysium (2013) {imdb-tt1535108} [4k, HDR, 10bit]',
+        activeTasks: [
+          { slot: 0, fileName: 'Elysium (2013) {imdb-tt1535108} [4k, HDR, 10bit]', percent: 60 },
+          { slot: 1, fileName: 'Dune (2021) {imdb-tt1160419}' }
+        ],
         etaSeconds: 45
       },
       summary: null,
@@ -271,9 +275,138 @@ describe('VerifierView', () => {
 
     expect(wrapper.find('.vo-progress__meta').text()).toContain('Scanning · 12/100 (12%)');
     expect(wrapper.find('.vo-progress__meta').text()).toContain('movies');
-    expect(wrapper.find('.vo-progress__file').text()).toBe(
+    const rows = wrapper.findAll('.vo-progress__files .vo-progress__file');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.find('.vo-progress__file-name').text()).toBe(
       'Elysium (2013) {imdb-tt1535108} [4k, HDR, 10bit]'
     );
+    expect(rows[0]?.find('.vo-progress__file-pct').text()).toBe('60%');
+    expect(rows[1]?.find('.vo-progress__file-name').text()).toBe('Dune (2021) {imdb-tt1160419}');
+    expect(rows[1]?.find('.vo-progress__file-pct').exists()).toBe(false);
     expect(wrapper.find('progress.vo-progress__bar').attributes('value')).toBe('12');
+  });
+
+  it('renders Destination exists badge, allows selection, and emits resolve-conflict on DESTINATION_COLLISION entries', async () => {
+    const state: VerifierState = {
+      scanning: false,
+      fixing: false,
+      progress: null,
+      summary: {
+        librariesScanned: 1,
+        totalRootsAnalyzed: 2,
+        totalSeasonDirsAnalyzed: 0,
+        totalFilesAnalyzed: 2,
+        compliantRoots: 0,
+        issueCount: 1,
+        scannedAt: '2026-11-14T13:00:00Z'
+      },
+      entries: [
+        {
+          id: asVerifierEntryId('movies:Ant-Man (2015)'),
+          category: 'movies',
+          mediaKind: 'movie',
+          currentRootName: 'Ant-Man (2015)',
+          expectedRootName: 'Ant-Man (2015) {imdb-tt0478970}',
+          issues: ['MISSING_PROVIDER_ID', 'DESTINATION_COLLISION'],
+          collisionTarget: 'Ant-Man (2015) {imdb-tt0478970}',
+          collisionComparison: {
+            itemId: asVerifierEntryId('movies:Ant-Man (2015)'),
+            sourceFileName: 'Ant-Man (2015)/Ant-Man.mkv',
+            kind: 'existing-file',
+            destinationPath: '/movies/Ant-Man (2015) {imdb-tt0478970}/Ant-Man.mkv',
+            existingPath: '/movies/Ant-Man (2015)/Ant-Man.mkv',
+            incoming: {
+              formatName: 'matroska',
+              durationSeconds: 7000,
+              sizeBytes: 2_000_000_000,
+              bitrateBps: 2_200_000,
+              videoStreams: [{ index: 0, codecName: 'h264', width: 1920, height: 1080 }],
+              audioStreams: [],
+              subtitleStreams: []
+            },
+            existing: {
+              formatName: 'matroska',
+              durationSeconds: 7000,
+              sizeBytes: 1_500_000_000,
+              bitrateBps: 1_700_000,
+              videoStreams: [{ index: 0, codecName: 'h264', width: 1280, height: 720 }],
+              audioStreams: [],
+              subtitleStreams: []
+            }
+          },
+          resolvedTitle: 'Ant-Man',
+          resolvedYear: 2015,
+          steps: [
+            {
+              kind: 'root-dir',
+              fromRelative: 'Ant-Man (2015)',
+              toRelative: 'Ant-Man (2015) {imdb-tt0478970}'
+            }
+          ]
+        }
+      ],
+      lastFixResult: null
+    };
+
+    const { defineComponent, h, nextTick, ref } = await import('vue');
+    const stateRef = ref<VerifierState>(state);
+    const Host = defineComponent({
+      setup() {
+        return () =>
+          h(VerifierView, {
+            state: stateRef.value,
+            disabled: false,
+            conflictResolutions: {},
+            'onUpdate:selectedIds': (ids: readonly VerifierEntryId[]) => {
+              selectedIdsEmitted.push(ids);
+            },
+            'onResolve-conflict': () => {
+              resolveConflictEmitted += 1;
+            }
+          });
+      }
+    });
+    const selectedIdsEmitted: (readonly VerifierEntryId[])[] = [];
+    let resolveConflictEmitted = 0;
+    const wrapper = mount(Host);
+
+    expect(wrapper.text()).toContain('Destination exists');
+    expect(wrapper.text()).toContain('Conflict: Ant-Man (2015) {imdb-tt0478970}');
+    expect(wrapper.text()).toContain('Showing 1 of 1');
+    const rowCheckbox = wrapper.find('input[aria-label="Select Ant-Man (2015)"]');
+    expect((rowCheckbox.element as HTMLInputElement).disabled).toBe(false);
+    await rowCheckbox.setValue(true);
+    expect((rowCheckbox.element as HTMLInputElement).checked).toBe(true);
+
+    // Updating state.entries while keeping the collision entry must preserve its selection
+    stateRef.value = { ...state, entries: [...state.entries] };
+    await nextTick();
+    expect((rowCheckbox.element as HTMLInputElement).checked).toBe(true);
+    expect(selectedIdsEmitted.at(-1)).toEqual([asVerifierEntryId('movies:Ant-Man (2015)')]);
+
+    const resolveBtn = wrapper
+      .findAll('button')
+      .find((btn) => btn.text().includes('Resolve conflict'));
+    expect(resolveBtn).toBeDefined();
+    await resolveBtn!.trigger('click');
+    expect(resolveConflictEmitted).toBe(1);
+
+    const overwriteWrapper = mount(VerifierView, {
+      props: {
+        state,
+        disabled: false,
+        conflictResolutions: { [asVerifierEntryId('movies:Ant-Man (2015)')]: 'overwrite' }
+      }
+    });
+    expect(overwriteWrapper.text()).toContain('Overwrite');
+
+    const ignoreWrapper = mount(VerifierView, {
+      props: {
+        state,
+        disabled: false,
+        conflictResolutions: { [asVerifierEntryId('movies:Ant-Man (2015)')]: 'ignore' }
+      }
+    });
+    expect(ignoreWrapper.text()).toContain('Ignore');
   });
 });

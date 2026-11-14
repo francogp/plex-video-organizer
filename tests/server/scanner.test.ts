@@ -1,10 +1,15 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { describe, expect, it, vi } from 'vite-plus/test';
 
-import { asIso639_2Code, type MediaProbeSummary } from '../../src/domain/types.ts';
+import {
+  asIso639_2Code,
+  type ActiveParallelTask,
+  type MediaProbeSummary
+} from '../../src/domain/types.ts';
 import {
   enrichItemsWithAudioAnalysis,
   scanInputDirectory
@@ -318,7 +323,7 @@ describe('scanner', () => {
             suggestion: 'ok'
           };
         },
-        (_completed, _total, _item, overallFraction) => {
+        (_completed, _total, _activeTasks, overallFraction) => {
           if (overallFraction !== undefined) {
             fractions.push(Number(overallFraction.toFixed(3)));
           }
@@ -378,22 +383,15 @@ describe('scanner', () => {
     }
   });
 
-  it('completes audio enrichment and falls back to tmpdir when audio-cache.json throws EACCES', async () => {
+  it('completes audio enrichment and falls back to tmpdir when scan-cache.sqlite dir throws EACCES', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-eacces-'));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const origWriteFile = fs.writeFile.bind(fs);
-    const origAccess = fs.access.bind(fs);
-    const writeSpy = vi.spyOn(fs, 'writeFile').mockImplementation(async (p, d, o) => {
+    const origMkdir = fs.mkdir.bind(fs);
+    const mkdirSpy = vi.spyOn(fs, 'mkdir').mockImplementation(async (p, o) => {
       if (typeof p === 'string' && p.includes('readonly-cfg')) {
         throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
       }
-      return origWriteFile(p, d, o);
-    });
-    const accessSpy = vi.spyOn(fs, 'access').mockImplementation(async (p, mode) => {
-      if (typeof p === 'string' && p.includes('readonly-cfg')) {
-        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
-      }
-      return origAccess(p, mode);
+      return origMkdir(p, o);
     });
 
     try {
@@ -423,11 +421,18 @@ describe('scanner', () => {
       expect(rehydrated).toHaveLength(1);
       expect(analyzeSpy).toHaveBeenCalledTimes(1);
     } finally {
-      accessSpy.mockRestore();
-      writeSpy.mockRestore();
+      mkdirSpy.mockRestore();
       warnSpy.mockRestore();
       await fs.rm(tmpDir, { recursive: true, force: true });
-      await fs.rm(path.join(os.tmpdir(), 'plex-video-organizer-audio-cache.json'), { force: true });
+      const { createHash } = await import('node:crypto');
+      const fallbackHash = createHash('sha256')
+        .update(path.resolve(path.join(tmpDir, 'readonly-cfg')))
+        .digest('hex')
+        .slice(0, 8);
+      const fallbackDb = path.join(os.tmpdir(), `plex-video-organizer-${fallbackHash}.sqlite`);
+      await fs.rm(fallbackDb, { force: true });
+      await fs.rm(`${fallbackDb}-wal`, { force: true });
+      await fs.rm(`${fallbackDb}-shm`, { force: true });
     }
   });
 
@@ -472,6 +477,283 @@ describe('scanner', () => {
       expect(items[0]?.fileName).toBe('Real Movie (2024).mkv');
       expect(items[0]?.externalSubtitles).toHaveLength(1);
       expect(items[0]?.externalSubtitles[0]?.relativePath).toBe('Real Movie (2024).spa.srt');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports slot-indexed activeTasks across concurrent audio analysis workers', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-slots-'));
+    try {
+      const names = ['Alpha.2020.mkv', 'Bravo.2021.mkv', 'Charlie.2022.mkv', 'Delta.2023.mkv'];
+      for (const name of names) {
+        await fs.writeFile(path.join(tmpDir, name), name);
+      }
+
+      const items = await scanInputDirectory(tmpDir, async () => MOCK_PROBE);
+      expect(items).toHaveLength(4);
+
+      const snapshots: {
+        readonly completed: number;
+        readonly activeTasks: readonly ActiveParallelTask[];
+      }[] = [];
+      const releases: (() => void)[] = [];
+      let allFirstBatchStarted!: () => void;
+      const firstBatchBarrier = new Promise<void>((resolve) => {
+        allFirstBatchStarted = resolve;
+      });
+      let startedCount = 0;
+
+      await enrichItemsWithAudioAnalysis(
+        items,
+        path.join(tmpDir, 'cfg'),
+        async (_filePath, streamOrder, _dur, onProgress) => {
+          startedCount += 1;
+          const waitPromise =
+            startedCount <= 3
+              ? new Promise<void>((resolve) => {
+                  releases.push(resolve);
+                })
+              : Promise.resolve();
+          onProgress?.({ percent: 50, etaSeconds: 5 });
+          if (startedCount === 3) {
+            allFirstBatchStarted();
+            queueMicrotask(() => {
+              for (const release of releases.splice(0)) {
+                release();
+              }
+            });
+          }
+          await waitPromise;
+          return {
+            streamOrder,
+            meanVolumeDb: -18,
+            maxVolumeDb: -1,
+            recommendedGainDb: 0,
+            suggestion: 'ok'
+          };
+        },
+        (completed, _total, activeTasks) => {
+          snapshots.push({ completed, activeTasks: activeTasks.map((t) => ({ ...t })) });
+        }
+      );
+
+      await firstBatchBarrier;
+      const peakSnapshot = snapshots.find((s) => s.activeTasks.length === 3);
+      expect(peakSnapshot).toBeDefined();
+      expect(peakSnapshot?.activeTasks.map((t) => t.slot)).toEqual([0, 1, 2]);
+      expect(new Set(peakSnapshot?.activeTasks.map((t) => t.fileName)).size).toBe(3);
+
+      const peakProgressSnapshot = snapshots.find(
+        (s) => s.activeTasks.length === 3 && s.activeTasks.every((t) => t.percent === 50)
+      );
+      expect(peakProgressSnapshot).toBeDefined();
+
+      const lastSnapshot = snapshots.at(-1);
+      expect(lastSnapshot?.completed).toBe(4);
+      expect(lastSnapshot?.activeTasks).toEqual([]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists probe-cache.json, skips unchanged files on rescan, and reports probe progress', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-probe-cache-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+
+    try {
+      const fileA = path.join(inputDir, 'Alpha (2024).mkv');
+      const fileB = path.join(inputDir, 'Bravo (2024).mkv');
+      await fs.writeFile(fileA, 'alpha-content');
+      await fs.writeFile(fileB, 'bravo-content');
+
+      let probeCalls = 0;
+      const progressEvents: { readonly completed: number; readonly total: number }[] = [];
+
+      const firstItems = await scanInputDirectory(
+        inputDir,
+        async () => {
+          probeCalls += 1;
+          return MOCK_PROBE;
+        },
+        undefined,
+        {
+          configDir,
+          onProgress: (completed, total) => {
+            progressEvents.push({ completed, total });
+          }
+        }
+      );
+
+      expect(firstItems).toHaveLength(2);
+      expect(probeCalls).toBe(2);
+      expect(progressEvents.at(-1)).toEqual({ completed: 2, total: 2 });
+
+      const dbStat = await fs.stat(path.join(configDir, 'plex-video-organizer.sqlite'));
+      expect(dbStat.isFile()).toBe(true);
+
+      probeCalls = 0;
+      const secondItems = await scanInputDirectory(
+        inputDir,
+        async () => {
+          probeCalls += 1;
+          return MOCK_PROBE;
+        },
+        undefined,
+        { configDir }
+      );
+
+      expect(secondItems).toHaveLength(2);
+      expect(probeCalls).toBe(0);
+
+      // Mutate fileA size -> only fileA should be re-probed
+      await fs.writeFile(fileA, 'alpha-content-modified');
+      probeCalls = 0;
+      const thirdItems = await scanInputDirectory(
+        inputDir,
+        async () => {
+          probeCalls += 1;
+          return MOCK_PROBE;
+        },
+        undefined,
+        { configDir }
+      );
+
+      expect(thirdItems).toHaveLength(2);
+      expect(probeCalls).toBe(1);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keys probe-cache.json and audio-cache.json by relative POSIX path so cache survives inputDir root changes', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-rel-cache-'));
+    const mountA = path.join(tmpDir, 'mount-a');
+    const mountB = path.join(tmpDir, 'mount-b');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(path.join(mountA, 'Movies'), { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+
+    try {
+      await fs.writeFile(path.join(mountA, 'Movies', 'Film (2024).mkv'), 'film-bytes');
+
+      let probeCalls = 0;
+      let audioCalls = 0;
+      const scannedA = await scanInputDirectory(
+        mountA,
+        async () => {
+          probeCalls += 1;
+          return MOCK_PROBE;
+        },
+        undefined,
+        { configDir }
+      );
+      await enrichItemsWithAudioAnalysis(scannedA, configDir, async (_p, streamOrder) => {
+        audioCalls += 1;
+        return {
+          streamOrder,
+          meanVolumeDb: -16,
+          maxVolumeDb: -1,
+          recommendedGainDb: 0,
+          suggestion: 'ok'
+        };
+      });
+      expect(probeCalls).toBe(1);
+      expect(audioCalls).toBe(1);
+
+      const db = new DatabaseSync(path.join(configDir, 'plex-video-organizer.sqlite'));
+      const probeRows = db.prepare('SELECT cache_key FROM probe_cache').all();
+      const audioRows = db.prepare('SELECT cache_key FROM audio_cache').all();
+      db.close();
+      expect(String(probeRows[0]?.cache_key).startsWith('Movies/Film (2024).mkv::')).toBe(true);
+      expect(String(audioRows[0]?.cache_key).startsWith('Movies/Film (2024).mkv::')).toBe(true);
+
+      // Simulate switching host/container inputDir root (mountA -> mountB)
+      await fs.rename(mountA, mountB);
+      probeCalls = 0;
+      audioCalls = 0;
+      const scannedB = await scanInputDirectory(
+        mountB,
+        async () => {
+          probeCalls += 1;
+          return MOCK_PROBE;
+        },
+        undefined,
+        { configDir }
+      );
+      await enrichItemsWithAudioAnalysis(scannedB, configDir, async (_p, streamOrder) => {
+        audioCalls += 1;
+        return {
+          streamOrder,
+          meanVolumeDb: -16,
+          maxVolumeDb: -1,
+          recommendedGainDb: 0,
+          suggestion: 'ok'
+        };
+      });
+      expect(probeCalls).toBe(0);
+      expect(audioCalls).toBe(0);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports activeFraction excluding cache hits so ETA does not climb on resumed scans', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-eta-'));
+    try {
+      const configDir = path.join(tmpDir, 'config');
+      const inputDir = path.join(tmpDir, 'input');
+      await fs.mkdir(inputDir, { recursive: true });
+      await fs.writeFile(path.join(inputDir, 'Cached (2024).mkv'), 'a'.repeat(300));
+
+      const firstItems = await scanInputDirectory(inputDir, async () => MOCK_PROBE, undefined, {
+        configDir
+      });
+      await enrichItemsWithAudioAnalysis(firstItems, configDir, async (_p, streamOrder) => ({
+        streamOrder,
+        meanVolumeDb: -16,
+        maxVolumeDb: -1,
+        recommendedGainDb: 0,
+        suggestion: 'ok'
+      }));
+
+      await fs.writeFile(path.join(inputDir, 'Pending (2025).mkv'), 'b'.repeat(100));
+      const secondItems = await scanInputDirectory(inputDir, async () => MOCK_PROBE, undefined, {
+        configDir
+      });
+
+      const progressSamples: Array<{
+        readonly overall: number | undefined;
+        readonly active: number | undefined;
+      }> = [];
+      await enrichItemsWithAudioAnalysis(
+        secondItems,
+        configDir,
+        async (filePath, streamOrder, _dur, onProg) => {
+          if (filePath.includes('Pending')) {
+            onProg?.({ percent: 50 });
+          }
+          return {
+            streamOrder,
+            meanVolumeDb: -16,
+            maxVolumeDb: -1,
+            recommendedGainDb: 0,
+            suggestion: 'ok'
+          };
+        },
+        (_completed, _total, _tasks, overall, active) => {
+          progressSamples.push({ overall, active });
+        }
+      );
+
+      const midSample = progressSamples.find(
+        (s) => s.overall !== undefined && s.overall > 0.7 && s.overall < 1
+      );
+      expect(midSample).toBeDefined();
+      expect(midSample?.active).toBeCloseTo(0.5, 1);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

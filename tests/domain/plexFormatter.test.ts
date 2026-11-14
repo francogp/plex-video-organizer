@@ -3,7 +3,6 @@ import path from 'node:path';
 import { describe, expect, it } from 'vite-plus/test';
 
 import {
-  extractPlexTags,
   extractSplitPart,
   formatEditionTag,
   formatMovieRelativePath,
@@ -12,6 +11,7 @@ import {
   resolveContainedOutputPath,
   sanitizePlexSegment
 } from '../../src/domain/plexFormatter.ts';
+import { extractPlexTags } from '../../src/domain/plexTagExtractor.ts';
 import {
   asClientId,
   asImdbId,
@@ -65,25 +65,32 @@ describe('plexFormatter', () => {
   it('extracts deterministic tags from filename and probe metadata', () => {
     expect(extractPlexTags('Blade.Runner.1982.Directors.Cut.2160p.Latino.HDR.10bit.mkv')).toEqual([
       '4k',
-      'Directors Cut',
-      'Spanish Audio',
       'HDR',
-      '10bit'
+      '10bit',
+      'Directors Cut',
+      'Spanish Audio'
     ]);
 
-    expect(extractPlexTags('Movie.Extended.Unrated.1440p.mkv')).toEqual([
+    expect(extractPlexTags('Movie.Extended.Unrated.1440p.Dual.mkv')).toEqual([
       '2k',
       'Extended',
-      'Unrated'
+      'Unrated',
+      'Spanish Audio'
     ]);
 
-    expect(extractPlexTags('Movie.mkv', SAMPLE_4K_HDR_PROBE)).toEqual(['4k', 'HDR', '10bit']);
+    expect(extractPlexTags('Movie.mkv', SAMPLE_4K_HDR_PROBE)).toEqual([
+      '4k',
+      'HDR',
+      'HEVC',
+      'DDP 5.1',
+      '10bit'
+    ]);
     expect(
       extractPlexTags('Movie.mkv', {
         ...SAMPLE_4K_HDR_PROBE,
         videoStreams: [{ index: 0, codecName: 'h264', width: 1920, height: 1080 }]
       })
-    ).toEqual(['1080p']);
+    ).toEqual(['1080p', 'H.264', 'DDP 5.1']);
     expect(
       extractPlexTags('Movie.mkv', {
         ...SAMPLE_4K_HDR_PROBE,
@@ -97,19 +104,135 @@ describe('plexFormatter', () => {
           }
         ]
       })
-    ).toEqual(['2k', 'HDR']);
+    ).toEqual(['2k', 'HDR', 'HEVC', 'DDP 5.1']);
     expect(
       extractPlexTags('Movie.mkv', {
         ...SAMPLE_4K_HDR_PROBE,
         videoStreams: [{ index: 0, codecName: 'h264', width: 1280, height: 720 }]
       })
-    ).toEqual(['720p']);
+    ).toEqual(['720p', 'H.264', 'DDP 5.1']);
     expect(
       extractPlexTags('Movie.mkv', {
         ...SAMPLE_4K_HDR_PROBE,
         videoStreams: [{ index: 0, codecName: 'h264', width: 720, height: 480 }]
       })
-    ).toEqual(['480p']);
+    ).toEqual(['480p', 'H.264', 'DDP 5.1']);
+  });
+
+  it('extracts DV, HDR10+, audio codec/channels, source, downmix 2.0, and ffprobe Spanish Audio', () => {
+    const richProbe: MediaProbeSummary = {
+      ...SAMPLE_4K_HDR_PROBE,
+      videoStreams: [
+        {
+          index: 0,
+          codecName: 'hevc',
+          width: 3840,
+          height: 2160,
+          bitDepth: 10,
+          colorTransfer: 'smpte2084',
+          hasDolbyVision: true,
+          hasHdr10Plus: true
+        }
+      ],
+      audioStreams: [
+        {
+          index: 1,
+          streamOrder: 0,
+          codecName: 'eac3',
+          profile: 'Dolby Digital Plus + Dolby Atmos',
+          language: asIso639_2Code('eng'),
+          channels: 6,
+          isDefault: true
+        },
+        {
+          index: 2,
+          streamOrder: 1,
+          codecName: 'aac',
+          language: asIso639_2Code('spa'),
+          channels: 2,
+          isDefault: false
+        }
+      ]
+    };
+
+    expect(extractPlexTags('Supergirl.2026.2160p.iT.WEB-DL.H265-BTM.mkv', richProbe)).toEqual([
+      '4k',
+      'DV',
+      'HDR10+',
+      'HEVC',
+      'DDP Atmos 5.1',
+      '10bit',
+      'WEB-DL',
+      'Spanish Audio'
+    ]);
+
+    expect(
+      extractPlexTags('Supergirl.2026.2160p.iT.WEB-DL.H265-BTM.mkv', richProbe, {
+        trackSelection: {
+          audioTracks: [
+            { streamOrder: 0, include: true, language: asIso639_2Code('eng'), isDefault: true },
+            { streamOrder: 1, include: false, language: asIso639_2Code('spa'), isDefault: false }
+          ],
+          subtitleMergeMode: 'keep-and-add',
+          includedInternalSubtitles: [],
+          externalSubtitleOrder: [],
+          needsUserPrompt: false
+        },
+        audioNormalization: { mode: 'loudnorm', codec: 'aac', downmixStereo: true }
+      })
+    ).toEqual(['4k', 'DV', 'HDR10+', 'HEVC', 'AAC 2.0', '10bit', 'WEB-DL']);
+
+    expect(
+      extractPlexTags('Supergirl.2026.2160p.iT.WEB-DL.H265-BTM.mkv', richProbe, {
+        trackSelection: {
+          audioTracks: [
+            { streamOrder: 0, include: true, language: asIso639_2Code('eng'), isDefault: true },
+            { streamOrder: 1, include: false, language: asIso639_2Code('spa'), isDefault: false }
+          ],
+          subtitleMergeMode: 'keep-and-add',
+          includedInternalSubtitles: [],
+          externalSubtitleOrder: [],
+          needsUserPrompt: false,
+          audioNormalization: { mode: 'loudnorm', codec: 'aac', downmixStereo: true }
+        }
+      })
+    ).toEqual(['4k', 'DV', 'HDR10+', 'HEVC', 'AAC 2.0', '10bit', 'WEB-DL']);
+
+    expect(
+      extractPlexTags('Movie.2024.Remux.BluRay.AV1.mkv', {
+        ...SAMPLE_4K_HDR_PROBE,
+        videoStreams: [{ index: 0, codecName: 'av1', width: 1920, height: 1080 }],
+        audioStreams: [
+          {
+            index: 1,
+            streamOrder: 0,
+            codecName: 'truehd',
+            profile: 'TrueHD + Atmos',
+            language: asIso639_2Code('eng'),
+            channels: 8,
+            isDefault: true
+          }
+        ]
+      })
+    ).toEqual(['1080p', 'AV1', 'TrueHD Atmos 7.1', 'Remux']);
+
+    expect(
+      extractPlexTags('Show.WEBRip.HDTV.mkv', {
+        ...SAMPLE_4K_HDR_PROBE,
+        videoStreams: [{ index: 0, codecName: 'vp9', width: 1280, height: 720 }],
+        audioStreams: [
+          {
+            index: 1,
+            streamOrder: 0,
+            codecName: 'dts',
+            profile: 'DTS-HD MA',
+            language: asIso639_2Code('eng'),
+            channels: 8,
+            isDefault: true
+          }
+        ]
+      })
+    ).toEqual(['720p', 'VP9', 'DTS-HD MA 7.1', 'WEBRip']);
   });
 
   it('validates branded ID helpers', () => {

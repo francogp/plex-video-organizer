@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 
 import { OUTPUT_CATEGORIES } from '../../domain/constants.ts';
 import type {
+  ConflictDecision,
   OutputCategory,
   VerifierEntry,
   VerifierEntryId,
@@ -15,7 +16,10 @@ import {
   formatEta,
   splitRelativePathSegments
 } from '../utils/formatters.ts';
+import ParallelTasksList from './ParallelTasksList.vue';
+import ProviderLinks from './ProviderLinks.vue';
 import { areAllVisibleRowsSelected } from './table/tableQueryCore.ts';
+import TableResetCount from './table/TableResetCount.vue';
 import type { TableColumnDef, TableWorkerRowInput } from './table/tableTypes.js';
 import { useTableWorker } from './table/useTableWorker.js';
 import VirtualDataTable from './table/VirtualDataTable.vue';
@@ -56,11 +60,13 @@ const VERIFIER_COLUMNS: readonly TableColumnDef<VerifierColId>[] = [
 const props = defineProps<{
   readonly state: VerifierState;
   readonly disabled: boolean;
+  readonly conflictResolutions?: Readonly<Partial<Record<VerifierEntryId, ConflictDecision>>>;
 }>();
 
 const emit = defineEmits<{
   'update:selectedIds': [entryIds: readonly VerifierEntryId[]];
   'dismiss-error': [];
+  'resolve-conflict': [entry: VerifierEntry];
 }>();
 
 const CATEGORY_LABELS: ReadonlyMap<OutputCategory, string> = new Map([
@@ -72,6 +78,7 @@ const CATEGORY_LABELS: ReadonlyMap<OutputCategory, string> = new Map([
 
 const ISSUE_LABELS: ReadonlyMap<VerifierIssueCode, string> = new Map([
   ['EMPTY_DIRECTORY', 'Empty directory'],
+  ['DESTINATION_COLLISION', 'Destination exists'],
   ['MISSING_YEAR', 'Missing (YYYY)'],
   ['MISSING_PROVIDER_ID', 'Missing {tvdb/imdb/tmdb}'],
   ['NON_STANDARD_SEASON_DIR', 'Non-standard Season dir'],
@@ -105,6 +112,10 @@ function buildWorkerRows(entries: readonly VerifierEntry[]): TableWorkerRowInput
   return rows;
 }
 
+function hasDestinationCollision(entry: VerifierEntry): boolean {
+  return entry.issues.includes('DESTINATION_COLLISION');
+}
+
 watch(
   () => props.state.entries,
   (nextEntries): void => {
@@ -136,8 +147,12 @@ watch([searchQuery, filterCategory], (): void => {
   });
 });
 
+const selectableFilteredIndices = computed<readonly number[]>(() =>
+  filteredIndices.value.filter((idx) => props.state.entries[idx] !== undefined)
+);
+
 const allVisibleSelected = computed<boolean>(() =>
-  areAllVisibleRowsSelected(filteredIndices.value, props.state.entries, selectedIds.value)
+  areAllVisibleRowsSelected(selectableFilteredIndices.value, props.state.entries, selectedIds.value)
 );
 
 function toggleEntry(id: VerifierEntryId): void {
@@ -152,7 +167,7 @@ function toggleEntry(id: VerifierEntryId): void {
 
 function toggleAllVisible(): void {
   const next = new Set(selectedIds.value);
-  const indices = filteredIndices.value;
+  const indices = selectableFilteredIndices.value;
   const shouldRemove = allVisibleSelected.value;
   for (let i = 0; i < indices.length; i++) {
     const rawIdx = indices[i];
@@ -308,9 +323,10 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
               </template>
             </div>
           </div>
-          <div v-if="props.state.progress?.currentFile" class="vo-progress__file vo-mono">
-            {{ props.state.progress.currentFile }}
-          </div>
+          <ParallelTasksList
+            v-if="props.state.progress"
+            :tasks="props.state.progress.activeTasks"
+          />
           <progress
             v-if="props.state.progress && props.state.progress.total > 0"
             class="vo-progress__bar"
@@ -380,9 +396,11 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
             {{ categoryLabel(cat) }}
           </option>
         </select>
-        <button type="button" class="vo-btn" @click="vTableRef?.resetColumns()">
-          <span aria-hidden="true">🔄</span> Reset Columns
-        </button>
+        <TableResetCount
+          :shown-count="filteredIndices.length"
+          :total-count="props.state.entries.length"
+          @reset="vTableRef?.resetColumns()"
+        />
       </div>
     </div>
 
@@ -470,86 +488,45 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
                   {{ row.resolvedYear }}
                 </span>
                 <span v-else class="vo-badge vo-badge--warn">Year missing</span>
+                <span
+                  v-if="hasDestinationCollision(row) && row.collisionTarget"
+                  class="vo-badge vo-badge--danger vo-badge--truncate"
+                  :title="`Conflict: ${row.collisionTarget}`"
+                >
+                  Conflict: {{ row.collisionTarget }}
+                </span>
+                <button
+                  v-if="hasDestinationCollision(row)"
+                  type="button"
+                  class="vo-btn vo-btn--xs"
+                  :class="{
+                    'vo-btn--primary': props.conflictResolutions?.[row.id] === 'overwrite',
+                    'vo-btn--warn': !props.conflictResolutions?.[row.id]
+                  }"
+                  :disabled="props.disabled || props.state.fixing || !row.collisionComparison"
+                  :title="
+                    row.collisionComparison
+                      ? 'Compare files and choose Overwrite or Ignore'
+                      : 'No comparable video found in destination folder'
+                  "
+                  @click="emit('resolve-conflict', row)"
+                >
+                  <template v-if="props.conflictResolutions?.[row.id] === 'overwrite'">
+                    <span aria-hidden="true">✅</span> Overwrite
+                  </template>
+                  <template v-else-if="props.conflictResolutions?.[row.id] === 'ignore'">
+                    <span aria-hidden="true">⏭️</span> Ignore
+                  </template>
+                  <template v-else> <span aria-hidden="true">⚖️</span> Resolve conflict </template>
+                </button>
               </template>
               <span class="vo-badge vo-badge--compact vo-mono">
                 {{ row.steps.length }} step(s)
               </span>
-              <template v-if="!row.issues.includes('EMPTY_DIRECTORY')">
-                <a
-                  v-for="link in extractExternalIdLinks(row.expectedRootName, row.mediaKind)"
-                  :key="`${link.provider}-${link.id}`"
-                  :href="link.url"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="vo-badge vo-provider-link"
-                  :class="`vo-provider-link--${link.provider}`"
-                  :title="`Open ${link.label} (${link.id}) in new tab`"
-                >
-                  <svg
-                    v-if="link.provider === 'tvdb'"
-                    class="vo-provider-link__icon"
-                    viewBox="0 0 16 16"
-                    aria-hidden="true"
-                  >
-                    <rect
-                      x="1.5"
-                      y="4"
-                      width="13"
-                      height="9.5"
-                      rx="2"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    />
-                    <path
-                      d="M5.5 1.5L8 4l2.5-2.5"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.4"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    />
-                    <circle cx="8" cy="8.75" r="1.6" fill="currentColor" />
-                  </svg>
-                  <svg
-                    v-else-if="link.provider === 'imdb'"
-                    class="vo-provider-link__icon"
-                    viewBox="0 0 16 16"
-                    aria-hidden="true"
-                  >
-                    <rect x="1" y="3" width="14" height="10" rx="2" fill="currentColor" />
-                    <path
-                      d="M3.4 5.5v5M5.3 10.5V5.5l1.2 2.9 1.2-2.9v5M9.3 5.5h1.1a1.3 1.3 0 0 1 0 5H9.3zm2.6 0v5h1.2a1.1 1.1 0 0 0 0-2.2 1.1 1.1 0 0 0-1.2 0"
-                      fill="none"
-                      stroke="#111"
-                      stroke-width="1"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    />
-                  </svg>
-                  <svg v-else class="vo-provider-link__icon" viewBox="0 0 16 16" aria-hidden="true">
-                    <rect
-                      x="1.5"
-                      y="2.5"
-                      width="13"
-                      height="11"
-                      rx="2.5"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    />
-                    <circle cx="6" cy="8" r="1.8" fill="currentColor" />
-                    <path
-                      d="M9.5 6.2h3M9.5 9.8h3"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                      stroke-linecap="round"
-                    />
-                  </svg>
-                  <span>{{ link.label }}</span>
-                  <span class="vo-provider-link__ext" aria-hidden="true">↗</span>
-                </a>
-              </template>
+              <ProviderLinks
+                v-if="!row.issues.includes('EMPTY_DIRECTORY')"
+                :links="extractExternalIdLinks(row.expectedRootName, row.mediaKind)"
+              />
             </div>
           </div>
         </template>
@@ -703,6 +680,7 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
   padding: var(--vo-space-2);
   border: 1px solid var(--vo-border);
   border-radius: var(--vo-radius-sm);
+  overflow: hidden;
 }
 
 .vo-diff-card--current {
@@ -724,6 +702,18 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
   display: flex;
   flex-wrap: wrap;
   gap: var(--vo-space-1);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.vo-badge--truncate {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 .vo-plan-panels {
@@ -823,61 +813,5 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
 .vo-step-arrow {
   color: var(--vo-text-muted);
   font-size: var(--vo-text-xs);
-}
-
-.vo-provider-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--vo-space-1);
-  color: var(--vo-text);
-  transition:
-    border-color 140ms ease,
-    background-color 140ms ease;
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.vo-provider-link__icon {
-  width: var(--vo-space-3);
-  height: var(--vo-space-3);
-  flex-shrink: 0;
-}
-
-.vo-provider-link__ext {
-  font-size: var(--vo-text-xs);
-  opacity: 0.75;
-}
-
-.vo-provider-link--tvdb {
-  background: color-mix(in oklch, var(--vo-success) 14%, transparent);
-  color: var(--vo-success);
-  border-color: color-mix(in oklch, var(--vo-success) 55%, var(--vo-border));
-}
-
-.vo-provider-link--tvdb:hover {
-  background: color-mix(in oklch, var(--vo-success) 24%, transparent);
-  border-color: var(--vo-success);
-}
-
-.vo-provider-link--imdb {
-  background: color-mix(in oklch, var(--vo-warning) 14%, transparent);
-  color: var(--vo-warning);
-  border-color: color-mix(in oklch, var(--vo-warning) 55%, var(--vo-border));
-}
-
-.vo-provider-link--imdb:hover {
-  background: color-mix(in oklch, var(--vo-warning) 24%, transparent);
-  border-color: var(--vo-warning);
-}
-
-.vo-provider-link--tmdb {
-  background: color-mix(in oklch, var(--vo-accent) 14%, transparent);
-  color: var(--vo-accent);
-  border-color: color-mix(in oklch, var(--vo-accent) 55%, var(--vo-border));
-}
-
-.vo-provider-link--tmdb:hover {
-  background: color-mix(in oklch, var(--vo-accent) 24%, transparent);
-  border-color: var(--vo-accent);
 }
 </style>

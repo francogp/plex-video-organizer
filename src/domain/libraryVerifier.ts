@@ -7,17 +7,18 @@ import {
   type VideoExtension
 } from './constants.ts';
 import {
-  extractPlexTags,
   extractSplitPart,
   formatMovieRelativePath,
   formatTvRelativePath
 } from './plexFormatter.ts';
+import { extractPlexTags } from './plexTagExtractor.ts';
 import {
   asImdbId,
   asTmdbId,
   asTvdbId,
   asVerifierEntryId,
   type ImdbId,
+  type MediaProbeSummary,
   type OutputCategory,
   type TmdbId,
   type TvdbId,
@@ -387,6 +388,8 @@ export interface MovieVerifyInput {
   readonly edition?: string;
   readonly files: readonly string[];
   readonly unresolvedMetadata?: boolean;
+  readonly probe?: MediaProbeSummary;
+  readonly recalculateTags?: boolean;
 }
 
 /** Verifies a movie folder and generates bottom-up rename steps (`file` -> `root-dir`). */
@@ -399,10 +402,12 @@ export function buildMovieVerificationEntry(input: MovieVerifyInput): VerifierEn
   );
 
   const videoFiles = input.files.filter(isVideoFile);
-  const tags =
-    parsed.bracketTags.length > 0
+  const shouldRecalculate = Boolean(input.recalculateTags);
+  const resolveTags = (sourceName: string): readonly string[] =>
+    !shouldRecalculate && parsed.bracketTags.length > 0
       ? parsed.bracketTags
-      : extractPlexTags(videoFiles[0] ?? input.currentRootName);
+      : extractPlexTags(sourceName, input.probe);
+  const tags = resolveTags(videoFiles[0] ?? input.currentRootName);
 
   const rootFormatted = formatMovieRelativePath({
     title: input.resolvedTitle,
@@ -419,7 +424,7 @@ export function buildMovieVerificationEntry(input: MovieVerifyInput): VerifierEn
     const ext = path.extname(file);
     const oldStem = path.basename(file, ext);
     const splitPart = extractSplitPart(oldStem);
-    const fileTags = parsed.bracketTags.length > 0 ? parsed.bracketTags : extractPlexTags(oldStem);
+    const fileTags = resolveTags(oldStem);
     const formatted = formatMovieRelativePath({
       title: input.resolvedTitle,
       year: input.resolvedYear,

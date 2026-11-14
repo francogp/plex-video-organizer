@@ -3,7 +3,12 @@ import { createPinia, setActivePinia } from 'pinia';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 import { useOrganizerStore } from '../../src/client/stores/organizerStore.ts';
-import { asItemId, asTvdbId } from '../../src/domain/types.ts';
+import {
+  asIso639_2Code,
+  asItemId,
+  asTvdbId,
+  type SubtitleCandidate
+} from '../../src/domain/types.ts';
 
 function makeBaseState(overrides: Record<string, unknown> = {}) {
   return {
@@ -11,7 +16,9 @@ function makeBaseState(overrides: Record<string, unknown> = {}) {
     revision: 3,
     lockOwnerClientId: null,
     mountPaths: {
+      configDir: '/config',
       inputDir: '/data/input',
+      backupDir: '/data/backup',
       movies: '/data/output/movies',
       documentaries: '/data/output/documentaries',
       'animated-movies': '/data/output/animated-movies',
@@ -268,7 +275,12 @@ describe('organizerStore', () => {
     // Fallback HTTP status error without message/state
     fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 500 }));
     await expect(store.startScan()).rejects.toThrow('HTTP 500');
-    expect(fetchSpy).toHaveBeenCalledTimes(9);
+
+    // Network failure surfaces errorMessage instead of failing silently
+    fetchSpy.mockRejectedValueOnce(new Error('Failed to fetch'));
+    await expect(store.startScan()).rejects.toThrow('Failed to fetch');
+    expect(store.errorMessage).toBe('Failed to fetch');
+    expect(fetchSpy).toHaveBeenCalledTimes(10);
   });
 
   it('connects and disconnects SSE EventSource and handles state/progress/log events', async () => {
@@ -290,7 +302,13 @@ describe('organizerStore', () => {
         data: JSON.stringify(
           makeBaseState({
             phase: 'PROCESSING',
-            activeJob: { jobId: 'j1', totalItems: 1, completedItems: 0, currentPercent: 0 }
+            activeJob: {
+              jobId: 'j1',
+              totalItems: 1,
+              completedItems: 0,
+              activeTasks: [],
+              currentPercent: 0
+            }
           })
         )
       })
@@ -301,11 +319,14 @@ describe('organizerStore', () => {
       new MessageEvent('progress', {
         data: JSON.stringify({
           jobId: 'j1',
-          itemId: 'ep-1',
+          activeTasks: [
+            { slot: 0, itemId: 'ep-1', fileName: 'Show.S01E01.mkv', percent: 45 },
+            { slot: 1, itemId: 'ep-2', fileName: 'Show.S01E02.mkv', percent: 12 }
+          ],
           percent: 45,
           etaSeconds: 12,
           stage: 'moving',
-          stageLabel: 'Moving Show.S01E01.mkv (45%)',
+          stageLabel: 'Moving',
           completedItems: 1,
           totalItems: 2
         })
@@ -313,13 +334,17 @@ describe('organizerStore', () => {
     );
     expect(store.activeJob?.currentPercent).toBe(45);
     expect(store.activeJob?.stage).toBe('moving');
-    expect(store.activeJob?.stageLabel).toBe('Moving Show.S01E01.mkv (45%)');
+    expect(store.activeJob?.stageLabel).toBe('Moving');
     expect(store.activeJob?.completedItems).toBe(1);
     expect(store.activeJob?.totalItems).toBe(2);
+    expect(store.activeJob?.activeTasks).toEqual([
+      { slot: 0, itemId: asItemId('ep-1'), fileName: 'Show.S01E01.mkv', percent: 45 },
+      { slot: 1, itemId: asItemId('ep-2'), fileName: 'Show.S01E02.mkv', percent: 12 }
+    ]);
 
     listeners.get('progress')?.(
       new MessageEvent('progress', {
-        data: JSON.stringify({ jobId: 'other-job', itemId: 'ep-1', percent: 99 })
+        data: JSON.stringify({ jobId: 'other-job', activeTasks: [], percent: 99 })
       })
     );
     expect(store.activeJob?.currentPercent).toBe(45);
@@ -597,6 +622,76 @@ describe('organizerStore', () => {
     await store.setPreferredLanguages(['eng', 'native']);
     expect(store.preferredLanguages).toEqual(['eng', 'native']);
     expect(storage.loadSavedPreferredLanguages()).toEqual(['eng', 'native']);
+    vi.unstubAllGlobals();
+  });
+
+  it('tracks initialization readiness across connectionStatus and server initStatus', async () => {
+    localStorage.clear();
+    const store = useOrganizerStore();
+    expect(store.isInitializing).toBe(true);
+
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeBaseState({ initStatus: 'initializing' })), { status: 200 })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(makeBaseState({ initStatus: 'ready' })), { status: 200 })
+      );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await store.fetchState();
+    expect(store.connectionStatus).toBe('ready');
+    expect(store.serverInitStatus).toBe('initializing');
+    expect(store.isInitializing).toBe(true);
+
+    await store.fetchState();
+    expect(store.serverInitStatus).toBe('ready');
+    expect(store.isInitializing).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it('searches and downloads Spanish subtitles via store actions', async () => {
+    const store = useOrganizerStore();
+    const candidate: SubtitleCandidate = {
+      id: 'c1',
+      provider: 'opensubtitles-stremio',
+      language: asIso639_2Code('spa'),
+      variant: 'latam',
+      releaseName: 'Movie.2026.Latino.srt',
+      downloadUrl: 'https://subs.example/c1.srt',
+      hashMatch: true,
+      score: 1080
+    };
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ candidates: [candidate] }), { status: 200 })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            state: makeBaseState({ revision: 5 }),
+            downloaded: {
+              path: '/data/input/Movie.spa.srt',
+              relativePath: 'Movie.spa.srt',
+              extension: '.srt',
+              language: 'spa',
+              isForced: false,
+              isHearingImpaired: false,
+              isLanguageAmbiguous: false
+            }
+          }),
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const found = await store.searchItemSubtitles(asItemId('item-1'));
+    expect(found).toHaveLength(1);
+    const dl = await store.downloadItemSubtitle(asItemId('item-1'), candidate);
+    expect(dl.relativePath).toBe('Movie.spa.srt');
+    expect(store.revision).toBe(5);
     vi.unstubAllGlobals();
   });
 });

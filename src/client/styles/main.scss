@@ -157,6 +157,11 @@ body {
   box-shadow: var(--vo-shadow-panel);
 }
 
+.vo-banner--initializing {
+  color: var(--vo-text);
+  border-color: var(--vo-accent);
+}
+
 .vo-meta-eyebrow,
 .vo-inspector-eyebrow {
   display: flex;
@@ -234,6 +239,15 @@ body {
   gap: var(--vo-space-2);
   width: 100%;
   min-width: 0;
+}
+
+.vo-progress__row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-items: center;
+  gap: var(--vo-space-3);
+  inline-size: 100%;
 }
 
 .vo-progress__meta {

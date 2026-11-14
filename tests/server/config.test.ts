@@ -29,7 +29,9 @@ describe('server config', () => {
     expect(cfg.tvdbApiKey).toBeUndefined();
 
     const map = buildMountPathsMap(cfg);
+    expect(map.configDir).toBe(cfg.configDir);
     expect(map.inputDir).toBe(cfg.inputDir);
+    expect(map.backupDir).toBe(cfg.backupDir);
     expect(map.movies).toBe(cfg.outputMoviesDir);
     expect(map['tv-shows']).toBe(cfg.outputTvShowsDir);
   });

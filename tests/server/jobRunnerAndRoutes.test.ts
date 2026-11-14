@@ -366,9 +366,19 @@ describe('JobRunner & HTTP routes', () => {
       const badFixRes = await fetch(`${baseUrl}/api/verifier/fix`, {
         method: 'POST',
         headers: { 'X-Client-Id': 'clientA:1', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entryIds: [] })
+        body: JSON.stringify({ entryIds: [], conflictResolutions: { 'movies:X': 'ignore' } })
       });
       expect(badFixRes.status).toBe(400);
+
+      const validConflictRes = await fetch(`${baseUrl}/api/verifier/fix`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': 'clientA:1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entryIds: ['movies:Missing'],
+          conflictResolutions: { 'movies:Missing': 'ignore' }
+        })
+      });
+      expect([404, 409]).toContain(validConflictRes.status);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await fs.rm(tmpDir, { recursive: true, force: true });
@@ -571,9 +581,17 @@ describe('JobRunner & HTTP routes', () => {
       expect(cfgWarnLogs).toHaveLength(1);
       expect(warnSpy).toHaveBeenCalledTimes(1);
 
-      const persistedRaw = await origReadFile(fallbackQueuePath, 'utf8');
-      const persisted = JSON.parse(persistedRaw) as { readonly revision: number };
-      expect(persisted.revision).toBe(4);
+      const { DatabaseSync } = await import('node:sqlite');
+      const { createHash } = await import('node:crypto');
+      const fallbackHash = createHash('sha256')
+        .update(path.resolve(readonlyConfigDir))
+        .digest('hex')
+        .slice(0, 8);
+      const fallbackDbPath = path.join(os.tmpdir(), `plex-video-organizer-${fallbackHash}.sqlite`);
+      const checkDb = new DatabaseSync(fallbackDbPath, { readOnly: true });
+      const savedRow = checkDb.prepare('SELECT revision FROM queue_state WHERE id = 1').get();
+      checkDb.close();
+      expect(savedRow?.revision).toBe(4);
 
       const runner2 = new JobRunner(cfg);
       await runner2.init();
@@ -586,7 +604,97 @@ describe('JobRunner & HTTP routes', () => {
       writeSpy.mockRestore();
       mkdirSpy.mockRestore();
       warnSpy.mockRestore();
+      const { createHash } = await import('node:crypto');
+      const fallbackHash = createHash('sha256')
+        .update(path.resolve(readonlyConfigDir))
+        .digest('hex')
+        .slice(0, 8);
+      const fallbackDbPath = path.join(os.tmpdir(), `plex-video-organizer-${fallbackHash}.sqlite`);
       await fs.rm(fallbackQueuePath, { force: true });
+      await fs.rm(fallbackDbPath, { force: true });
+      await fs.rm(`${fallbackDbPath}-wal`, { force: true });
+      await fs.rm(`${fallbackDbPath}-shm`, { force: true });
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks mutations with SERVER_INITIALIZING (409) until init() completes and logs Job cancelled on unlock during active job', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-init-gate-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+
+    const cfg = loadConfig({
+      CONFIG_DIR: configDir,
+      INPUT_DIR: inputDir,
+      BACKUP_DIR: path.join(tmpDir, 'backup'),
+      OUTPUT_MOVIES_DIR: tmpDir,
+      OUTPUT_ANIMATED_MOVIES_DIR: tmpDir,
+      OUTPUT_TV_SHOWS_DIR: tmpDir,
+      OUTPUT_ANIMATED_SERIES_DIR: tmpDir
+    });
+
+    const runner = new JobRunner(cfg);
+    const server = http.createServer(createRequestHandler(runner, tmpDir));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+    try {
+      const addr = server.address() as { readonly port: number };
+      const baseUrl = `http://127.0.0.1:${String(addr.port)}`;
+
+      expect(runner.getState().initStatus).toBe('initializing');
+
+      const scanRes = await fetch(`${baseUrl}/api/scan`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': 'client-1:tab1' }
+      });
+      expect(scanRes.status).toBe(409);
+      const scanBody = (await scanRes.json()) as { readonly error?: string };
+      expect(scanBody.error).toBe('SERVER_INITIALIZING');
+
+      await runner.init();
+      expect(runner.getState().initStatus).toBe('ready');
+
+      await fs.writeFile(path.join(cfg.inputDir, 'Movie (2024).mkv'), 'video');
+      runner.startScan(asClientId('client-1:tab1'));
+      const cancelledState = await runner.unlock(asClientId('client-1:tab1'), false);
+      const messages = (cancelledState.logs ?? []).map((l) => l.message);
+      expect(messages.some((m) => m.includes('Job cancelled by client-1:tab1.'))).toBe(true);
+      expect(messages.some((m) => m.includes('Session unlocked'))).toBe(false);
+
+      // POST /api/scan/skip validates payload and returns skipped=false when idle
+      const badSkipRes = await fetch(`${baseUrl}/api/scan/skip`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': 'client-1:tab1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      expect(badSkipRes.status).toBe(400);
+
+      const idleSkipRes = await fetch(`${baseUrl}/api/scan/skip`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': 'client-1:tab1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemId: 'item-1' })
+      });
+      expect(idleSkipRes.status).toBe(200);
+      expect((await idleSkipRes.json()) as { readonly skipped: boolean }).toEqual({
+        skipped: false
+      });
+
+      // Skip during SCANNING marks only that job and clears on next startScan
+      runner.startScan(asClientId('client-1:tab1'));
+      const activeSkipRes = await fetch(`${baseUrl}/api/scan/skip`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': 'client-1:tab1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemId: 'item-1' })
+      });
+      expect(activeSkipRes.status).toBe(200);
+      expect((await activeSkipRes.json()) as { readonly skipped: boolean }).toEqual({
+        skipped: true
+      });
+      await runner.unlock(asClientId('client-1:tab1'), false);
+    } finally {
+      server.close();
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });

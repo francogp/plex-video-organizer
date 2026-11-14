@@ -4,21 +4,25 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { runSlotWorkerPool } from '../../domain/concurrency.ts';
 import {
   DEFAULT_PREFERRED_LANGUAGES,
   METADATA_LANGUAGE_CODES,
   ORGANIZING_TEMP_MARKER,
-  ORGANIZING_TEMP_SUFFIX,
-  isPermissionOrReadOnlyError
+  ORGANIZING_TEMP_SUFFIX
 } from '../../domain/constants.ts';
 import { parseProviderReference } from '../../domain/plexFormatter.ts';
+import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
 import {
   asJobId,
   asTvdbId,
+  collectActiveTasks,
   type ActiveJobProgress,
+  type ActiveParallelTask,
   type ClientId,
   type ConflictDecision,
   type EpisodeOrderMode,
+  type ExternalSubtitleFile,
   type ItemId,
   type ItemPatch,
   type JobId,
@@ -33,8 +37,10 @@ import {
   type OrganizerStatePayload,
   type OutputCategory,
   type ScannedItem,
+  type ServerInitStatus,
   type SseLogEvent,
   type SseProgressEvent,
+  type SubtitleCandidate,
   type TvdbId,
   type VerifierEntry,
   type VerifierEntryId,
@@ -44,7 +50,6 @@ import { buildMountPathsMap, type AppConfig } from '../config.ts';
 import {
   backupAndCleanupAfterJob,
   cleanupOrphanTempFiles,
-  isDirUnwritable,
   moveTempOutputFile,
   purgeExpiredBackups
 } from './fileMover.ts';
@@ -67,11 +72,16 @@ import {
   searchTvShows
 } from './metadata/tvdbClient.ts';
 import { runPreflightCheck, type PreflightReport } from './preflight.ts';
+import { openScanCacheDb } from './scanCacheDb.ts';
 import { enrichItemsWithAudioAnalysis, scanInputDirectory } from './scanner.ts';
+import {
+  downloadSubtitleCandidateForItem,
+  hasSpanishSubtitles,
+  searchSpanishSubtitlesForItem
+} from './subtitles/subtitleService.ts';
 
 const MAX_RECENT_LOGS = 100;
 const PERCENT_MAX = 100;
-const FALLBACK_QUEUE_FILENAME = 'plex-video-organizer-queue.json';
 
 function resolveCategoryFromMetadata(
   mediaKind: MediaKind,
@@ -105,12 +115,19 @@ export class LockConflictError extends Error {
   }
 }
 
+export class ServerInitializingError extends Error {
+  public constructor(message = 'Server is still initializing mounts and cache.') {
+    super(message);
+  }
+}
+
 export interface SseSubscriber {
   send(event: string, data: unknown): void;
 }
 
 export class JobRunner {
   readonly #config: AppConfig;
+  #initStatus: ServerInitStatus = 'initializing';
   #phase: JobPhase = 'IDLE';
   #revision = 0;
   #lockOwnerClientId: ClientId | null = null;
@@ -118,12 +135,12 @@ export class JobRunner {
   #activeJob: ActiveJobProgress | null = null;
   #lastError: string | null = null;
   readonly #activeChildren = new Set<ChildProcess>();
+  readonly #activeScanChildrenByItemId = new Map<ItemId, ChildProcess>();
+  readonly #skippedScanItemIds = new Set<ItemId>();
   #cancelledByUnlock = false;
   #activeRunPromise: Promise<void> | null = null;
   readonly #recentLogs: SseLogEvent[] = [];
   readonly #subscribers = new Set<SseSubscriber>();
-  #persistChain: Promise<void> = Promise.resolve();
-  #queuePath: string;
   #queueFallbackWarned = false;
   #verifier: VerifierState = {
     scanning: false,
@@ -133,59 +150,54 @@ export class JobRunner {
     lastFixResult: null
   };
   #preferredLanguages: readonly MetadataLanguageCode[] = [...DEFAULT_PREFERRED_LANGUAGES];
+  readonly #autoDownloadSubtitles: boolean;
+  readonly #searchSubtitles: typeof searchSpanishSubtitlesForItem;
+  readonly #downloadSubtitle: typeof downloadSubtitleCandidateForItem;
 
-  public constructor(config: AppConfig) {
+  public constructor(
+    config: AppConfig,
+    options?: {
+      readonly autoDownloadSubtitles?: boolean;
+      readonly searchSubtitles?: typeof searchSpanishSubtitlesForItem;
+      readonly downloadSubtitle?: typeof downloadSubtitleCandidateForItem;
+    }
+  ) {
     this.#config = config;
-    this.#queuePath = path.join(config.configDir, 'queue.json');
+    this.#autoDownloadSubtitles =
+      options?.autoDownloadSubtitles ?? process.env['VITEST'] !== 'true';
+    this.#searchSubtitles = options?.searchSubtitles ?? searchSpanishSubtitlesForItem;
+    this.#downloadSubtitle = options?.downloadSubtitle ?? downloadSubtitleCandidateForItem;
   }
+
+  #emitFallbackWarningOnce = (warning: string): void => {
+    if (!this.#queueFallbackWarned) {
+      this.#queueFallbackWarned = true;
+      console.warn(warning);
+      this.#emitLog('warn', warning);
+    }
+  };
 
   public async init(): Promise<void> {
     await cleanupOrphanTempFiles(this.#config.inputDir);
-    await configureMetadataCache(this.#config.configDir);
+    await configureMetadataCache(this.#config.configDir, this.#emitFallbackWarningOnce);
 
-    const fallbackQueuePath = path.join(os.tmpdir(), FALLBACK_QUEUE_FILENAME);
-    if (await isDirUnwritable(this.#config.configDir)) {
-      this.#switchToFallbackQueuePath();
-    }
-
-    const hydrated = await this.#tryHydrateQueue(this.#queuePath);
-    if (!hydrated.ok && hydrated.permissionOrReadOnly && this.#queuePath !== fallbackQueuePath) {
-      this.#switchToFallbackQueuePath();
-      await this.#tryHydrateQueue(this.#queuePath);
-    }
-  }
-
-  async #tryHydrateQueue(
-    targetPath: string
-  ): Promise<{ readonly ok: boolean; readonly permissionOrReadOnly: boolean }> {
+    const db = await openScanCacheDb(
+      this.#config.configDir,
+      undefined,
+      this.#emitFallbackWarningOnce
+    );
     try {
-      const raw = await fs.readFile(targetPath, 'utf8');
-      const parsed = JSON.parse(raw) as {
-        readonly revision?: number;
-        readonly items?: ScannedItem[];
-      };
-      if (typeof parsed.revision === 'number') {
-        this.#revision = parsed.revision;
+      const savedQueue = db.getQueueState();
+      if (savedQueue) {
+        this.#revision = savedQueue.revision;
+        this.#items = [...savedQueue.items];
       }
-      if (Array.isArray(parsed.items)) {
-        this.#items = parsed.items;
-      }
-      return { ok: true, permissionOrReadOnly: false };
-    } catch (err) {
-      return { ok: false, permissionOrReadOnly: isPermissionOrReadOnlyError(err) };
+    } finally {
+      db.close();
     }
-  }
 
-  #switchToFallbackQueuePath(): string {
-    const fallbackPath = path.join(os.tmpdir(), FALLBACK_QUEUE_FILENAME);
-    this.#queuePath = fallbackPath;
-    if (!this.#queueFallbackWarned) {
-      this.#queueFallbackWarned = true;
-      const msg = `CONFIG_DIR (${this.#config.configDir}) is not writable; falling back to ${fallbackPath}. Set a writable CONFIG_DIR and matching PUID/PGID in .env.`;
-      console.warn(msg);
-      this.#emitLog('warn', msg);
-    }
-    return fallbackPath;
+    this.#initStatus = 'ready';
+    this.#emitState();
   }
 
   public subscribe(sub: SseSubscriber): () => void {
@@ -199,6 +211,7 @@ export class JobRunner {
   public getState(): OrganizerStatePayload {
     return {
       phase: this.#phase,
+      initStatus: this.#initStatus,
       revision: this.#revision,
       lockOwnerClientId: this.#lockOwnerClientId,
       mountPaths: buildMountPathsMap(this.#config),
@@ -250,8 +263,7 @@ export class JobRunner {
       jobId: evt.jobId,
       totalItems: evt.totalItems ?? this.#activeJob?.totalItems ?? 0,
       completedItems: evt.completedItems ?? this.#activeJob?.completedItems ?? 0,
-      currentItemId: evt.itemId,
-      currentFile: evt.currentFile,
+      activeTasks: evt.activeTasks,
       currentPercent: evt.percent,
       stage: evt.stage,
       stageLabel: evt.stageLabel,
@@ -271,40 +283,18 @@ export class JobRunner {
     }
   }
 
-  async #writeQueueAtomically(targetPath: string, payloadJson: string): Promise<void> {
-    await fs.mkdir(path.dirname(targetPath), { recursive: true });
-    const tmpPath = `${targetPath}.${crypto.randomUUID()}.tmp`;
-    try {
-      await fs.writeFile(tmpPath, payloadJson, 'utf8');
-      await fs.rename(tmpPath, targetPath);
-    } catch (err) {
-      try {
-        await fs.rm(tmpPath, { force: true });
-      } catch {
-        // Ignore cleanup failure when the temp file could not be removed
-      }
-      throw err;
-    }
-  }
-
   async #persistQueue(): Promise<void> {
-    const writeTask = async (): Promise<void> => {
-      const payloadJson = JSON.stringify({ revision: this.#revision, items: this.#items }, null, 2);
-      const fallbackPath = path.join(os.tmpdir(), FALLBACK_QUEUE_FILENAME);
-      try {
-        await this.#writeQueueAtomically(this.#queuePath, payloadJson);
-      } catch (err) {
-        if (isPermissionOrReadOnlyError(err) && this.#queuePath !== fallbackPath) {
-          const nextPath = this.#switchToFallbackQueuePath();
-          await this.#writeQueueAtomically(nextPath, payloadJson);
-          return;
-        }
-        throw err;
-      }
-    };
-    const next = this.#persistChain.then(writeTask, writeTask);
-    this.#persistChain = next;
-    return next;
+    const db = await openScanCacheDb(
+      this.#config.configDir,
+      undefined,
+      this.#emitFallbackWarningOnce,
+      true
+    );
+    try {
+      db.saveQueueState(this.#revision, this.#items);
+    } finally {
+      db.close();
+    }
   }
 
   #assertLockOwner(clientId: ClientId): void {
@@ -342,19 +332,53 @@ export class JobRunner {
     this.#items = this.#items.filter((item): boolean => !movedIds.has(item.id));
   }
 
+  #assertInitialized(): void {
+    if (this.#initStatus !== 'ready') {
+      throw new ServerInitializingError();
+    }
+  }
+
+  public skipScanItem(clientId: ClientId, itemId: ItemId): boolean {
+    this.#assertInitialized();
+    this.#assertLockOwner(clientId);
+    if (this.#phase !== 'SCANNING') {
+      return false;
+    }
+    this.#skippedScanItemIds.add(itemId);
+    const activeTask = this.#activeJob?.activeTasks.find((t) => t.itemId === itemId);
+    const label = activeTask?.fileName ?? itemId;
+    const child = this.#activeScanChildrenByItemId.get(itemId);
+    if (child) {
+      this.#activeScanChildrenByItemId.delete(itemId);
+      try {
+        if (!child.kill('SIGKILL')) {
+          child.kill();
+        }
+      } catch {
+        // Child may have already exited before kill.
+      }
+    }
+    this.#emitLog('warn', `Skipped audio analysis for "${label}" by user request.`);
+    return true;
+  }
+
   public startScan(clientId: ClientId): number {
+    this.#assertInitialized();
     this.#assertLockOwner(clientId);
     if (this.#phase === 'SCANNING' || this.#phase === 'PROCESSING') {
       throw new LockConflictError('LOCK_HELD', `Operation already in progress (${this.#phase})`);
     }
     this.#lockOwnerClientId = clientId;
     this.#cancelledByUnlock = false;
+    this.#skippedScanItemIds.clear();
+    this.#activeScanChildrenByItemId.clear();
     this.#phase = 'SCANNING';
     this.#lastError = null;
     this.#activeJob = {
       jobId: asJobId('scan'),
       totalItems: 0,
       completedItems: 0,
+      activeTasks: [],
       currentPercent: 0
     };
     this.#revision += 1;
@@ -372,7 +396,27 @@ export class JobRunner {
       const rawScanned = await scanInputDirectory(
         this.#config.inputDir,
         probeMedia,
-        () => this.#cancelledByUnlock
+        () => this.#cancelledByUnlock,
+        {
+          configDir: this.#config.configDir,
+          onProgress: (completed, total): void => {
+            if (this.#cancelledByUnlock) {
+              return;
+            }
+            this.#updateProgress({
+              jobId: scanJobId,
+              activeTasks: [],
+              totalItems: total,
+              completedItems: completed,
+              percent:
+                total > 0
+                  ? Math.min(PERCENT_MAX, Math.round((completed / total) * PERCENT_MAX))
+                  : 0,
+              stage: 'scanning',
+              stageLabel: `Probing media (${String(completed)}/${String(total)})`
+            });
+          }
+        }
       );
       if (this.#cancelledByUnlock) {
         this.#items = [...rawScanned];
@@ -382,29 +426,46 @@ export class JobRunner {
       const scanned = await enrichItemsWithAudioAnalysis(
         rawScanned,
         this.#config.configDir,
-        (filePath, streamOrder, durationSeconds, onProgress) =>
-          analyzeAudioVolume(
-            filePath,
-            streamOrder,
-            durationSeconds,
-            onProgress,
-            this.#createChildTracker()
-          ),
-        (completed, total, item, overallFraction): void => {
+        async (filePath, streamOrder, durationSeconds, onProgress, itemId) => {
+          const tracker =
+            itemId !== undefined
+              ? this.#createScanChildTracker(itemId)
+              : this.#createChildTracker();
+          try {
+            return await analyzeAudioVolume(
+              filePath,
+              streamOrder,
+              durationSeconds,
+              onProgress,
+              tracker
+            );
+          } catch (err) {
+            if (itemId !== undefined && this.#skippedScanItemIds.has(itemId)) {
+              throw err;
+            }
+            const msg = err instanceof Error ? err.message : String(err);
+            this.#emitLog(
+              'warn',
+              `Audio analysis skipped for "${path.basename(filePath)}" (stream #${String(streamOrder)}): ${msg}`
+            );
+            throw err;
+          }
+        },
+        (completed, total, activeTasks, overallFraction, activeFraction): void => {
           if (this.#cancelledByUnlock) {
             return;
           }
           const effectiveFraction = overallFraction ?? (total > 0 ? completed / total : 1);
+          const etaFraction = activeFraction ?? effectiveFraction;
           const percent = Math.min(PERCENT_MAX, Math.round(effectiveFraction * PERCENT_MAX));
           const elapsedSec = (performance.now() - scanStartedAtMs) / 1000;
           const etaSeconds =
-            effectiveFraction > 0.01 && completed < total && elapsedSec >= 1
-              ? Math.max(0, Math.round((elapsedSec * (1 - effectiveFraction)) / effectiveFraction))
+            etaFraction > 0.001 && completed < total && elapsedSec >= 1
+              ? Math.max(0, Math.round((elapsedSec * (1 - etaFraction)) / etaFraction))
               : undefined;
           this.#updateProgress({
             jobId: scanJobId,
-            itemId: item.id,
-            currentFile: item.fileName,
+            activeTasks,
             totalItems: total,
             completedItems: completed,
             percent,
@@ -413,149 +474,46 @@ export class JobRunner {
             etaSeconds
           });
         },
-        () => this.#cancelledByUnlock
+        () => this.#cancelledByUnlock,
+        (stats): void => {
+          const prunedSuffix = stats.pruned > 0 ? `, ${String(stats.pruned)} expired pruned` : '';
+          this.#emitLog(
+            'info',
+            `Audio scan cache: ${String(stats.cacheHits)} cached, ${String(stats.analyzed)} analyzed${prunedSuffix}.`
+          );
+        },
+        (itemId) => this.#skippedScanItemIds.has(itemId)
       );
       if (this.#cancelledByUnlock) {
         this.#items = [...scanned];
         return;
       }
-      const enriched: ScannedItem[] = [];
-      const reportedDiagnostics = new Set<string>();
-      this.#activeJob = {
-        jobId: scanJobId,
-        totalItems: scanned.length,
-        completedItems: 0,
-        currentPercent: 0
-      };
-      this.#emitState();
-
-      for (const item of scanned) {
-        if (this.#cancelledByUnlock) {
-          break;
-        }
-        const startPercent =
-          scanned.length > 0 ? Math.round((enriched.length / scanned.length) * PERCENT_MAX) : 0;
-        this.#activeJob = {
-          jobId: scanJobId,
-          totalItems: scanned.length,
-          completedItems: enriched.length,
-          currentItemId: item.id,
-          currentPercent: startPercent
-        };
-        this.#emitProgress({
-          jobId: scanJobId,
-          itemId: item.id,
-          percent: startPercent
-        });
-
-        let candidates = [...item.candidates];
-        let selectedMetadata = item.selectedMetadata;
-        let episode = item.episode;
-        const itemDiagnostics: MetadataDiagnostic[] = [];
-        const lookupOptions: MetadataLookupOptions = {
-          preferredLanguages: this.#preferredLanguages,
-          onLog: (level, message) => this.#emitLog(level, message),
-          onDiagnostic: (diagnostic) => {
-            itemDiagnostics.push(diagnostic);
-            const dedupKey = `${diagnostic.provider}:${diagnostic.kind}`;
-            if (!reportedDiagnostics.has(dedupKey)) {
-              reportedDiagnostics.add(dedupKey);
-              this.#emitLog('error', diagnostic.message);
-            }
-          }
-        };
-
-        const lookupKey = `${item.mediaKind}:${item.parsedTitle.toLowerCase()}:${String(item.parsedYear ?? '')}`;
-        let fetched = lookupCache.get(lookupKey);
-        if (fetched === undefined) {
-          fetched =
-            item.mediaKind === 'movie'
-              ? await searchMovies(
-                  item.parsedTitle,
-                  item.parsedYear,
-                  this.#config.omdbApiKey,
-                  fetch,
-                  lookupOptions
-                )
-              : await searchTvShows(
-                  item.parsedTitle,
-                  this.#config.tvdbApiKey,
-                  fetch,
-                  lookupOptions
-                );
-          if (fetched.length > 0 || itemDiagnostics.length === 0) {
-            lookupCache.set(lookupKey, fetched);
-          }
-        }
-
-        candidates = [...candidates, ...fetched];
-        selectedMetadata ??= candidates[0];
-        if (item.mediaKind === 'tv' && selectedMetadata?.tvdbId && episode) {
-          episode = await this.#enrichEpisodeTitle(
-            selectedMetadata.tvdbId,
-            item.episodeOrder,
-            episode,
-            lookupOptions
-          );
-        }
-
-        const warnings = [...item.warnings];
-        if (candidates.length === 0) {
-          for (const diag of itemDiagnostics.filter((d) => !warnings.includes(d.message))) {
-            warnings.push(diag.message);
-          }
-        }
-        if (item.mediaKind === 'tv' && selectedMetadata && !selectedMetadata.tvdbId) {
-          warnings.push(
-            'TVmaze did not provide a TVDB ID; {tvdb-...} will be omitted unless entered manually.'
-          );
-        }
-
-        if (this.#cancelledByUnlock) {
-          break;
-        }
-        enriched.push({
-          ...item,
-          category: resolveCategoryFromMetadata(item.mediaKind, selectedMetadata, item.category),
-          episode,
-          candidates,
-          selectedMetadata,
-          warnings
-        });
-
-        const donePercent =
-          scanned.length > 0
-            ? Math.round((enriched.length / scanned.length) * PERCENT_MAX)
-            : PERCENT_MAX;
-        this.#activeJob = {
-          jobId: scanJobId,
-          totalItems: scanned.length,
-          completedItems: enriched.length,
-          currentItemId: item.id,
-          currentPercent: donePercent
-        };
-        this.#emitProgress({
-          jobId: scanJobId,
-          itemId: item.id,
-          percent: donePercent
-        });
-      }
+      const enriched = await this.#enrichScannedItemsMetadata(scanJobId, scanned, lookupCache);
 
       if (this.#cancelledByUnlock) {
         this.#items = [...enriched];
         return;
       }
 
+      const withSubtitles = this.#autoDownloadSubtitles
+        ? await this.#autoDownloadMissingSpanishSubtitles(scanJobId, enriched)
+        : [...enriched];
+
+      if (this.#cancelledByUnlock) {
+        this.#items = [...withSubtitles];
+        return;
+      }
+
       this.#activeJob = null;
       this.#lastError = null;
-      this.#items = enriched;
-      this.#phase = enriched.length > 0 ? 'READY' : 'IDLE';
-      if (enriched.length === 0) {
+      this.#items = [...withSubtitles];
+      this.#phase = withSubtitles.length > 0 ? 'READY' : 'IDLE';
+      if (withSubtitles.length === 0) {
         this.#lockOwnerClientId = null;
       }
       this.#revision += 1;
       await this.#persistQueue();
-      this.#emitLog('info', `Scan completed: ${String(enriched.length)} media file(s) found.`);
+      this.#emitLog('info', `Scan completed: ${String(withSubtitles.length)} media file(s) found.`);
       this.#emitState();
     } catch (err) {
       if (this.#cancelledByUnlock) {
@@ -569,6 +527,142 @@ export class JobRunner {
       this.#emitLog('error', `Scan failed: ${msg}`);
       this.#emitState();
     }
+  }
+
+  async #enrichScannedItemsMetadata(
+    scanJobId: JobId,
+    scanned: readonly ScannedItem[],
+    lookupCache: Map<string, readonly MetadataCandidate[]>
+  ): Promise<ScannedItem[]> {
+    const enriched: ScannedItem[] = [];
+    const reportedDiagnostics = new Set<string>();
+    this.#activeJob = {
+      jobId: scanJobId,
+      totalItems: scanned.length,
+      completedItems: 0,
+      activeTasks: [],
+      currentPercent: 0,
+      stage: 'scanning',
+      stageLabel: `Fetching metadata (0/${String(scanned.length)})`
+    };
+    this.#emitState();
+
+    for (const item of scanned) {
+      if (this.#cancelledByUnlock) {
+        break;
+      }
+      const startPercent =
+        scanned.length > 0 ? Math.round((enriched.length / scanned.length) * PERCENT_MAX) : 0;
+      this.#updateProgress({
+        jobId: scanJobId,
+        activeTasks: [{ slot: 0, itemId: item.id, fileName: item.fileName }],
+        totalItems: scanned.length,
+        completedItems: enriched.length,
+        percent: startPercent,
+        stage: 'scanning',
+        stageLabel: `Fetching metadata (${String(enriched.length)}/${String(scanned.length)})`
+      });
+
+      const updatedItem = await this.#resolveSingleItemMetadata(
+        item,
+        lookupCache,
+        reportedDiagnostics
+      );
+      if (this.#cancelledByUnlock) {
+        break;
+      }
+      enriched.push(updatedItem);
+
+      const donePercent =
+        scanned.length > 0
+          ? Math.round((enriched.length / scanned.length) * PERCENT_MAX)
+          : PERCENT_MAX;
+      this.#updateProgress({
+        jobId: scanJobId,
+        activeTasks:
+          enriched.length < scanned.length
+            ? [{ slot: 0, itemId: item.id, fileName: item.fileName }]
+            : [],
+        totalItems: scanned.length,
+        completedItems: enriched.length,
+        percent: donePercent,
+        stage: 'scanning',
+        stageLabel: `Fetching metadata (${String(enriched.length)}/${String(scanned.length)})`
+      });
+    }
+
+    return enriched;
+  }
+
+  async #resolveSingleItemMetadata(
+    item: ScannedItem,
+    lookupCache: Map<string, readonly MetadataCandidate[]>,
+    reportedDiagnostics: Set<string>
+  ): Promise<ScannedItem> {
+    const itemDiagnostics: MetadataDiagnostic[] = [];
+    const lookupOptions: MetadataLookupOptions = {
+      preferredLanguages: this.#preferredLanguages,
+      onLog: (level, message) => this.#emitLog(level, message),
+      onDiagnostic: (diagnostic) => {
+        itemDiagnostics.push(diagnostic);
+        const dedupKey = `${diagnostic.provider}:${diagnostic.kind}`;
+        if (!reportedDiagnostics.has(dedupKey)) {
+          reportedDiagnostics.add(dedupKey);
+          this.#emitLog('error', diagnostic.message);
+        }
+      }
+    };
+
+    const lookupKey = `${item.mediaKind}:${item.parsedTitle.toLowerCase()}:${String(item.parsedYear ?? '')}`;
+    let fetched = lookupCache.get(lookupKey);
+    if (fetched === undefined) {
+      fetched =
+        item.mediaKind === 'movie'
+          ? await searchMovies(
+              item.parsedTitle,
+              item.parsedYear,
+              this.#config.omdbApiKey,
+              fetch,
+              lookupOptions
+            )
+          : await searchTvShows(item.parsedTitle, this.#config.tvdbApiKey, fetch, lookupOptions);
+      if (fetched.length > 0 || itemDiagnostics.length === 0) {
+        lookupCache.set(lookupKey, fetched);
+      }
+    }
+
+    const candidates = [...item.candidates, ...fetched];
+    const selectedMetadata = item.selectedMetadata ?? candidates[0];
+    let episode = item.episode;
+    if (item.mediaKind === 'tv' && selectedMetadata?.tvdbId && episode) {
+      episode = await this.#enrichEpisodeTitle(
+        selectedMetadata.tvdbId,
+        item.episodeOrder,
+        episode,
+        lookupOptions
+      );
+    }
+
+    const warnings = [...item.warnings];
+    if (candidates.length === 0) {
+      for (const diag of itemDiagnostics.filter((d) => !warnings.includes(d.message))) {
+        warnings.push(diag.message);
+      }
+    }
+    if (item.mediaKind === 'tv' && selectedMetadata && !selectedMetadata.tvdbId) {
+      warnings.push(
+        'TVmaze did not provide a TVDB ID; {tvdb-...} will be omitted unless entered manually.'
+      );
+    }
+
+    return {
+      ...item,
+      category: resolveCategoryFromMetadata(item.mediaKind, selectedMetadata, item.category),
+      episode,
+      candidates,
+      selectedMetadata,
+      warnings
+    };
   }
 
   async #enrichEpisodeTitle(
@@ -633,6 +727,16 @@ export class JobRunner {
       patch.edition !== undefined ? patch.edition.trim() || undefined : current.edition;
 
     const nextTrackSelection = patch.trackSelection ?? current.trackSelection;
+    const updatedTrackSelection = patch.audioNormalization
+      ? { ...nextTrackSelection, audioNormalization: patch.audioNormalization }
+      : nextTrackSelection;
+    const baseNoExt = path.basename(current.fileName, path.extname(current.fileName));
+    const nextTags =
+      patch.trackSelection !== undefined || patch.audioNormalization !== undefined
+        ? extractPlexTags(baseNoExt, current.probe, {
+            trackSelection: updatedTrackSelection
+          })
+        : current.tags;
 
     const nextCategory =
       patch.category ??
@@ -646,14 +750,191 @@ export class JobRunner {
       category: nextCategory,
       edition: nextEdition,
       include: patch.include ?? current.include,
+      tags: nextTags,
       candidates: nextCandidates,
       selectedMetadata: nextMeta,
       episodeOrder: nextOrder,
       episode: nextEpisode,
-      trackSelection: patch.audioNormalization
-        ? { ...nextTrackSelection, audioNormalization: patch.audioNormalization }
-        : nextTrackSelection
+      trackSelection: updatedTrackSelection
     };
+  }
+
+  #attachDownloadedSubtitle(
+    item: ScannedItem,
+    downloaded: ExternalSubtitleFile,
+    candidate: SubtitleCandidate
+  ): ScannedItem {
+    const filteredSubs = item.externalSubtitles.filter(
+      (sub) => sub.path !== downloaded.path && !sub.downloadedFrom
+    );
+    const nextExternalSubtitles = [...filteredSubs, downloaded];
+    const filteredOrder = item.trackSelection.externalSubtitleOrder.filter(
+      (subPath) =>
+        subPath !== downloaded.path &&
+        !item.externalSubtitles.some((old) => old.path === subPath && Boolean(old.downloadedFrom))
+    );
+    const nextOrder = [...filteredOrder, downloaded.path];
+    return {
+      ...item,
+      externalSubtitles: nextExternalSubtitles,
+      trackSelection: {
+        ...item.trackSelection,
+        externalSubtitleOrder: nextOrder
+      },
+      subtitleStatus: {
+        status: 'downloaded',
+        provider: candidate.provider,
+        variant: candidate.variant
+      }
+    };
+  }
+
+  async #autoDownloadMissingSpanishSubtitles(
+    scanJobId: JobId,
+    items: readonly ScannedItem[]
+  ): Promise<readonly ScannedItem[]> {
+    const missingIndices: number[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item && !hasSpanishSubtitles(item)) {
+        missingIndices.push(i);
+      }
+    }
+    if (missingIndices.length === 0) {
+      return items;
+    }
+
+    const result = [...items];
+    const concurrency = 3;
+    const workerCount = Math.min(concurrency, missingIndices.length);
+    const slotTasks: Array<ActiveParallelTask | undefined> = Array.from(
+      { length: workerCount },
+      () => undefined
+    );
+    let completed = 0;
+    const total = missingIndices.length;
+
+    const emitSubProgress = (): void => {
+      this.#updateProgress({
+        jobId: scanJobId,
+        activeTasks: collectActiveTasks(slotTasks),
+        totalItems: total,
+        completedItems: completed,
+        percent: Math.min(PERCENT_MAX, Math.round((completed / total) * PERCENT_MAX)),
+        stage: 'scanning',
+        stageLabel: `Fetching Spanish subtitles (${String(completed)}/${String(total)})`
+      });
+    };
+
+    await runSlotWorkerPool(
+      missingIndices,
+      concurrency,
+      async (idx, _poolIdx, slot) => {
+        const item = result[idx]!;
+        slotTasks[slot] = { slot, fileName: item.fileName, itemId: item.id };
+        emitSubProgress();
+        try {
+          const candidates = await this.#searchSubtitles(
+            item,
+            this.#config,
+            undefined,
+            (level, msg) => this.#emitLog(level, msg)
+          );
+          const best = candidates[0];
+          if (!best) {
+            result[idx] = { ...item, subtitleStatus: { status: 'not_found' } };
+          } else {
+            const downloaded = await this.#downloadSubtitle(item, best, this.#config);
+            result[idx] = this.#attachDownloadedSubtitle(item, downloaded, best);
+            this.#emitLog(
+              'info',
+              `Auto-downloaded spa subtitle for ${item.fileName} (${best.provider}, ${best.variant})`
+            );
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          result[idx] = { ...item, subtitleStatus: { status: 'failed', message: msg } };
+          this.#emitLog('warn', `Subtitle auto-download skipped for ${item.fileName}: ${msg}`);
+        } finally {
+          slotTasks[slot] = undefined;
+          completed += 1;
+          emitSubProgress();
+        }
+      },
+      () => this.#cancelledByUnlock
+    );
+    return result;
+  }
+
+  #requireItem(itemId: ItemId): ScannedItem {
+    this.#assertInitialized();
+    const item = this.#items.find((entry) => entry.id === itemId);
+    if (!item) {
+      throw new Error(`Item not found: ${itemId}`);
+    }
+    return item;
+  }
+
+  public getItemSourcePath(itemId: ItemId): string {
+    return this.#requireItem(itemId).sourcePath;
+  }
+
+  public getItemPreviewSubtitlePath(itemId: ItemId): string | undefined {
+    const item = this.#requireItem(itemId);
+    const spaSub =
+      item.externalSubtitles.find((sub) => sub.language === 'spa' && Boolean(sub.downloadedFrom)) ??
+      item.externalSubtitles.find((sub) => sub.language === 'spa') ??
+      item.externalSubtitles[0];
+    return spaSub?.path;
+  }
+
+  public async searchItemSubtitles(itemId: ItemId): Promise<readonly SubtitleCandidate[]> {
+    const item = this.#requireItem(itemId);
+    return this.#searchSubtitles(item, this.#config, undefined, (level, msg) =>
+      this.#emitLog(level, msg)
+    );
+  }
+
+  public async downloadItemSubtitle(
+    clientId: ClientId,
+    revision: number,
+    itemId: ItemId,
+    candidate?: SubtitleCandidate
+  ): Promise<{ readonly state: OrganizerStatePayload; readonly downloaded: ExternalSubtitleFile }> {
+    this.#assertInitialized();
+    this.#assertLockOwner(clientId);
+    this.#assertRevision(revision);
+
+    const idx = this.#items.findIndex((entry) => entry.id === itemId);
+    if (idx < 0) {
+      throw new Error(`Item not found: ${itemId}`);
+    }
+    const item = this.#items[idx]!;
+    let chosen = candidate;
+    if (!chosen) {
+      const candidates = await this.#searchSubtitles(item, this.#config, undefined, (level, msg) =>
+        this.#emitLog(level, msg)
+      );
+      chosen = candidates[0];
+    }
+    if (!chosen) {
+      this.#items[idx] = { ...item, subtitleStatus: { status: 'not_found' } };
+      this.#revision += 1;
+      await this.#persistQueue();
+      this.#emitState();
+      throw new Error('No Spanish subtitles found across configured providers.');
+    }
+
+    const downloaded = await this.#downloadSubtitle(item, chosen, this.#config);
+    this.#items[idx] = this.#attachDownloadedSubtitle(item, downloaded, chosen);
+    this.#revision += 1;
+    await this.#persistQueue();
+    this.#emitLog(
+      'info',
+      `Downloaded spa subtitle for ${item.fileName} (${chosen.provider}, ${chosen.variant})`
+    );
+    this.#emitState();
+    return { state: this.getState(), downloaded };
   }
 
   public async patchItem(
@@ -662,6 +943,7 @@ export class JobRunner {
     itemId: ItemId,
     patch: ItemPatch
   ): Promise<OrganizerStatePayload> {
+    this.#assertInitialized();
     this.#assertLockOwner(clientId);
     this.#assertRevision(revision);
 
@@ -687,6 +969,7 @@ export class JobRunner {
     itemIds: readonly ItemId[],
     patch: ItemPatch
   ): Promise<OrganizerStatePayload> {
+    this.#assertInitialized();
     this.#assertLockOwner(clientId);
     this.#assertRevision(revision);
 
@@ -798,6 +1081,7 @@ export class JobRunner {
     clientId: ClientId,
     revision: number
   ): Promise<PreflightReport & { readonly revision: number }> {
+    this.#assertInitialized();
     this.#assertLockOwner(clientId);
     this.#assertRevision(revision);
 
@@ -821,6 +1105,7 @@ export class JobRunner {
     revision: number,
     conflictResolutions: Readonly<Partial<Record<ItemId, ConflictDecision>>>
   ): Promise<{ readonly jobId: JobId; readonly revision: number }> {
+    this.#assertInitialized();
     this.#assertLockOwner(clientId);
     this.#assertRevision(revision);
 
@@ -857,6 +1142,7 @@ export class JobRunner {
       jobId,
       totalItems: toProcess.length,
       completedItems: 0,
+      activeTasks: [],
       currentPercent: 0
     };
     this.#emitState();
@@ -886,6 +1172,18 @@ export class JobRunner {
     };
   }
 
+  #createScanChildTracker(itemId: ItemId): (child: ChildProcess | null) => void {
+    const baseTracker = this.#createChildTracker();
+    return (child): void => {
+      baseTracker(child);
+      if (child) {
+        this.#activeScanChildrenByItemId.set(itemId, child);
+      } else {
+        this.#activeScanChildrenByItemId.delete(itemId);
+      }
+    };
+  }
+
   async #measureLoudnormForItem(
     item: ScannedItem,
     downmixStereo: boolean,
@@ -900,10 +1198,11 @@ export class JobRunner {
       return measuredMap;
     }
 
+    const workerCount = Math.min(includedTracks.length, Math.max(1, os.cpus().length));
     const trackPercents = Array.from({ length: includedTracks.length }, (): number => 0);
     const trackEtas = Array.from<number | undefined>({ length: includedTracks.length });
+    const activeBySlot = Array.from<ActiveParallelTask | undefined>({ length: workerCount });
     let completedTracks = 0;
-    let nextTrackIdx = 0;
 
     const emitPass1Progress = (): void => {
       const sumPct = trackPercents.reduce((acc, p): number => acc + p, 0);
@@ -913,8 +1212,7 @@ export class JobRunner {
       const stageLabel = `Loudnorm Pass 1/2 (${String(completedTracks)}/${String(includedTracks.length)} tracks)`;
       this.#updateProgress({
         jobId,
-        itemId: item.id,
-        currentFile: item.fileName,
+        activeTasks: collectActiveTasks(activeBySlot),
         totalItems,
         completedItems,
         percent,
@@ -924,15 +1222,19 @@ export class JobRunner {
       });
     };
 
-    const workerCount = Math.min(includedTracks.length, Math.max(1, os.cpus().length));
-    const runWorker = async (): Promise<void> => {
-      while (nextTrackIdx < includedTracks.length) {
-        if (this.#cancelledByUnlock) {
-          return;
-        }
-        const trackIdx = nextTrackIdx;
-        nextTrackIdx += 1;
-        const track = includedTracks[trackIdx]!;
+    await runSlotWorkerPool(
+      includedTracks,
+      workerCount,
+      async (track, trackIdx, slot) => {
+        const taskLabel = `${item.fileName} · audio #${String(track.streamOrder + 1)} (${track.language})`;
+        activeBySlot[slot] = {
+          slot,
+          itemId: item.id,
+          fileName: taskLabel,
+          percent: 0
+        };
+        emitPass1Progress();
+
         const measured = await measureLoudnormPass1(
           item.sourcePath,
           track.streamOrder,
@@ -941,20 +1243,156 @@ export class JobRunner {
           (update): void => {
             trackPercents[trackIdx] = update.percent;
             trackEtas[trackIdx] = update.etaSeconds;
+            activeBySlot[slot] = {
+              slot,
+              itemId: item.id,
+              fileName: taskLabel,
+              percent: update.percent
+            };
             emitPass1Progress();
           },
           this.#createChildTracker()
         );
+        if (this.#cancelledByUnlock) {
+          activeBySlot[slot] = undefined;
+          return;
+        }
         measuredMap.set(track.streamOrder, measured);
         completedTracks += 1;
         trackPercents[trackIdx] = PERCENT_MAX;
         trackEtas[trackIdx] = 0;
+        activeBySlot[slot] = undefined;
         emitPass1Progress();
-      }
-    };
-
-    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+      },
+      () => this.#cancelledByUnlock
+    );
     return measuredMap;
+  }
+
+  async #processSingleJobItem(
+    jobId: JobId,
+    item: ScannedItem,
+    idx: number,
+    totalItems: number,
+    destPath: string,
+    allowOverwrite: boolean,
+    oldExistingPath: string | undefined,
+    createdTempSubs: string[]
+  ): Promise<boolean> {
+    const sourceDir = path.dirname(item.sourcePath);
+    const baseNoExt = path.basename(item.sourcePath, path.extname(item.sourcePath));
+    const tempMkvPath = path.join(
+      sourceDir,
+      `${baseNoExt}${ORGANIZING_TEMP_MARKER}${jobId}.${item.id}${ORGANIZING_TEMP_SUFFIX}`
+    );
+
+    const subInputs: {
+      readonly sub: (typeof item.externalSubtitles)[number];
+      readonly inputPath: string;
+    }[] = [];
+    for (const subPath of item.trackSelection.externalSubtitleOrder) {
+      const subObj = item.externalSubtitles.find((s): boolean => s.path === subPath);
+      if (!subObj) {
+        continue;
+      }
+      const normalized = await normalizeSubtitleToUtf8(subObj, sourceDir);
+      if (normalized.tempCreated) {
+        createdTempSubs.push(normalized.tempCreated);
+      }
+      subInputs.push({ sub: subObj, inputPath: normalized.inputPath });
+    }
+
+    this.#activeJob = {
+      jobId,
+      totalItems,
+      completedItems: idx,
+      activeTasks: [{ slot: 0, itemId: item.id, fileName: item.fileName, percent: 0 }],
+      currentPercent: 0,
+      stage: 'remuxing',
+      stageLabel: 'Remuxing'
+    };
+    this.#emitState();
+    this.#emitLog('info', `Remuxing ${item.fileName} -> ${path.basename(destPath)}`);
+
+    const norm = item.trackSelection.audioNormalization;
+    const loudnormByStreamOrder =
+      norm?.mode === 'loudnorm'
+        ? await this.#measureLoudnormForItem(item, norm.downmixStereo, jobId, totalItems, idx)
+        : undefined;
+
+    const remuxStageLabel = norm?.mode === 'loudnorm' ? 'Loudnorm Pass 2/2 (Remuxing)' : 'Remuxing';
+    const args = buildFfmpegRemuxArgs(item, tempMkvPath, subInputs, loudnormByStreamOrder);
+    await runFfmpegRemux(
+      args,
+      item.probe.durationSeconds,
+      (percent, etaSeconds): void => {
+        this.#updateProgress({
+          jobId,
+          activeTasks: [{ slot: 0, itemId: item.id, fileName: item.fileName, percent }],
+          totalItems,
+          completedItems: idx,
+          percent,
+          stage: 'remuxing',
+          stageLabel: remuxStageLabel,
+          etaSeconds
+        });
+      },
+      this.#createChildTracker()
+    );
+
+    if (this.#cancelledByUnlock) {
+      return false;
+    }
+
+    const destFileName = path.basename(destPath);
+    this.#updateProgress({
+      jobId,
+      activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName }],
+      totalItems,
+      completedItems: idx,
+      percent: 0,
+      stage: 'verifying',
+      stageLabel: 'Verifying'
+    });
+    await probeMedia(tempMkvPath);
+
+    this.#updateProgress({
+      jobId,
+      activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName, percent: 0 }],
+      totalItems,
+      completedItems: idx,
+      percent: 0,
+      stage: 'moving',
+      stageLabel: 'Moving'
+    });
+    this.#emitLog('info', `Moving ${destFileName} to ${item.category}`);
+
+    await moveTempOutputFile(tempMkvPath, destPath, allowOverwrite, (movePercent): void => {
+      this.#updateProgress({
+        jobId,
+        activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName, percent: movePercent }],
+        totalItems,
+        completedItems: idx,
+        percent: movePercent,
+        stage: 'moving',
+        stageLabel: 'Moving'
+      });
+    });
+
+    if (allowOverwrite && oldExistingPath && oldExistingPath !== destPath) {
+      await fs.rm(oldExistingPath, { force: true });
+    }
+
+    this.#updateProgress({
+      jobId,
+      activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName, percent: PERCENT_MAX }],
+      totalItems,
+      completedItems: idx + 1,
+      percent: PERCENT_MAX,
+      stage: 'moving',
+      stageLabel: 'Moved'
+    });
+    return true;
   }
 
   async #executeJob(
@@ -986,137 +1424,21 @@ export class JobRunner {
         if (!destPath) {
           throw new Error(`Missing projected destination for ${item.id}`);
         }
-
-        const sourceDir = path.dirname(item.sourcePath);
-        const baseNoExt = path.basename(item.sourcePath, path.extname(item.sourcePath));
-        const tempMkvPath = path.join(
-          sourceDir,
-          `${baseNoExt}${ORGANIZING_TEMP_MARKER}${jobId}.${item.id}${ORGANIZING_TEMP_SUFFIX}`
-        );
-
-        const subInputs: {
-          readonly sub: (typeof item.externalSubtitles)[number];
-          readonly inputPath: string;
-        }[] = [];
-        for (const subPath of item.trackSelection.externalSubtitleOrder) {
-          const subObj = item.externalSubtitles.find((s): boolean => s.path === subPath);
-          if (!subObj) {
-            continue;
-          }
-          const normalized = await normalizeSubtitleToUtf8(subObj, sourceDir);
-          if (normalized.tempCreated) {
-            createdTempSubs.push(normalized.tempCreated);
-          }
-          subInputs.push({ sub: subObj, inputPath: normalized.inputPath });
-        }
-
-        this.#activeJob = {
+        const completed = await this.#processSingleJobItem(
           jobId,
-          totalItems: toProcess.length,
-          completedItems: idx,
-          currentItemId: item.id,
-          currentFile: item.fileName,
-          currentPercent: 0,
-          stage: 'remuxing',
-          stageLabel: 'Remuxing'
-        };
-        this.#emitState();
-        this.#emitLog('info', `Remuxing ${item.fileName} -> ${path.basename(destPath)}`);
-
-        const norm = item.trackSelection.audioNormalization;
-        const loudnormByStreamOrder =
-          norm?.mode === 'loudnorm'
-            ? await this.#measureLoudnormForItem(
-                item,
-                norm.downmixStereo,
-                jobId,
-                toProcess.length,
-                idx
-              )
-            : undefined;
-
-        const remuxStageLabel =
-          norm?.mode === 'loudnorm' ? 'Loudnorm Pass 2/2 (Remuxing)' : 'Remuxing';
-        const args = buildFfmpegRemuxArgs(item, tempMkvPath, subInputs, loudnormByStreamOrder);
-        await runFfmpegRemux(
-          args,
-          item.probe.durationSeconds,
-          (percent, etaSeconds): void => {
-            this.#updateProgress({
-              jobId,
-              itemId: item.id,
-              currentFile: item.fileName,
-              totalItems: toProcess.length,
-              completedItems: idx,
-              percent,
-              stage: 'remuxing',
-              stageLabel: remuxStageLabel,
-              etaSeconds
-            });
-          },
-          this.#createChildTracker()
+          item,
+          idx,
+          toProcess.length,
+          destPath,
+          conflictResolutions[item.id] === 'overwrite',
+          existingCollisionByItemId[item.id],
+          createdTempSubs
         );
-
-        if (this.#cancelledByUnlock) {
+        if (!completed) {
           this.#removeMovedItems(movedItems);
           return;
         }
-
-        const destFileName = path.basename(destPath);
-        this.#updateProgress({
-          jobId,
-          itemId: item.id,
-          currentFile: destFileName,
-          totalItems: toProcess.length,
-          completedItems: idx,
-          percent: 0,
-          stage: 'verifying',
-          stageLabel: 'Verifying'
-        });
-        await probeMedia(tempMkvPath);
-
-        this.#updateProgress({
-          jobId,
-          itemId: item.id,
-          currentFile: destFileName,
-          totalItems: toProcess.length,
-          completedItems: idx,
-          percent: 0,
-          stage: 'moving',
-          stageLabel: 'Moving'
-        });
-        this.#emitLog('info', `Moving ${path.basename(destPath)} to ${item.category}`);
-
-        const allowOverwrite = conflictResolutions[item.id] === 'overwrite';
-        await moveTempOutputFile(tempMkvPath, destPath, allowOverwrite, (movePercent): void => {
-          this.#updateProgress({
-            jobId,
-            itemId: item.id,
-            currentFile: destFileName,
-            totalItems: toProcess.length,
-            completedItems: idx,
-            percent: movePercent,
-            stage: 'moving',
-            stageLabel: 'Moving'
-          });
-        });
-
-        const oldExistingPath = existingCollisionByItemId[item.id];
-        if (allowOverwrite && oldExistingPath && oldExistingPath !== destPath) {
-          await fs.rm(oldExistingPath, { force: true });
-        }
-
         movedItems.push(item);
-        this.#updateProgress({
-          jobId,
-          itemId: item.id,
-          currentFile: destFileName,
-          totalItems: toProcess.length,
-          completedItems: idx + 1,
-          percent: PERCENT_MAX,
-          stage: 'moving',
-          stageLabel: 'Moved'
-        });
       }
 
       if (this.#cancelledByUnlock) {
@@ -1137,7 +1459,7 @@ export class JobRunner {
             total > 0 ? Math.round((cleaned / total) * PERCENT_MAX) : PERCENT_MAX;
           this.#updateProgress({
             jobId,
-            currentFile: fileName,
+            activeTasks: [{ slot: 0, fileName }],
             totalItems: total,
             completedItems: cleaned,
             percent: cleanPercent,
@@ -1195,12 +1517,17 @@ export class JobRunner {
     this.#phase = wasRunning && this.#items.length > 0 ? 'READY' : 'IDLE';
     this.#revision += 1;
     await this.#persistQueue();
-    this.#emitLog('warn', `Session unlocked${force ? ' (forced)' : ''} by ${clientId}.`);
+    const actionLog =
+      wasRunning && !force
+        ? `Job cancelled by ${clientId}.`
+        : `Session unlocked${force ? ' (forced)' : ''} by ${clientId}.`;
+    this.#emitLog('warn', actionLog);
     this.#emitState();
     return this.getState();
   }
 
-  public startVerifierScan(clientId: ClientId): number {
+  public startVerifierScan(clientId: ClientId, recalculateTags = false): number {
+    this.#assertInitialized();
     this.#assertLockOwner(clientId);
     if (this.#verifier.scanning || this.#verifier.fixing) {
       throw new LockConflictError('LOCK_HELD', 'Library verifier is already running.');
@@ -1212,18 +1539,24 @@ export class JobRunner {
         completed: 0,
         total: 0,
         percent: 0,
-        stageLabel: 'Discovering libraries...'
+        stageLabel: 'Discovering libraries...',
+        activeTasks: []
       },
       lastFixResult: null
     };
     this.#revision += 1;
-    this.#emitLog('info', 'Starting Plex naming compliance scan across all libraries...');
+    this.#emitLog(
+      'info',
+      recalculateTags
+        ? 'Starting Plex naming compliance scan with FFprobe tag recalculation...'
+        : 'Starting Plex naming compliance scan across all libraries...'
+    );
     this.#emitState();
-    void this.#runVerifierScan();
+    void this.#runVerifierScan(recalculateTags);
     return this.#revision;
   }
 
-  async #runVerifierScan(): Promise<void> {
+  async #runVerifierScan(recalculateTags = false): Promise<void> {
     try {
       const result = await scanLibrariesForCompliance(
         this.#config,
@@ -1238,7 +1571,8 @@ export class JobRunner {
           };
           this.#emitState();
         },
-        this.#preferredLanguages
+        this.#preferredLanguages,
+        recalculateTags
       );
       this.#verifier = {
         scanning: false,
@@ -1259,7 +1593,12 @@ export class JobRunner {
     }
   }
 
-  public startVerifierFix(clientId: ClientId, entryIds: readonly VerifierEntryId[]): number {
+  public startVerifierFix(
+    clientId: ClientId,
+    entryIds: readonly VerifierEntryId[],
+    conflictResolutions?: Readonly<Partial<Record<VerifierEntryId, ConflictDecision>>>
+  ): number {
+    this.#assertInitialized();
     this.#assertLockOwner(clientId);
     if (this.#verifier.scanning || this.#verifier.fixing) {
       throw new LockConflictError('LOCK_HELD', 'Library verifier is already running.');
@@ -1276,7 +1615,8 @@ export class JobRunner {
         completed: 0,
         total: selected.length,
         percent: 0,
-        stageLabel: 'Applying bottom-up renames...'
+        stageLabel: 'Applying bottom-up renames...',
+        activeTasks: []
       },
       lastFixResult: null
     };
@@ -1286,11 +1626,14 @@ export class JobRunner {
       `Applying bottom-up Plex renames for ${String(selected.length)} selected item(s)...`
     );
     this.#emitState();
-    void this.#runVerifierFix(selected);
+    void this.#runVerifierFix(selected, conflictResolutions);
     return this.#revision;
   }
 
-  async #runVerifierFix(selected: readonly VerifierEntry[]): Promise<void> {
+  async #runVerifierFix(
+    selected: readonly VerifierEntry[],
+    conflictResolutions?: Readonly<Partial<Record<VerifierEntryId, ConflictDecision>>>
+  ): Promise<void> {
     try {
       const fixResult = await applyVerifierRenames(
         this.#config,
@@ -1304,7 +1647,8 @@ export class JobRunner {
             progress
           };
           this.#emitState();
-        }
+        },
+        conflictResolutions
       );
       this.#emitLog(
         fixResult.failures.length > 0 ? 'warn' : 'info',

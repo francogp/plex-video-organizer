@@ -17,8 +17,10 @@ Domain Layer Maintainers.
 ## Key Files
 
 - [constants.ts](constants.ts): Typed constants, extension sets, language maps, and Plex thresholds.
+- [concurrency.ts](concurrency.ts): Pure slot-indexed concurrent worker pool helper.
 - [types.ts](types.ts): Branded IDs, Valibot schemas, and domain DTO interfaces.
-- [plexFormatter.ts](plexFormatter.ts): Deterministic Plex tag extraction, sanitization, and movie/TV path formatting.
+- [plexFormatter.ts](plexFormatter.ts): Deterministic Plex sanitization, split-part, edition, and movie/TV path formatting.
+- [plexTagExtractor.ts](plexTagExtractor.ts): Deterministic Plex movie bracket tag extraction from filename, FFprobe, and track selection.
 - [libraryVerifier.ts](libraryVerifier.ts): Pure Plex library compliance verifier and bottom-up rename step planner.
 
 ## Work Guidance
