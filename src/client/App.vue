@@ -33,6 +33,7 @@ const rootRef = ref<HTMLElement | null>(null);
 const inspectingItem = ref<ScannedItem | null>(null);
 const searchingItem = ref<ScannedItem | null>(null);
 const bulkSearchingItems = ref<readonly ScannedItem[] | null>(null);
+const bulkTrackItems = ref<readonly ScannedItem[] | null>(null);
 const selectedVerifierIds = ref<readonly VerifierEntryId[]>([]);
 const recalculateVerifierTags = ref(false);
 const previewingSubtitleItem = ref<ScannedItem | null>(null);
@@ -201,6 +202,14 @@ async function handleConfirmConflicts(
 }
 
 async function handleSaveTracks(selection: TrackSelection, applySeries: boolean): Promise<void> {
+  if (bulkTrackItems.value && bulkTrackItems.value.length > 0) {
+    const ids = bulkTrackItems.value.map((item) => item.id);
+    await store.applyTracksToItems(ids, selection);
+    bulkTrackItems.value = null;
+    inspectingItem.value = null;
+    await store.refreshPreflightSafely();
+    return;
+  }
   const target = inspectingItem.value;
   if (!target) {
     return;
@@ -211,6 +220,14 @@ async function handleSaveTracks(selection: TrackSelection, applySeries: boolean)
   }
   inspectingItem.value = null;
   await store.refreshPreflightSafely();
+}
+
+function handleOpenBulkTracks(items: readonly ScannedItem[]): void {
+  if (items.length === 0) {
+    return;
+  }
+  bulkTrackItems.value = items;
+  inspectingItem.value = items[0] ?? null;
 }
 
 function handleOpenBulkMetadata(items: readonly ScannedItem[]): void {
@@ -414,12 +431,14 @@ const activeJobSummaryText = computed<string>(() => {
       :selected-verifier-count="selectedVerifierIds.length"
       :mount-paths="store.mountPaths"
       :preferred-languages="store.preferredLanguages"
+      :audio-preferred-languages="store.audioPreferredLanguages"
       @toggle-theme="store.toggleTheme()"
       @scan-input="void store.startScan().catch(() => undefined)"
       @process-queue="handleProcess()"
       @scan-verifier="store.scanVerifier(recalculateVerifierTags)"
       @fix-verifier="handleFixVerifierSelected()"
       @set-preferred-languages="(langs) => void store.setPreferredLanguages(langs)"
+      @set-audio-preferred-languages="(langs) => void store.setAudioPreferredLanguages(langs)"
     />
 
     <section
@@ -501,6 +520,7 @@ const activeJobSummaryText = computed<string>(() => {
             }
           "
           @search-metadata-bulk="handleOpenBulkMetadata"
+          @edit-tracks-bulk="handleOpenBulkTracks"
           @bulk-include="handleBulkInclude"
           @bulk-media-kind="handleBulkMediaKind"
           @bulk-category="handleBulkCategory"
@@ -509,7 +529,12 @@ const activeJobSummaryText = computed<string>(() => {
               store.patchItem(item.id, { audioNormalization })
           "
           @bulk-audio-normalization="handleBulkAudioNormalization"
-          @inspect-tracks="(item) => (inspectingItem = item)"
+          @inspect-tracks="
+            (item) => {
+              bulkTrackItems = null;
+              inspectingItem = item;
+            }
+          "
           @open-conflict-modal="handleOpenOrganizerConflictModal"
           @resolve-all-conflicts="handleResolveAllConflicts"
         />
@@ -543,7 +568,13 @@ const activeJobSummaryText = computed<string>(() => {
 
     <TrackInspectorModal
       :item="inspectingItem"
-      @close="inspectingItem = null"
+      :bulk-count="bulkTrackItems?.length"
+      @close="
+        () => {
+          inspectingItem = null;
+          bulkTrackItems = null;
+        }
+      "
       @save="handleSaveTracks"
     />
 

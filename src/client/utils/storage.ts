@@ -1,5 +1,10 @@
-import { DEFAULT_PREFERRED_LANGUAGES, METADATA_LANGUAGE_CODES } from '../../domain/constants.ts';
-import type { MetadataLanguageCode } from '../../domain/types.ts';
+import {
+  AUDIO_LANGUAGE_CODES,
+  DEFAULT_AUDIO_PREFERRED_LANGUAGES,
+  DEFAULT_PREFERRED_LANGUAGES,
+  METADATA_LANGUAGE_CODES
+} from '../../domain/constants.ts';
+import type { AudioLanguageCode, MetadataLanguageCode } from '../../domain/types.ts';
 import type { PersistedTablePreferences, TableId } from '../components/table/tableTypes.ts';
 
 const THEME_MODES = ['dark', 'light'] as const;
@@ -9,6 +14,7 @@ const BROWSER_ID_KEY = 'vo_browser_id';
 const TAB_ID_KEY = 'vo_tab_id';
 const THEME_KEY = 'vo_theme_mode';
 const PREFERRED_LANGS_KEY = 'vo_preferred_languages_v1';
+const AUDIO_PREFERRED_LANGS_KEY = 'vo_audio_preferred_languages_v1';
 const TABLE_PREFS_PREFIX = 'vo_table_prefs_v1_';
 
 const RADIX_ALPHANUMERIC = 36;
@@ -133,10 +139,12 @@ export function clearTablePreferences(tableId: TableId): void {
   }
 }
 
-/** Reads persisted preferred metadata language order, or null if not saved. */
-export function loadSavedPreferredLanguages(): readonly MetadataLanguageCode[] | null {
+function loadSavedLanguageList<T extends string>(
+  key: string,
+  allowedCodes: readonly T[]
+): readonly T[] | null {
   const local = typeof globalThis !== 'undefined' ? globalThis.localStorage : undefined;
-  const raw = readStorage(local, PREFERRED_LANGS_KEY);
+  const raw = readStorage(local, key);
   if (!raw) {
     return null;
   }
@@ -145,23 +153,43 @@ export function loadSavedPreferredLanguages(): readonly MetadataLanguageCode[] |
     if (!Array.isArray(parsed)) {
       return null;
     }
-    const allowed = new Set<string>(METADATA_LANGUAGE_CODES);
-    const clean = parsed.filter(
-      (code): code is MetadataLanguageCode => typeof code === 'string' && allowed.has(code)
-    );
+    const allowed = new Set<string>(allowedCodes);
+    const clean = parsed.filter((code): code is T => typeof code === 'string' && allowed.has(code));
     return clean.length > 0 ? clean : null;
   } catch {
     return null;
   }
 }
 
+function saveLanguageList(key: string, languages: readonly string[]): void {
+  const local = typeof globalThis !== 'undefined' ? globalThis.localStorage : undefined;
+  writeStorage(local, key, JSON.stringify(languages));
+}
+
 /** Returns initial preferred metadata language order (saved or default). */
 export function getInitialPreferredLanguages(): readonly MetadataLanguageCode[] {
-  return loadSavedPreferredLanguages() ?? [...DEFAULT_PREFERRED_LANGUAGES];
+  return (
+    loadSavedLanguageList(PREFERRED_LANGS_KEY, METADATA_LANGUAGE_CODES) ?? [
+      ...DEFAULT_PREFERRED_LANGUAGES
+    ]
+  );
 }
 
 /** Persists preferred metadata language order to localStorage. */
 export function savePreferredLanguages(languages: readonly MetadataLanguageCode[]): void {
-  const local = typeof globalThis !== 'undefined' ? globalThis.localStorage : undefined;
-  writeStorage(local, PREFERRED_LANGS_KEY, JSON.stringify(languages));
+  saveLanguageList(PREFERRED_LANGS_KEY, languages);
+}
+
+/** Returns initial preferred audio language order (saved or default). */
+export function getInitialAudioPreferredLanguages(): readonly AudioLanguageCode[] {
+  return (
+    loadSavedLanguageList(AUDIO_PREFERRED_LANGS_KEY, AUDIO_LANGUAGE_CODES) ?? [
+      ...DEFAULT_AUDIO_PREFERRED_LANGUAGES
+    ]
+  );
+}
+
+/** Persists preferred audio language order to localStorage. */
+export function saveAudioPreferredLanguages(languages: readonly AudioLanguageCode[]): void {
+  saveLanguageList(AUDIO_PREFERRED_LANGS_KEY, languages);
 }

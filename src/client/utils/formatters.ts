@@ -1,4 +1,5 @@
 import { fitTvEpisodeTitleToBudget, sanitizePlexSegment } from '../../domain/constants.ts';
+import { formatTitleWithYear } from '../../domain/plexFormatter.ts';
 import type { JobPhase, MediaKind, MediaProbeSummary, ScannedItem } from '../../domain/types.ts';
 
 const PHASE_LABELS: ReadonlyMap<JobPhase, string> = new Map([
@@ -99,10 +100,7 @@ export function formatPlexOutputSegments(item: ScannedItem): PathSegments | null
   const cleanEdition = item.edition?.trim() ? sanitizePlexSegment(item.edition.trim()) : '';
   const editionTag = cleanEdition ? `{edition-${cleanEdition}}` : undefined;
   if (item.mediaKind === 'movie') {
-    const parts = [cleanTitle];
-    if (meta?.year) {
-      parts.push(`(${String(meta.year)})`);
-    }
+    const parts = [formatTitleWithYear(cleanTitle, meta?.year)];
     if (meta?.imdbId) {
       parts.push(`{imdb-${meta.imdbId}}`);
     } else if (meta?.tmdbId) {
@@ -121,7 +119,7 @@ export function formatPlexOutputSegments(item: ScannedItem): PathSegments | null
     return { folders: [base], fileName: file };
   }
 
-  const showDisplay = meta?.year ? `${cleanTitle} (${String(meta.year)})` : cleanTitle;
+  const showDisplay = formatTitleWithYear(cleanTitle, meta?.year);
   const showParts = [showDisplay];
   if (meta?.tvdbId) {
     showParts.push(`{tvdb-${meta.tvdbId}}`);

@@ -471,10 +471,65 @@ describe('Client Modals & App', () => {
     await wrapper.find('.vo-modal-footer .vo-btn--primary').trigger('click');
     const saved = wrapper.emitted('save')?.[0]?.[0] as {
       audioTracks: readonly { streamOrder: number; include: boolean; isDefault: boolean }[];
+      audioFilterCustomized?: boolean;
     };
     expect(saved.audioTracks[0]?.include).toBe(false);
     expect(saved.audioTracks[0]?.isDefault).toBe(false);
     expect(saved.audioTracks[1]?.include).toBe(true);
     expect(saved.audioTracks[1]?.isDefault).toBe(true);
+    expect(saved.audioFilterCustomized).toBe(true);
+  });
+
+  it('TrackInspectorModal supports bulk mode badge and hides apply-to-series checkbox', () => {
+    const wrapper = mount(TrackInspectorModal, {
+      props: {
+        bulkCount: 3,
+        item: {
+          id: asItemId('t-bulk-1'),
+          sourcePath: '/in/Show.S01E01.mkv',
+          relativePath: 'Show.S01E01.mkv',
+          fileName: 'Show.S01E01.mkv',
+          mediaKind: 'tv',
+          category: 'tv-shows',
+          include: true,
+          parsedTitle: 'Show',
+          tags: [],
+          episodeOrder: 'aired',
+          probe: {
+            formatName: 'matroska',
+            durationSeconds: 1800,
+            sizeBytes: 1_000_000,
+            bitrateBps: 1_000_000,
+            videoStreams: [],
+            audioStreams: [
+              {
+                index: 1,
+                streamOrder: 0,
+                codecName: 'eac3',
+                language: asIso639_2Code('eng'),
+                channels: 6,
+                isDefault: true
+              }
+            ],
+            subtitleStreams: []
+          },
+          externalSubtitles: [],
+          candidates: [],
+          trackSelection: {
+            audioTracks: [
+              { streamOrder: 0, include: true, language: asIso639_2Code('eng'), isDefault: true }
+            ],
+            subtitleMergeMode: 'keep-and-add',
+            includedInternalSubtitles: [],
+            externalSubtitleOrder: [],
+            needsUserPrompt: false
+          },
+          warnings: []
+        }
+      }
+    });
+
+    expect(wrapper.text()).toContain('Applying to 3 selected items');
+    expect(wrapper.find('#apply-series').exists()).toBe(false);
   });
 });

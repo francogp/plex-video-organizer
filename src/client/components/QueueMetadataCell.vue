@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue';
+
+import { formatTitleWithYear } from '../../domain/plexFormatter.ts';
 import type { ScannedItem } from '../../domain/types.ts';
 import { extractExternalIdLinks, type ExternalIdLink } from '../utils/formatters.ts';
 import ProviderLinks from './ProviderLinks.vue';
@@ -14,9 +17,9 @@ const emit = defineEmits<{
 }>();
 
 function formatCandidateLabel(cand: ScannedItem['candidates'][number]): string {
-  const yearPart = cand.year ? ` (${String(cand.year)})` : '';
+  const titleWithYear = formatTitleWithYear(cand.title, cand.year);
   const idPart = cand.imdbId ? ` {${cand.imdbId}}` : cand.tvdbId ? ` {tvdb-${cand.tvdbId}}` : '';
-  return `${cand.title}${yearPart}${idPart}`;
+  return `${titleWithYear}${idPart}`;
 }
 
 function formatMetadataIds(cand: NonNullable<ScannedItem['selectedMetadata']>): string {
@@ -39,6 +42,22 @@ function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
   }
   return extractExternalIdLinks(formatMetadataIds(row.selectedMetadata), row.mediaKind);
 }
+
+const selectedCandidateIndex = computed((): number => {
+  const selected = props.item.selectedMetadata;
+  if (!selected) {
+    return -1;
+  }
+  return props.item.candidates.findIndex(
+    (cand) =>
+      cand.source === selected.source &&
+      cand.title === selected.title &&
+      cand.year === selected.year &&
+      cand.imdbId === selected.imdbId &&
+      cand.tvdbId === selected.tvdbId &&
+      cand.tmdbId === selected.tmdbId
+  );
+});
 </script>
 
 <template>
@@ -68,10 +87,12 @@ function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
         <template v-if="props.item.selectedMetadata">
           <div class="vo-audio-option vo-audio-option--good">
             <span class="vo-audio-option-icon" aria-hidden="true">✓</span>
-            <span class="vo-audio-option-label">{{ props.item.selectedMetadata.title }}</span>
-            <span v-if="props.item.selectedMetadata.year"
-              >({{ props.item.selectedMetadata.year }})</span
-            >
+            <span class="vo-audio-option-label">{{
+              formatTitleWithYear(
+                props.item.selectedMetadata.title,
+                props.item.selectedMetadata.year
+              )
+            }}</span>
           </div>
           <div
             v-if="formatMetadataIds(props.item.selectedMetadata)"
@@ -96,6 +117,7 @@ function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
       <select
         :id="`meta-${props.item.id}`"
         class="vo-select vo-select--candidate"
+        :value="selectedCandidateIndex"
         :title="
           props.item.selectedMetadata
             ? formatCandidateLabel(props.item.selectedMetadata)
@@ -109,7 +131,7 @@ function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
           v-for="(cand, idx) in props.item.candidates"
           :key="`${cand.source}-${String(idx)}`"
           :value="idx"
-          :selected="cand === props.item.selectedMetadata"
+          :selected="idx === selectedCandidateIndex"
         >
           {{ formatCandidateLabel(cand) }}
         </option>

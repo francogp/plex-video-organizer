@@ -455,13 +455,129 @@ describe('JobRunner & HTTP routes', () => {
       });
       expect(badRes.status).toBe(400);
 
+      const audioOkRes = await fetch(`${baseUrl}/api/preferences`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioPreferredLanguages: ['spa', 'eng'] })
+      });
+      expect(audioOkRes.status).toBe(200);
+      const audioOkPayload = (await audioOkRes.json()) as {
+        readonly audioPreferredLanguages?: readonly string[];
+      };
+      expect(audioOkPayload.audioPreferredLanguages).toEqual(['spa', 'eng']);
+
+      const audioBadRes = await fetch(`${baseUrl}/api/preferences`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioPreferredLanguages: ['not-a-code'] })
+      });
+      expect(audioBadRes.status).toBe(400);
+
       const stateRes = await fetch(`${baseUrl}/api/state`);
       const stateJson = (await stateRes.json()) as {
         readonly preferredLanguages?: readonly string[];
+        readonly audioPreferredLanguages?: readonly string[];
       };
       expect(stateJson.preferredLanguages).toEqual(['eng', 'spa', 'native']);
+      expect(stateJson.audioPreferredLanguages).toEqual(['spa', 'eng']);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reapplies audioPreferredLanguages only to items without audioFilterCustomized', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-audio-reapply-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+
+    const makeMultiAudioItem = (id: string, customized: boolean) => ({
+      id,
+      sourcePath: path.join(inputDir, `${id}.mkv`),
+      relativePath: `${id}.mkv`,
+      fileName: `${id}.mkv`,
+      mediaKind: 'movie',
+      category: 'movies',
+      include: true,
+      parsedTitle: id,
+      tags: [],
+      episodeOrder: 'aired',
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 1200,
+        sizeBytes: 1_000_000,
+        bitrateBps: 1_000_000,
+        videoStreams: [],
+        audioStreams: [
+          {
+            index: 1,
+            streamOrder: 0,
+            codecName: 'aac',
+            language: 'eng',
+            channels: 2,
+            isDefault: true
+          },
+          {
+            index: 2,
+            streamOrder: 1,
+            codecName: 'aac',
+            language: 'spa',
+            channels: 2,
+            isDefault: false
+          }
+        ],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      trackSelection: {
+        audioTracks: [
+          { streamOrder: 0, include: true, language: 'eng', isDefault: true },
+          { streamOrder: 1, include: true, language: 'spa', isDefault: false }
+        ],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false,
+        audioFilterCustomized: customized
+      },
+      warnings: []
+    });
+
+    await fs.writeFile(path.join(inputDir, 'auto-item.mkv'), 'video');
+    await fs.writeFile(path.join(inputDir, 'custom-item.mkv'), 'video');
+    await fs.writeFile(
+      path.join(configDir, 'queue.json'),
+      JSON.stringify({
+        revision: 1,
+        items: [makeMultiAudioItem('auto-item', false), makeMultiAudioItem('custom-item', true)]
+      })
+    );
+
+    const cfg = loadConfig({
+      CONFIG_DIR: configDir,
+      INPUT_DIR: inputDir,
+      OUTPUT_MOVIES_DIR: tmpDir,
+      OUTPUT_DOCUMENTARIES_DIR: tmpDir,
+      OUTPUT_ANIMATED_MOVIES_DIR: tmpDir,
+      OUTPUT_TV_SHOWS_DIR: tmpDir,
+      OUTPUT_ANIMATED_SERIES_DIR: tmpDir
+    });
+    const runner = new JobRunner(cfg);
+    await runner.init();
+
+    try {
+      const updated = await runner.updatePreferences({ audioPreferredLanguages: ['spa'] });
+      const autoItem = updated.items.find((i) => i.id === 'auto-item');
+      const customItem = updated.items.find((i) => i.id === 'custom-item');
+
+      expect(autoItem?.trackSelection.audioTracks.map((t) => t.include)).toEqual([false, true]);
+      expect(autoItem?.trackSelection.audioTracks.map((t) => t.isDefault)).toEqual([false, true]);
+      expect(customItem?.trackSelection.audioTracks.map((t) => t.include)).toEqual([true, true]);
+      expect(customItem?.trackSelection.audioTracks.map((t) => t.isDefault)).toEqual([true, false]);
+    } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
@@ -695,6 +811,42 @@ describe('JobRunner & HTTP routes', () => {
       await runner.unlock(asClientId('client-1:tab1'), false);
     } finally {
       server.close();
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists preferredLanguages and audioPreferredLanguages in SQLite across JobRunner restarts', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-prefs-db-'));
+    const configDir = path.join(tmpDir, 'config');
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+
+    try {
+      const cfg = loadConfig({
+        CONFIG_DIR: configDir,
+        INPUT_DIR: inputDir,
+        OUTPUT_MOVIES_DIR: outputDir,
+        OUTPUT_DOCUMENTARIES_DIR: outputDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+        OUTPUT_TV_SHOWS_DIR: outputDir,
+        OUTPUT_ANIMATED_SERIES_DIR: outputDir
+      });
+      const runner1 = new JobRunner(cfg);
+      await runner1.init();
+      await runner1.updatePreferences({
+        preferredLanguages: ['spa', 'eng'],
+        audioPreferredLanguages: ['jpn', 'eng']
+      });
+
+      const runner2 = new JobRunner(cfg);
+      await runner2.init();
+      const restored = runner2.getState();
+      expect(restored.preferredLanguages).toEqual(['spa', 'eng']);
+      expect(restored.audioPreferredLanguages).toEqual(['jpn', 'eng']);
+    } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });

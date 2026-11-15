@@ -15,10 +15,13 @@ Frontend Maintainers.
 - Include descriptive `<span aria-hidden="true">` emojis on action buttons, count badges on primary batch triggers, and keep the active progress banner structured into header metrics/cancel controls, one stable `.vo-progress__file` row per slot in `activeTasks` (with optional per-task percentage), and the bottom `<progress>` bar.
 - Expose visible-row bulk selection exclusively via the `#vo-select-all-visible` header checkbox in `QueueTable.vue` (never duplicate a toolbar `Select Visible` button), and serve the standalone vector Chevron Stack icon from `public/favicon.svg` across `index.html` and the `src/client/App.vue` header.
 - Modularize large table/view SFCs (`QueueTable.vue`, `VerifierView.vue`, `App.vue`) into dedicated header, toolbar, and cell sub-components, keeping shared cell layout and accessibility utilities (`.vo-audio-cell`, `.vo-audio-controls`, `.vo-sr-only`) in `src/client/styles/main.scss` rather than duplicating scoped CSS blocks.
+- Match selected metadata candidates in `QueueMetadataCell.vue` by value (`provider`, `externalId`, `title`, `year`) rather than object reference (`===`) so selections survive API refreshes and page reloads.
+- Parameterize `LanguageOrderBar.vue` with Vue 3 `generic="T extends string"` and propagate `props.disabled` to every chip action button (`Move left`, `Move right`, `Remove`) in addition to the add-language `<select>`.
 
 ## Key Files
 
-- [AppHeader.vue](AppHeader.vue): Top navigation header, workspace tab switcher, mounts drawer, and title language order bar for `App.vue`.
+- [AppHeader.vue](AppHeader.vue): Top navigation header, workspace tab switcher, mounts drawer, and title/audio language order bars for `App.vue`.
+- [LanguageOrderBar.vue](LanguageOrderBar.vue): Reusable ordered language-preference chip bar shared by title and audio language preferences.
 - [QueueTable.vue](QueueTable.vue): Dense media queue table.
 - [QueueToolbar.vue](QueueToolbar.vue): Filter toolbar, bulk action bar, and output conflict summary banner for `QueueTable.vue`.
 - [QueueSourceCell.vue](QueueSourceCell.vue): Source/output path chain, edition input, and inline conflict alert cell for `QueueTable.vue`.

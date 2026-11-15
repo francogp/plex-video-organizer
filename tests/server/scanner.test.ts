@@ -758,4 +758,72 @@ describe('scanner', () => {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('analyzes only the first available included audio track (preferring Default) during scan', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-single-audio-scan-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+
+    try {
+      await fs.writeFile(path.join(inputDir, 'MultiAudio (2025).mkv'), 'multi');
+      const multiProbe: MediaProbeSummary = {
+        ...MOCK_PROBE,
+        audioStreams: [
+          {
+            index: 1,
+            streamOrder: 0,
+            codecName: 'aac',
+            language: asIso639_2Code('eng'),
+            channels: 2,
+            isDefault: false
+          },
+          {
+            index: 2,
+            streamOrder: 1,
+            codecName: 'aac',
+            language: asIso639_2Code('spa'),
+            channels: 2,
+            isDefault: true
+          },
+          {
+            index: 3,
+            streamOrder: 2,
+            codecName: 'aac',
+            language: asIso639_2Code('jpn'),
+            channels: 2,
+            isDefault: false
+          }
+        ]
+      };
+
+      const items = await scanInputDirectory(inputDir, async () => multiProbe, undefined, {
+        configDir,
+        audioPreferredLanguages: ['eng', 'spa', 'jpn']
+      });
+      expect(items[0]?.trackSelection.audioTracks.every((t) => t.include)).toBe(true);
+
+      const analyzedStreamOrders: number[] = [];
+      const enriched = await enrichItemsWithAudioAnalysis(
+        items,
+        configDir,
+        async (_filePath, streamOrder) => {
+          analyzedStreamOrders.push(streamOrder);
+          return {
+            streamOrder,
+            meanVolumeDb: -16,
+            maxVolumeDb: -1,
+            recommendedGainDb: 0,
+            suggestion: 'ok'
+          };
+        }
+      );
+
+      expect(analyzedStreamOrders).toEqual([1]);
+      expect(enriched[0]?.probe.audioAnalysis).toHaveLength(1);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

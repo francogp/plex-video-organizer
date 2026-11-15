@@ -1,6 +1,7 @@
 import * as v from 'valibot';
 
 import {
+  AUDIO_LANGUAGE_CODES,
   AUTO_SUBTITLE_STATUSES,
   CONFLICT_DECISIONS,
   CONFLICT_KINDS,
@@ -269,6 +270,7 @@ export interface TrackSelection {
   readonly needsUserPrompt: boolean;
   readonly promptReason?: string;
   readonly audioNormalization?: AudioNormalizationConfig;
+  readonly audioFilterCustomized?: boolean;
 }
 
 export interface ScannedItem {
@@ -437,6 +439,7 @@ export interface OrganizerStatePayload {
   readonly logs?: readonly SseLogEvent[];
   readonly verifier?: VerifierState;
   readonly preferredLanguages?: readonly MetadataLanguageCode[];
+  readonly audioPreferredLanguages?: readonly AudioLanguageCode[];
 }
 
 export interface SseProgressEvent {
@@ -456,7 +459,12 @@ export interface SseLogEvent {
   readonly timestamp: string;
 }
 
-export type MetadataLanguageCode = (typeof METADATA_LANGUAGE_CODES)[number];
+export const MetadataLanguageCodeSchema = v.picklist(METADATA_LANGUAGE_CODES);
+export type MetadataLanguageCode = v.InferOutput<typeof MetadataLanguageCodeSchema>;
+
+export const AudioLanguageCodeSchema = v.picklist(AUDIO_LANGUAGE_CODES);
+export type AudioLanguageCode = v.InferOutput<typeof AudioLanguageCodeSchema>;
+
 export type MetadataProviderId = 'imdb' | 'omdb' | 'tvdb' | 'tvmaze';
 
 export type MetadataFailureKind =

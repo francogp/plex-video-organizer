@@ -2,7 +2,6 @@ import fs from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 
-import { METADATA_LANGUAGE_CODES } from '../domain/constants.ts';
 import {
   asClientId,
   asItemId,
@@ -16,7 +15,12 @@ import {
   type SubtitleCandidate,
   type VerifierEntryId
 } from '../domain/types.ts';
-import { JobRunner, LockConflictError, ServerInitializingError } from './services/jobRunner.ts';
+import {
+  InvalidPreferencesError,
+  JobRunner,
+  LockConflictError,
+  ServerInitializingError
+} from './services/jobRunner.ts';
 import { MetadataProviderError } from './services/metadata/baseMetadataProvider.ts';
 import {
   openInOsPlayer,
@@ -329,21 +333,23 @@ export function createRequestHandler(runner: JobRunner, distDir: string) {
       }
 
       if (method === 'POST' && pathname === '/api/preferences') {
-        const body = await readJsonBody<{ readonly preferredLanguages?: readonly string[] }>(req);
-        const validCodes = new Set<string>(METADATA_LANGUAGE_CODES);
-        const isValid =
-          Array.isArray(body.preferredLanguages) &&
-          body.preferredLanguages.length > 0 &&
-          body.preferredLanguages.every((lang) => typeof lang === 'string' && validCodes.has(lang));
-        if (!isValid || !body.preferredLanguages) {
-          sendJson(res, HTTP_BAD_REQUEST, {
-            code: 'INVALID_PREFERENCES',
-            message: 'preferredLanguages must be a non-empty array of valid language codes.'
-          });
-          return;
+        const body = await readJsonBody<{
+          readonly preferredLanguages?: unknown;
+          readonly audioPreferredLanguages?: unknown;
+        }>(req);
+        try {
+          const state = await runner.updatePreferences(body);
+          sendJson(res, HTTP_OK, state);
+        } catch (err) {
+          if (err instanceof InvalidPreferencesError) {
+            sendJson(res, HTTP_BAD_REQUEST, {
+              code: 'INVALID_PREFERENCES',
+              message: err instanceof Error ? err.message : String(err)
+            });
+            return;
+          }
+          throw err;
         }
-        const state = runner.setPreferredLanguages(body.preferredLanguages);
-        sendJson(res, HTTP_OK, state);
         return;
       }
 

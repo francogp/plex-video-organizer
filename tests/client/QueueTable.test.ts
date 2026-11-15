@@ -293,9 +293,12 @@ describe('QueueTable', () => {
 
     const bulkButtons = wrapper.findAll('.vo-bulk-bar button');
     await bulkButtons[0]!.trigger('click');
-    expect(wrapper.emitted('search-metadata-bulk')?.[0]?.[0]).toHaveLength(2);
+    expect(wrapper.emitted('edit-tracks-bulk')?.[0]?.[0]).toHaveLength(2);
 
     await bulkButtons[1]!.trigger('click');
+    expect(wrapper.emitted('search-metadata-bulk')?.[0]?.[0]).toHaveLength(2);
+
+    await bulkButtons[2]!.trigger('click');
     expect(wrapper.find('.vo-bulk-bar').exists()).toBe(false);
   });
 
@@ -776,5 +779,40 @@ describe('QueueTable', () => {
     expect(overview.exists()).toBe(true);
     expect(overview.text()).toContain('Audio: 1/2 (spa)');
     expect(overview.text()).toContain('Subs: 1 int · 0 ext');
+  });
+
+  it('selects the matching candidate in metadata dropdown even when selectedMetadata is a deserialized clone', () => {
+    const cand0 = {
+      source: 'tvdb' as const,
+      title: 'Foundation',
+      year: 2011,
+      tvdbId: asTvdbId('248041'),
+      score: 90
+    };
+    const cand1 = {
+      source: 'tvdb' as const,
+      title: 'Foundation',
+      year: 2021,
+      tvdbId: asTvdbId('366972'),
+      score: 95
+    };
+    const reloadedItem: ScannedItem = {
+      ...SAMPLE_ITEM,
+      mediaKind: 'tv',
+      category: 'tv-shows',
+      candidates: [cand0, cand1],
+      // Cloned object simulating JSON.parse from /api/state after page refresh
+      selectedMetadata: { ...cand1 }
+    };
+
+    const wrapper = mount(QueueTable, {
+      props: {
+        items: [reloadedItem],
+        disabled: false
+      }
+    });
+
+    const selectEl = wrapper.find(`select#meta-${reloadedItem.id}`).element as HTMLSelectElement;
+    expect(selectEl.value).toBe('1');
   });
 });

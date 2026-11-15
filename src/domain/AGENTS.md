@@ -19,9 +19,10 @@ Domain Layer Maintainers.
 - [constants.ts](constants.ts): Typed constants, extension sets, language maps, and Plex thresholds.
 - [concurrency.ts](concurrency.ts): Pure slot-indexed concurrent worker pool helper.
 - [types.ts](types.ts): Branded IDs, Valibot schemas, and domain DTO interfaces.
-- [plexFormatter.ts](plexFormatter.ts): Deterministic Plex sanitization, split-part, edition, and movie/TV path formatting.
+- [plexFormatter.ts](plexFormatter.ts): Deterministic Plex sanitization, `formatTitleWithYear`, split-part, edition, and movie/TV path formatting.
+- [plexAudioTagExtractor.ts](plexAudioTagExtractor.ts): Primary audio codec/channel tag and Spanish audio detection helpers.
 - [plexTagExtractor.ts](plexTagExtractor.ts): Deterministic Plex movie bracket tag extraction from filename, FFprobe, and track selection.
-- [trackSelection.ts](trackSelection.ts): Pure audio track selection invariant helper (`ensureValidAudioTrackSelection`).
+- [trackSelection.ts](trackSelection.ts): Pure audio track selection helpers (`ensureValidAudioTrackSelection`, `buildFilteredAudioTracks`, `reapplyAudioFilterToItem`).
 - [libraryVerifier.ts](libraryVerifier.ts): Pure Plex library compliance verifier and bottom-up rename step planner.
 
 ## Work Guidance

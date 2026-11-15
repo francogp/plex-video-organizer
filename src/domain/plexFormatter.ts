@@ -54,12 +54,19 @@ export interface MoviePathInput {
   readonly splitPart?: string;
 }
 
+/** Formats a title with `(year)` unless the title already ends with `(year)`. */
+export function formatTitleWithYear(title: string, year?: number): string {
+  const trimmed = title.trim();
+  if (!year) {
+    return trimmed;
+  }
+  const suffixRegex = new RegExp(`\\s*\\(${String(year)}\\)$`);
+  return suffixRegex.test(trimmed) ? trimmed : `${trimmed} (${String(year)})`;
+}
+
 /** Builds relative Plex movie path (`Folder/File.mkv`). */
 export function formatMovieRelativePath(input: MoviePathInput): string {
-  const parts: string[] = [sanitizePlexSegment(input.title)];
-  if (input.year) {
-    parts.push(`(${String(input.year)})`);
-  }
+  const parts: string[] = [formatTitleWithYear(sanitizePlexSegment(input.title), input.year)];
   if (input.imdbId) {
     parts.push(`{imdb-${input.imdbId}}`);
   } else if (input.tmdbId) {
@@ -96,7 +103,7 @@ function padTwo(value: number): string {
 /** Builds relative Plex TV episode path (`Show/Season XX/Episode.mkv`). */
 export function formatTvRelativePath(input: TvPathInput): string {
   const cleanShow = sanitizePlexSegment(input.showTitle);
-  const showDisplay = input.year ? `${cleanShow} (${String(input.year)})` : cleanShow;
+  const showDisplay = formatTitleWithYear(cleanShow, input.year);
 
   const folderParts: string[] = [showDisplay];
   if (input.tvdbId) {

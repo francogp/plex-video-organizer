@@ -17,6 +17,7 @@ import { useModalVars } from '../composables/useGsapMotion.ts';
 
 const props = defineProps<{
   readonly item: ScannedItem | null;
+  readonly bulkCount?: number;
 }>();
 
 const emit = defineEmits<{
@@ -27,6 +28,7 @@ const emit = defineEmits<{
 const draft = ref<TrackSelection | null>(null);
 const applyToSeries = ref(false);
 const modalVars = useModalVars(1);
+const isBulkMode = computed<boolean>(() => (props.bulkCount ?? 0) > 1);
 
 watch(
   () => props.item,
@@ -140,7 +142,11 @@ function handleSave(): void {
   if (!draft.value) {
     return;
   }
-  emit('save', { ...draft.value, needsUserPrompt: false }, applyToSeries.value);
+  emit(
+    'save',
+    { ...draft.value, needsUserPrompt: false, audioFilterCustomized: true },
+    applyToSeries.value
+  );
 }
 </script>
 
@@ -158,8 +164,17 @@ function handleSave(): void {
           <div class="vo-inspector-eyebrow">
             <h2>Track Inspector</h2>
             <span class="vo-badge">{{ item.mediaKind === 'tv' ? 'Series' : 'Movie' }}</span>
+            <span v-if="isBulkMode" class="vo-badge">
+              Applying to {{ bulkCount }} selected items
+            </span>
           </div>
-          <p class="vo-file-pill vo-mono">{{ item.fileName }}</p>
+          <p class="vo-file-pill vo-mono">
+            {{
+              isBulkMode
+                ? `Template: ${item.fileName} (audio tracks and subtitle merge mode apply to all selected)`
+                : item.fileName
+            }}
+          </p>
         </div>
         <button type="button" class="vo-btn" @click="emit('close')">
           <span aria-hidden="true">✖️</span> Close
@@ -355,7 +370,7 @@ function handleSave(): void {
       </section>
 
       <footer class="vo-modal-footer vo-inspector-footer">
-        <label v-if="item.mediaKind === 'tv'" class="vo-series-check">
+        <label v-if="item.mediaKind === 'tv' && !isBulkMode" class="vo-series-check">
           <input
             id="apply-series"
             v-model="applyToSeries"

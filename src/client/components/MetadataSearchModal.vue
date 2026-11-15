@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 
 import { EPISODE_ORDER_MODES } from '../../domain/constants.ts';
-import { parseProviderReference } from '../../domain/plexFormatter.ts';
+import { formatTitleWithYear, parseProviderReference } from '../../domain/plexFormatter.ts';
 import {
   asImdbId,
   asTvdbId,
@@ -200,8 +200,7 @@ const filePillLabel = computed<string>(() => {
           class="vo-result-item"
         >
           <div>
-            <strong>{{ cand.title }}</strong>
-            <span v-if="cand.year"> ({{ cand.year }})</span>
+            <strong>{{ formatTitleWithYear(cand.title, cand.year) }}</strong>
             <span class="vo-mono vo-muted"> · {{ cand.source }}</span>
             <div class="vo-mono vo-muted">
               <span v-if="cand.imdbId">{{ cand.imdbId }} </span>

@@ -4,22 +4,28 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import * as v from 'valibot';
+
 import { runSlotWorkerPool } from '../../domain/concurrency.ts';
 import {
+  DEFAULT_AUDIO_PREFERRED_LANGUAGES,
   DEFAULT_PREFERRED_LANGUAGES,
-  METADATA_LANGUAGE_CODES,
   ORGANIZING_TEMP_MARKER,
   ORGANIZING_TEMP_SUFFIX,
   PROCESS_JOB_CONCURRENCY
 } from '../../domain/constants.ts';
 import { parseProviderReference } from '../../domain/plexFormatter.ts';
 import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
+import { reapplyAudioFilterToItem } from '../../domain/trackSelection.ts';
 import {
+  AudioLanguageCodeSchema,
+  MetadataLanguageCodeSchema,
   asJobId,
   asTvdbId,
   collectActiveTasks,
   type ActiveJobProgress,
   type ActiveParallelTask,
+  type AudioLanguageCode,
   type ClientId,
   type ConflictDecision,
   type EpisodeOrderMode,
@@ -142,6 +148,24 @@ export class ServerInitializingError extends Error {
   }
 }
 
+export class InvalidPreferencesError extends Error {
+  public constructor(
+    message = 'Preferences must provide non-empty arrays of valid language codes.'
+  ) {
+    super(message);
+  }
+}
+
+function parseUniqueLanguageList<
+  TSchema extends v.BaseSchema<unknown, string, v.BaseIssue<unknown>>
+>(raw: unknown, itemSchema: TSchema): readonly v.InferOutput<TSchema>[] {
+  const result = v.safeParse(v.pipe(v.array(itemSchema), v.minLength(1)), raw);
+  if (!result.success) {
+    throw new InvalidPreferencesError();
+  }
+  return Array.from(new Set(result.output));
+}
+
 export interface SseSubscriber {
   send(event: string, data: unknown): void;
 }
@@ -171,6 +195,7 @@ export class JobRunner {
     lastFixResult: null
   };
   #preferredLanguages: readonly MetadataLanguageCode[] = [...DEFAULT_PREFERRED_LANGUAGES];
+  #audioPreferredLanguages: readonly AudioLanguageCode[] = [...DEFAULT_AUDIO_PREFERRED_LANGUAGES];
   readonly #autoDownloadSubtitles: boolean;
   readonly #searchSubtitles: typeof searchSpanishSubtitlesForItem;
   readonly #downloadSubtitle: typeof downloadSubtitleCandidateForItem;
@@ -213,6 +238,19 @@ export class JobRunner {
         this.#revision = savedQueue.revision;
         this.#items = [...savedQueue.items];
       }
+      const savedPrefs = db.getPreferences();
+      if (savedPrefs?.preferredLanguages) {
+        this.#preferredLanguages = parseUniqueLanguageList(
+          savedPrefs.preferredLanguages,
+          MetadataLanguageCodeSchema
+        );
+      }
+      if (savedPrefs?.audioPreferredLanguages) {
+        this.#audioPreferredLanguages = parseUniqueLanguageList(
+          savedPrefs.audioPreferredLanguages,
+          AudioLanguageCodeSchema
+        );
+      }
     } finally {
       db.close();
     }
@@ -241,20 +279,52 @@ export class JobRunner {
       lastError: this.#lastError,
       logs: [...this.#recentLogs],
       verifier: this.#verifier,
-      preferredLanguages: [...this.#preferredLanguages]
+      preferredLanguages: [...this.#preferredLanguages],
+      audioPreferredLanguages: [...this.#audioPreferredLanguages]
     };
   }
 
-  public setPreferredLanguages(languages: readonly string[]): OrganizerStatePayload {
-    const allowed = new Set<string>(METADATA_LANGUAGE_CODES);
-    const normalized: MetadataLanguageCode[] = [];
-    for (const raw of languages) {
-      if (allowed.has(raw) && !normalized.includes(raw as MetadataLanguageCode)) {
-        normalized.push(raw as MetadataLanguageCode);
+  public async updatePreferences(input: {
+    readonly preferredLanguages?: unknown;
+    readonly audioPreferredLanguages?: unknown;
+  }): Promise<OrganizerStatePayload> {
+    const hasTitle = input.preferredLanguages !== undefined;
+    const hasAudio = input.audioPreferredLanguages !== undefined;
+    if (!hasTitle && !hasAudio) {
+      throw new InvalidPreferencesError();
+    }
+
+    if (hasTitle) {
+      this.#preferredLanguages = parseUniqueLanguageList(
+        input.preferredLanguages,
+        MetadataLanguageCodeSchema
+      );
+    }
+
+    if (hasAudio) {
+      this.#audioPreferredLanguages = parseUniqueLanguageList(
+        input.audioPreferredLanguages,
+        AudioLanguageCodeSchema
+      );
+
+      if (this.#items.length > 0) {
+        let updatedAny = false;
+        this.#items = this.#items.map((item) => {
+          const stem = path.basename(item.fileName, path.extname(item.fileName));
+          const next = reapplyAudioFilterToItem(item, stem, this.#audioPreferredLanguages);
+          if (next !== item) {
+            updatedAny = true;
+          }
+          return next;
+        });
+        if (updatedAny) {
+          this.#revision += 1;
+          await this.#persistQueue();
+        }
       }
     }
-    this.#preferredLanguages =
-      normalized.length > 0 ? normalized : [...DEFAULT_PREFERRED_LANGUAGES];
+
+    await this.#persistPreferences();
     this.#emitState();
     return this.getState();
   }
@@ -313,6 +383,23 @@ export class JobRunner {
     );
     try {
       db.saveQueueState(this.#revision, this.#items);
+    } finally {
+      db.close();
+    }
+  }
+
+  async #persistPreferences(): Promise<void> {
+    const db = await openScanCacheDb(
+      this.#config.configDir,
+      undefined,
+      this.#emitFallbackWarningOnce,
+      true
+    );
+    try {
+      db.savePreferences({
+        preferredLanguages: this.#preferredLanguages,
+        audioPreferredLanguages: this.#audioPreferredLanguages
+      });
     } finally {
       db.close();
     }
@@ -420,6 +507,7 @@ export class JobRunner {
         () => this.#cancelledByUnlock,
         {
           configDir: this.#config.configDir,
+          audioPreferredLanguages: this.#audioPreferredLanguages,
           onProgress: (completed, total): void => {
             if (this.#cancelledByUnlock) {
               return;

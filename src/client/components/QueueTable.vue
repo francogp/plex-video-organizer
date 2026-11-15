@@ -94,6 +94,7 @@ const emit = defineEmits<{
   (e: 'change-candidate', item: ScannedItem, idx: number): void;
   (e: 'search-metadata', item: ScannedItem): void;
   (e: 'search-metadata-bulk', items: readonly ScannedItem[]): void;
+  (e: 'edit-tracks-bulk', items: readonly ScannedItem[]): void;
   (e: 'bulk-media-kind', itemIds: readonly ItemId[], kind: MediaKind): void;
   (e: 'bulk-category', itemIds: readonly ItemId[], category: OutputCategory): void;
   (e: 'inspect-tracks', item: ScannedItem): void;
@@ -511,6 +512,7 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
         )
       "
       @search-metadata-bulk="emit('search-metadata-bulk', selectedItems)"
+      @edit-tracks-bulk="emit('edit-tracks-bulk', selectedItems)"
       @clear-selection="clearSelection"
       @resolve-all-conflicts="emit('resolve-all-conflicts', $event)"
     />

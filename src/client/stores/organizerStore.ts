@@ -5,6 +5,7 @@ import { computed, ref } from 'vue';
 import { ensureValidAudioTrackSelection } from '../../domain/trackSelection.ts';
 import type {
   ActiveJobProgress,
+  AudioLanguageCode,
   ClientId,
   ConflictComparison,
   ConflictDecision,
@@ -26,14 +27,16 @@ import type {
   SseLogEvent,
   SseProgressEvent,
   SubtitleCandidate,
+  TrackSelection,
   VerifierEntryId,
   VerifierState
 } from '../../domain/types.ts';
 import {
+  getInitialAudioPreferredLanguages,
   getInitialPreferredLanguages,
   getInitialThemeMode,
   getOrCreateClientId,
-  loadSavedPreferredLanguages,
+  saveAudioPreferredLanguages,
   savePreferredLanguages,
   saveThemeMode,
   type ThemeMode
@@ -53,6 +56,9 @@ export const useOrganizerStore = defineStore('organizer', () => {
   const clientId = ref<ClientId>(getOrCreateClientId() as ClientId);
   const theme = ref<ThemeMode>(getInitialThemeMode());
   const preferredLanguages = ref<readonly MetadataLanguageCode[]>(getInitialPreferredLanguages());
+  const audioPreferredLanguages = ref<readonly AudioLanguageCode[]>(
+    getInitialAudioPreferredLanguages()
+  );
   const connectionStatus = ref<ConnectionStatus>('connecting');
   const serverInitStatus = ref<ServerInitStatus>('initializing');
   const phase = ref<JobPhase>('IDLE');
@@ -138,22 +144,50 @@ export const useOrganizerStore = defineStore('organizer', () => {
     if (state.preferredLanguages && state.preferredLanguages.length > 0) {
       preferredLanguages.value = state.preferredLanguages;
     }
+    if (state.audioPreferredLanguages && state.audioPreferredLanguages.length > 0) {
+      audioPreferredLanguages.value = state.audioPreferredLanguages;
+    }
     if (state.phase === 'ERROR' && state.lastError) {
       errorMessage.value = state.lastError;
     }
   }
 
-  async function setPreferredLanguages(languages: readonly MetadataLanguageCode[]): Promise<void> {
+  async function updateLanguagePreference<T extends string>(
+    languages: readonly T[],
+    targetRef: { value: readonly T[] },
+    saveFn: (langs: readonly T[]) => void,
+    payloadKey: 'preferredLanguages' | 'audioPreferredLanguages'
+  ): Promise<void> {
     if (languages.length === 0) {
       return;
     }
-    preferredLanguages.value = [...languages];
-    savePreferredLanguages(languages);
+    targetRef.value = [...languages];
+    saveFn(languages);
     const next = await requestJson<OrganizerStatePayload>('/api/preferences', {
       method: 'POST',
-      body: JSON.stringify({ preferredLanguages: languages })
+      body: JSON.stringify({ [payloadKey]: languages })
     });
     applyServerState(next);
+  }
+
+  async function setPreferredLanguages(languages: readonly MetadataLanguageCode[]): Promise<void> {
+    await updateLanguagePreference(
+      languages,
+      preferredLanguages,
+      savePreferredLanguages,
+      'preferredLanguages'
+    );
+  }
+
+  async function setAudioPreferredLanguages(
+    languages: readonly AudioLanguageCode[]
+  ): Promise<void> {
+    await updateLanguagePreference(
+      languages,
+      audioPreferredLanguages,
+      saveAudioPreferredLanguages,
+      'audioPreferredLanguages'
+    );
   }
 
   async function clearLogs(): Promise<void> {
@@ -253,12 +287,11 @@ export const useOrganizerStore = defineStore('organizer', () => {
     const state = await requestJson<OrganizerStatePayload>('/api/state');
     connectionStatus.value = 'ready';
     applyServerState(state);
-    const savedLangs = loadSavedPreferredLanguages();
-    if (
-      savedLangs &&
-      JSON.stringify(savedLangs) !== JSON.stringify(state.preferredLanguages ?? [])
-    ) {
-      await setPreferredLanguages(savedLangs);
+    if (state.preferredLanguages) {
+      savePreferredLanguages(state.preferredLanguages);
+    }
+    if (state.audioPreferredLanguages) {
+      saveAudioPreferredLanguages(state.audioPreferredLanguages);
     }
   }
 
@@ -509,6 +542,29 @@ export const useOrganizerStore = defineStore('organizer', () => {
     });
   }
 
+  function buildMergedTrackSelection(
+    target: TrackSelection,
+    template: TrackSelection
+  ): TrackSelection {
+    return {
+      ...target,
+      subtitleMergeMode: template.subtitleMergeMode,
+      needsUserPrompt: false,
+      audioFilterCustomized: true,
+      audioTracks: ensureValidAudioTrackSelection(
+        target.audioTracks.map((t, idx) => {
+          const src = template.audioTracks[idx];
+          return {
+            ...t,
+            include: src?.include ?? t.include,
+            language: src?.language ?? t.language,
+            isDefault: src?.isDefault ?? t.isDefault
+          };
+        })
+      )
+    };
+  }
+
   async function applyTracksToSeries(sourceItem: ScannedItem): Promise<void> {
     const seriesTitle = sourceItem.parsedTitle;
     for (const item of items.value) {
@@ -522,23 +578,24 @@ export const useOrganizerStore = defineStore('organizer', () => {
           edition: sourceItem.edition,
           selectedMetadata: sourceItem.selectedMetadata,
           episodeOrder: sourceItem.episodeOrder,
-          trackSelection: {
-            ...item.trackSelection,
-            subtitleMergeMode: sourceItem.trackSelection.subtitleMergeMode,
-            audioTracks: ensureValidAudioTrackSelection(
-              item.trackSelection.audioTracks.map((t, idx) => {
-                const src = sourceItem.trackSelection.audioTracks[idx];
-                return {
-                  ...t,
-                  include: src?.include ?? t.include,
-                  language: src?.language ?? t.language,
-                  isDefault: src?.isDefault ?? t.isDefault
-                };
-              })
-            )
-          }
+          trackSelection: buildMergedTrackSelection(item.trackSelection, sourceItem.trackSelection)
         });
       }
+    }
+  }
+
+  async function applyTracksToItems(
+    targetIds: readonly ItemId[],
+    templateSelection: TrackSelection
+  ): Promise<void> {
+    const idSet = new Set(targetIds);
+    for (const item of items.value) {
+      if (!idSet.has(item.id)) {
+        continue;
+      }
+      await patchItem(item.id, {
+        trackSelection: buildMergedTrackSelection(item.trackSelection, templateSelection)
+      });
     }
   }
 
@@ -633,6 +690,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     clientId,
     theme,
     preferredLanguages,
+    audioPreferredLanguages,
     connectionStatus,
     serverInitStatus,
     isInitializing,
@@ -654,6 +712,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     canProcessQueue,
     toggleTheme,
     setPreferredLanguages,
+    setAudioPreferredLanguages,
     fetchState,
     bootstrapConnection,
     connectSse,
@@ -665,6 +724,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     patchItem,
     patchItemsBulk,
     applyTracksToSeries,
+    applyTracksToItems,
     searchMetadata,
     searchItemSubtitles,
     downloadItemSubtitle,

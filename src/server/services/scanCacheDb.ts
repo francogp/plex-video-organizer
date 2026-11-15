@@ -5,8 +5,19 @@ import path from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
 import { SCAN_CACHE_RETENTION_MS, isPermissionOrReadOnlyError } from '../../domain/constants.ts';
-import type { AudioTrackAnalysis, MediaProbeSummary, ScannedItem } from '../../domain/types.ts';
+import type {
+  AudioLanguageCode,
+  AudioTrackAnalysis,
+  MediaProbeSummary,
+  MetadataLanguageCode,
+  ScannedItem
+} from '../../domain/types.ts';
 import { isDirUnwritable } from './fileMover.ts';
+
+export interface PersistedPreferences {
+  readonly preferredLanguages?: readonly MetadataLanguageCode[];
+  readonly audioPreferredLanguages?: readonly AudioLanguageCode[];
+}
 
 const APP_DB_FILENAME = 'plex-video-organizer.sqlite';
 const PREVIOUS_SCAN_CACHE_DB_FILENAME = 'scan-cache.sqlite';
@@ -151,6 +162,8 @@ export class ScanCacheDb {
   readonly #upsertMetadataStmt: StatementSync;
   readonly #clearMetadataStmt: StatementSync;
   readonly #getDbVersionStmt: StatementSync;
+  readonly #getPreferencesStmt: StatementSync;
+  readonly #upsertPreferencesStmt: StatementSync;
   #closed = false;
 
   public constructor(db: DatabaseSync, dbPath = ':memory:') {
@@ -224,6 +237,13 @@ export class ScanCacheDb {
     this.#getDbVersionStmt = this.#db.prepare(
       "SELECT value FROM system_config WHERE key = 'db_version'"
     );
+    this.#getPreferencesStmt = this.#db.prepare(
+      "SELECT value FROM system_config WHERE key = 'preferences'"
+    );
+    this.#upsertPreferencesStmt = this.#db.prepare(`
+      INSERT INTO system_config (key, value) VALUES ('preferences', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `);
   }
 
   #configurePragmas(): void {
@@ -380,6 +400,30 @@ export class ScanCacheDb {
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#saveQueueStateStmt.run(Math.trunc(revision), itemsJson, nowMs);
+      this.#db.exec('COMMIT');
+    } catch (err) {
+      this.#db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  public getPreferences(): PersistedPreferences | null {
+    const row = this.#getPreferencesStmt.get();
+    if (!row || typeof row.value !== 'string') {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(row.value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed;
+  }
+
+  public savePreferences(prefs: PersistedPreferences): void {
+    const json = JSON.stringify(prefs);
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#upsertPreferencesStmt.run(json);
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');

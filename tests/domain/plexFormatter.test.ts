@@ -6,6 +6,7 @@ import {
   extractSplitPart,
   formatEditionTag,
   formatMovieRelativePath,
+  formatTitleWithYear,
   formatTvRelativePath,
   parseProviderReference,
   resolveContainedOutputPath,
@@ -407,5 +408,33 @@ describe('plexFormatter', () => {
       tvdbId: asTvdbId('393077')
     });
     expect(parseProviderReference('Batman Beyond')).toEqual({});
+  });
+
+  it('avoids duplicating trailing (year) in formatTitleWithYear, formatTvRelativePath, and formatMovieRelativePath', () => {
+    expect(formatTitleWithYear('Foundation (2021)', 2021)).toBe('Foundation (2021)');
+    expect(formatTitleWithYear('Foundation', 2011)).toBe('Foundation (2011)');
+    expect(formatTitleWithYear('2012', 2009)).toBe('2012 (2009)');
+
+    expect(
+      formatTvRelativePath({
+        showTitle: 'Foundation (2021)',
+        year: 2021,
+        tvdbId: asTvdbId('366972'),
+        episode: { seasonNumber: 1, episodeStart: 8, episodeTitle: 'The Missing Piece' }
+      })
+    ).toBe(
+      path.join(
+        'Foundation (2021) {tvdb-366972}',
+        'Season 01',
+        'Foundation (2021) - s01e08 - The Missing Piece.mkv'
+      )
+    );
+
+    expect(
+      formatMovieRelativePath({
+        title: 'Dune (2021)',
+        year: 2021
+      })
+    ).toBe(path.join('Dune (2021)', 'Dune (2021).mkv'));
   });
 });

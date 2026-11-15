@@ -1,11 +1,11 @@
 import { RESOLUTION_TAG_MAP, type ResolutionToken } from './constants.ts';
-import type { AudioStreamInfo, MediaProbeSummary, PlexTagContext } from './types.ts';
+import { extractPrimaryAudioTag, hasEffectiveSpanishAudio } from './plexAudioTagExtractor.ts';
+import type { MediaProbeSummary, PlexTagContext } from './types.ts';
 
 const RESOLUTION_REGEX = /\b(480p|720p|1080p|1440p|2160p|4320p|2k|4k|8k)\b/i;
 const EXTENDED_REGEX = /\bextended\b/i;
 const DIRECTORS_CUT_REGEX = /\bdirector'?s?[\s._-]*cut\b/i;
 const UNRATED_REGEX = /\bunrated\b/i;
-const SPANISH_AUDIO_REGEX = /\b(latino|espa[nñ]ol|castellano|spanish[\s._-]*audio|dual)\b/i;
 const DOLBY_VISION_REGEX = /\b(?:dv|dovi|dolby[\s._-]*vision)\b/i;
 const HDR10_PLUS_REGEX = /\bhdr10\+/i;
 const HDR_REGEX = /\bhdr(?:10)?\b/i;
@@ -24,10 +24,6 @@ const WIDTH_2K_MIN = 2500;
 const HEIGHT_1080_MIN = 1000;
 const HEIGHT_720_MIN = 700;
 const TEN_BIT_DEPTH = 10;
-const EIGHT_CHANNEL_COUNT = 8;
-const SIX_CHANNEL_COUNT = 6;
-const CHANNELS_STEREO = 2;
-const CHANNELS_MONO = 1;
 
 const VIDEO_CODEC_TAG_MAP: ReadonlyMap<string, string> = new Map([
   ['hevc', 'HEVC'],
@@ -38,18 +34,6 @@ const VIDEO_CODEC_TAG_MAP: ReadonlyMap<string, string> = new Map([
   ['vp9', 'VP9'],
   ['mpeg2video', 'MPEG2'],
   ['vc1', 'VC-1']
-]);
-
-const AUDIO_CODEC_TAG_MAP: ReadonlyMap<string, string> = new Map([
-  ['eac3', 'DDP'],
-  ['ac3', 'AC3'],
-  ['aac', 'AAC'],
-  ['flac', 'FLAC'],
-  ['opus', 'Opus'],
-  ['truehd', 'TrueHD'],
-  ['dts', 'DTS'],
-  ['mp3', 'MP3'],
-  ['vorbis', 'Vorbis']
 ]);
 
 function inferResolutionFromProbe(probe?: MediaProbeSummary): string | undefined {
@@ -70,77 +54,6 @@ function inferResolutionFromProbe(probe?: MediaProbeSummary): string | undefined
     return '720p';
   }
   return video.height > 0 ? '480p' : undefined;
-}
-
-function formatAudioChannelLayout(channels: number): string {
-  if (channels >= EIGHT_CHANNEL_COUNT) {
-    return '7.1';
-  }
-  if (channels >= SIX_CHANNEL_COUNT) {
-    return '5.1';
-  }
-  if (channels === CHANNELS_STEREO) {
-    return '2.0';
-  }
-  if (channels === CHANNELS_MONO) {
-    return '1.0';
-  }
-  return channels > 0 ? `${String(channels)}.0` : '2.0';
-}
-
-function resolvePrimaryAudioStream(
-  probe?: MediaProbeSummary,
-  context?: PlexTagContext
-): AudioStreamInfo | undefined {
-  const streams = probe?.audioStreams ?? [];
-  if (streams.length === 0) {
-    return undefined;
-  }
-  const selectedTracks = context?.trackSelection?.audioTracks.filter((track) => track.include);
-  if (selectedTracks && selectedTracks.length > 0) {
-    const preferred = selectedTracks.find((track) => track.isDefault) ?? selectedTracks[0];
-    if (preferred) {
-      const matched = streams.find((stream) => stream.streamOrder === preferred.streamOrder);
-      if (matched) {
-        return matched;
-      }
-    }
-  }
-  return streams.find((stream) => stream.isDefault) ?? streams[0];
-}
-
-function formatAudioCodecLabel(
-  stream: AudioStreamInfo,
-  rawName: string,
-  context?: PlexTagContext
-): string {
-  const overrideCodec =
-    context?.audioNormalization?.codec ?? context?.trackSelection?.audioNormalization?.codec;
-  if (overrideCodec && overrideCodec !== 'auto') {
-    return AUDIO_CODEC_TAG_MAP.get(overrideCodec) ?? overrideCodec.toUpperCase();
-  }
-  const baseCodec = stream.codecName.toLowerCase();
-  const profileLower = `${stream.profile ?? ''} ${stream.title ?? ''}`.toLowerCase();
-  const hasAtmos = profileLower.includes('atmos') || /\batmos\b/i.test(rawName);
-  if (baseCodec === 'truehd') {
-    return hasAtmos ? 'TrueHD Atmos' : 'TrueHD';
-  }
-  if (baseCodec === 'eac3') {
-    return hasAtmos ? 'DDP Atmos' : 'DDP';
-  }
-  if (baseCodec === 'dts') {
-    if (profileLower.includes('dts-hd ma') || profileLower.includes('ma')) {
-      return 'DTS-HD MA';
-    }
-    if (profileLower.includes('hra')) {
-      return 'DTS-HD HRA';
-    }
-    if (profileLower.includes('dts:x') || /\bdts[\s.:_-]*x\b/i.test(rawName)) {
-      return 'DTS:X';
-    }
-    return 'DTS';
-  }
-  return AUDIO_CODEC_TAG_MAP.get(baseCodec) ?? stream.codecName.toUpperCase();
 }
 
 function extractVideoCodecTag(rawName: string, probe?: MediaProbeSummary): string | undefined {
@@ -182,21 +95,6 @@ function extractSourceTag(rawName: string): string | undefined {
   return undefined;
 }
 
-function hasEffectiveSpanishAudio(
-  rawName: string,
-  probe?: MediaProbeSummary,
-  context?: PlexTagContext
-): boolean {
-  if (SPANISH_AUDIO_REGEX.test(rawName)) {
-    return true;
-  }
-  const selectedTracks = context?.trackSelection?.audioTracks;
-  if (selectedTracks && selectedTracks.length > 0) {
-    return selectedTracks.some((track) => track.include && track.language === 'spa');
-  }
-  return (probe?.audioStreams ?? []).some((stream) => stream.language === 'spa');
-}
-
 /** Extracts deterministic Plex bracket tags from filename, FFprobe metadata, and effective track settings. */
 export function extractPlexTags(
   rawName: string,
@@ -236,14 +134,9 @@ export function extractPlexTags(
     tags.push(videoCodecTag);
   }
 
-  const primaryAudio = resolvePrimaryAudioStream(probe, context);
-  if (primaryAudio) {
-    const codecLabel = formatAudioCodecLabel(primaryAudio, rawName, context);
-    const downmixStereo =
-      context?.audioNormalization?.downmixStereo ??
-      context?.trackSelection?.audioNormalization?.downmixStereo;
-    const effectiveChannels = downmixStereo ? CHANNELS_STEREO : primaryAudio.channels;
-    tags.push(`${codecLabel} ${formatAudioChannelLayout(effectiveChannels)}`);
+  const primaryAudioTag = extractPrimaryAudioTag(rawName, probe, context);
+  if (primaryAudioTag) {
+    tags.push(primaryAudioTag);
   }
 
   const isTenBit = TEN_BIT_REGEX.test(rawName) || video?.bitDepth === TEN_BIT_DEPTH;

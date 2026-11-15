@@ -24,10 +24,12 @@ import {
 } from '../../domain/constants.ts';
 import { extractSplitPart } from '../../domain/plexFormatter.ts';
 import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
+import { buildFilteredAudioTracks } from '../../domain/trackSelection.ts';
 import {
   asImdbId,
   asIso639_2Code,
   asItemId,
+  type AudioLanguageCode,
   asTmdbId,
   asTvdbId,
   collectActiveTasks,
@@ -578,14 +580,10 @@ function cleanTitleFromName(rawName: string): { readonly title: string; readonly
 
 function buildInitialTrackSelection(
   probe: MediaProbeSummary,
-  externalSubtitles: readonly ExternalSubtitleFile[]
+  externalSubtitles: readonly ExternalSubtitleFile[],
+  audioPreferredLanguages?: readonly AudioLanguageCode[]
 ): TrackSelection {
-  const audioTracks = probe.audioStreams.map((stream, idx) => ({
-    streamOrder: stream.streamOrder,
-    include: true,
-    language: stream.language,
-    isDefault: stream.isDefault || idx === 0
-  }));
+  const audioTracks = buildFilteredAudioTracks(probe.audioStreams, audioPreferredLanguages);
 
   const subtitleCollisionKey = (sub: {
     readonly language: string;
@@ -738,7 +736,8 @@ async function buildScannedItemFromEntry(
   inputDir: string,
   probeFile: ProbeFn,
   plexignoreRules: readonly PlexignoreRule[],
-  plexmatchByDir: ReadonlyMap<string, PlexmatchHints>
+  plexmatchByDir: ReadonlyMap<string, PlexmatchHints>,
+  audioPreferredLanguages?: readonly AudioLanguageCode[]
 ): Promise<ScannedItem | null> {
   const paths = resolveCandidateEntryPaths(entry, inputDir, plexignoreRules);
   if (!paths) {
@@ -786,7 +785,11 @@ async function buildScannedItemFromEntry(
     });
   }
 
-  const trackSelection = buildInitialTrackSelection(probe, externalSubtitles);
+  const trackSelection = buildInitialTrackSelection(
+    probe,
+    externalSubtitles,
+    audioPreferredLanguages
+  );
   const idHash = crypto.createHash('sha1').update(relPosix).digest('hex').slice(0, 12);
   return {
     id: asItemId(idHash),
@@ -814,6 +817,7 @@ async function buildScannedItemFromEntry(
 /** Options for `scanInputDirectory` enabling persistent `ffprobe` caching and progress callbacks. */
 export interface ScanInputOptions {
   readonly configDir?: string;
+  readonly audioPreferredLanguages?: readonly AudioLanguageCode[];
   readonly onProgress?: (completed: number, total: number) => void;
 }
 
@@ -874,7 +878,8 @@ export async function scanInputDirectory(
         inputDir,
         cachedProbeFile,
         plexignoreRules,
-        plexmatchByDir
+        plexmatchByDir,
+        options?.audioPreferredLanguages
       );
       if (!shouldCancel?.()) {
         results[currentIdx] = item;
@@ -927,7 +932,8 @@ async function analyzeItemAudio(
     return { item, cacheHit: false, skipped: true };
   }
   const includedTracks = item.trackSelection.audioTracks.filter((t) => t.include);
-  if (includedTracks.length === 0) {
+  const targetTrack = includedTracks.find((t) => t.isDefault) ?? includedTracks[0];
+  if (!targetTrack) {
     return { item, cacheHit: false, skipped: false };
   }
 
@@ -938,33 +944,31 @@ async function analyzeItemAudio(
   const analyses: AudioTrackAnalysis[] = cached ? [...cached] : [];
 
   if (!cached) {
-    for (const [trackIdx, track] of includedTracks.entries()) {
+    if (shouldSkipItem?.(item.id)) {
+      return { item, cacheHit: false, skipped: true };
+    }
+    try {
+      const res = await analyzeAudio(
+        item.sourcePath,
+        targetTrack.streamOrder,
+        item.probe.durationSeconds,
+        (update) => {
+          const trackFraction = Math.max(0, Math.min(1, update.percent / 100));
+          onItemProgress?.(trackFraction);
+        },
+        item.id
+      );
       if (shouldSkipItem?.(item.id)) {
         return { item, cacheHit: false, skipped: true };
       }
-      try {
-        const res = await analyzeAudio(
-          item.sourcePath,
-          track.streamOrder,
-          item.probe.durationSeconds,
-          (update) => {
-            const trackFraction = Math.max(0, Math.min(1, update.percent / 100));
-            onItemProgress?.((trackIdx + trackFraction) / includedTracks.length);
-          },
-          item.id
-        );
-        if (shouldSkipItem?.(item.id)) {
-          return { item, cacheHit: false, skipped: true };
-        }
-        if (res) {
-          analyses.push(res);
-        }
-      } catch {
-        if (shouldSkipItem?.(item.id)) {
-          return { item, cacheHit: false, skipped: true };
-        }
-        // Non-fatal: item remains usable without volumedetect metrics.
+      if (res) {
+        analyses.push(res);
       }
+    } catch {
+      if (shouldSkipItem?.(item.id)) {
+        return { item, cacheHit: false, skipped: true };
+      }
+      // Non-fatal: item remains usable without volumedetect metrics.
     }
     if (statEntry && analyses.length > 0) {
       db.setAudio(statEntry.key, statEntry.meta, analyses);

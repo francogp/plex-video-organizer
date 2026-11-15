@@ -213,6 +213,53 @@ export const DEFAULT_PREFERRED_LANGUAGES: readonly (typeof METADATA_LANGUAGE_COD
   'native'
 ];
 
+/** Canonical ISO-639-2/T audio language preference codes. */
+export const AUDIO_LANGUAGE_CODES = [
+  'eng',
+  'spa',
+  'zho',
+  'jpn',
+  'kor',
+  'por',
+  'fra',
+  'deu',
+  'ita',
+  'rus',
+  'ara',
+  'hin',
+  'tha',
+  'vie',
+  'ind',
+  'pol',
+  'nld',
+  'swe',
+  'nor',
+  'dan',
+  'fin',
+  'tur',
+  'und'
+] as const;
+
+type AudioLanguageCode = (typeof AUDIO_LANGUAGE_CODES)[number];
+
+/** Default preferred audio track language order. */
+export const DEFAULT_AUDIO_PREFERRED_LANGUAGES: readonly AudioLanguageCode[] = [
+  'spa',
+  'eng',
+  'zho',
+  'jpn',
+  'und'
+];
+
+/** Human-readable labels with explicit ISO-639-2/T codes for audio language preference chips. */
+export const AUDIO_LANGUAGE_LABELS: Readonly<Record<AudioLanguageCode, string>> =
+  Object.fromEntries(
+    AUDIO_LANGUAGE_CODES.map((code) => {
+      const base = ISO_639_2_LABELS[code];
+      return [code, base.endsWith(`(${code})`) ? base : `${base} (${code})`];
+    })
+  ) as Readonly<Record<AudioLanguageCode, string>>;
+
 /** Log event severity levels. */
 export const LOG_LEVELS = ['info', 'warn', 'error'] as const;
 

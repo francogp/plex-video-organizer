@@ -2,6 +2,7 @@
 import { mount } from '@vue/test-utils';
 import { describe, expect, it } from 'vite-plus/test';
 
+import AppHeader from '../../src/client/components/AppHeader.vue';
 import OrganizerStatusBar from '../../src/client/components/OrganizerStatusBar.vue';
 import ParallelTasksList from '../../src/client/components/ParallelTasksList.vue';
 import ServerLogsPanel from '../../src/client/components/ServerLogsPanel.vue';
@@ -125,5 +126,54 @@ describe('StatusPanels', () => {
     expect(wrapper.emitted('skip')).toEqual([[asItemId('item-supergirl')]]);
     expect(skipBtn.text()).toBe('Skipping...');
     expect((skipBtn.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('AppHeader renders Title Language Order and Audio Language Order bars and emits updates', async () => {
+    const wrapper = mount(AppHeader, {
+      props: {
+        appSemver: '1.2.0',
+        phase: 'READY',
+        clientId: 'c1:t1',
+        activeTab: 'organizer',
+        queueCount: 0,
+        verifierCount: 0,
+        theme: 'dark',
+        isInitializing: false,
+        isLockedByOther: false,
+        isBusy: false,
+        canProcessQueue: false,
+        hasUnresolvedConflicts: false,
+        includedQueueCount: 0,
+        verifierScanning: false,
+        verifierFixing: false,
+        selectedVerifierCount: 0,
+        recalculateVerifierTags: false,
+        mountPaths: null,
+        preferredLanguages: ['eng', 'spa', 'native'],
+        audioPreferredLanguages: ['eng', 'spa', 'zho', 'jpn', 'und']
+      }
+    });
+
+    expect(wrapper.text()).toContain('Title Language Order');
+    expect(wrapper.text()).toContain('Audio Language Order');
+
+    const audioBar = wrapper.find('section[aria-label="Preferred Audio Language Order"]');
+    const removeEngBtn = audioBar.find('button[aria-label="Remove eng"]');
+    await removeEngBtn.trigger('click');
+    expect(wrapper.emitted('set-audio-preferred-languages')?.[0]).toEqual([
+      ['spa', 'zho', 'jpn', 'und']
+    ]);
+
+    const moveSpaEarlierBtn = audioBar.find('button[aria-label="Move spa earlier"]');
+    await moveSpaEarlierBtn.trigger('click');
+    expect(wrapper.emitted('set-audio-preferred-languages')?.[1]).toEqual([
+      ['spa', 'eng', 'zho', 'jpn', 'und']
+    ]);
+
+    const addSelect = audioBar.find('select');
+    await addSelect.setValue('kor');
+    expect(wrapper.emitted('set-audio-preferred-languages')?.[2]).toEqual([
+      ['eng', 'spa', 'zho', 'jpn', 'und', 'kor']
+    ]);
   });
 });

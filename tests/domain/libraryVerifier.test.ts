@@ -205,4 +205,39 @@ describe('libraryVerifier domain', () => {
       })
     ).toBeNull();
   });
+
+  it('flags and generates rename steps for folders and episodes with repeated years', () => {
+    const entry = buildTvVerificationEntry({
+      category: 'tv-shows',
+      currentRootName: 'Foundation (2021) (2021) {tvdb-366972}',
+      resolvedTitle: 'Foundation (2021)',
+      resolvedYear: 2021,
+      tvdbId: asTvdbId('366972'),
+      seasonDirs: [
+        {
+          dirName: 'Season 01',
+          files: ['Foundation (2021) (2021) - s01e08 - The Missing Piece.mkv']
+        }
+      ],
+      episodeTitles: new Map([['1:8', 'The Missing Piece']])
+    });
+
+    expect(entry).not.toBeNull();
+    expect(entry?.expectedRootName).toBe('Foundation (2021) {tvdb-366972}');
+    expect(entry?.issues).toContain('NON_STANDARD_FILENAME');
+    expect(entry?.steps).toEqual([
+      {
+        kind: 'file',
+        fromRelative:
+          'Foundation (2021) (2021) {tvdb-366972}/Season 01/Foundation (2021) (2021) - s01e08 - The Missing Piece.mkv',
+        toRelative:
+          'Foundation (2021) (2021) {tvdb-366972}/Season 01/Foundation (2021) - s01e08 - The Missing Piece.mkv'
+      },
+      {
+        kind: 'root-dir',
+        fromRelative: 'Foundation (2021) (2021) {tvdb-366972}',
+        toRelative: 'Foundation (2021) {tvdb-366972}'
+      }
+    ]);
+  });
 });

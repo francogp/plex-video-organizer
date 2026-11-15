@@ -1,9 +1,20 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 
-import { METADATA_LANGUAGE_CODES, METADATA_LANGUAGE_LABELS } from '../../domain/constants.ts';
-import type { JobPhase, MetadataLanguageCode, MountPaths } from '../../domain/types.ts';
+import {
+  AUDIO_LANGUAGE_CODES,
+  AUDIO_LANGUAGE_LABELS,
+  METADATA_LANGUAGE_CODES,
+  METADATA_LANGUAGE_LABELS
+} from '../../domain/constants.ts';
+import type {
+  AudioLanguageCode,
+  JobPhase,
+  MetadataLanguageCode,
+  MountPaths
+} from '../../domain/types.ts';
 import { formatPhaseLabel } from '../utils/formatters.ts';
+import LanguageOrderBar from './LanguageOrderBar.vue';
 
 export type WorkspaceTab = 'organizer' | 'verifier';
 
@@ -27,6 +38,7 @@ const props = defineProps<{
   recalculateVerifierTags: boolean;
   mountPaths: MountPaths | null;
   preferredLanguages: readonly MetadataLanguageCode[];
+  audioPreferredLanguages: readonly AudioLanguageCode[];
 }>();
 
 const emit = defineEmits<{
@@ -38,6 +50,7 @@ const emit = defineEmits<{
   'scan-verifier': [];
   'fix-verifier': [];
   'set-preferred-languages': [languages: readonly MetadataLanguageCode[]];
+  'set-audio-preferred-languages': [languages: readonly AudioLanguageCode[]];
 }>();
 
 const mountsExpanded = ref(false);
@@ -76,47 +89,6 @@ const verifierScanButton = computed(() =>
     ? { icon: '⏳', label: 'Scanning Libraries...' }
     : { icon: '🔍', label: 'Scan Libraries' }
 );
-
-const availableExtraLanguages = computed<readonly MetadataLanguageCode[]>(() =>
-  METADATA_LANGUAGE_CODES.filter((code) => !props.preferredLanguages.includes(code))
-);
-
-function movePreferredLanguage(index: number, delta: -1 | 1): void {
-  const nextIndex = index + delta;
-  if (nextIndex < 0 || nextIndex >= props.preferredLanguages.length) {
-    return;
-  }
-  const next = [...props.preferredLanguages];
-  const current = next[index];
-  const target = next[nextIndex];
-  if (!current || !target) {
-    return;
-  }
-  next[index] = target;
-  next[nextIndex] = current;
-  emit('set-preferred-languages', next);
-}
-
-function removePreferredLanguage(code: MetadataLanguageCode): void {
-  if (props.preferredLanguages.length <= 1) {
-    return;
-  }
-  emit(
-    'set-preferred-languages',
-    props.preferredLanguages.filter((c) => c !== code)
-  );
-}
-
-function handleAddPreferredLanguage(evt: Event): void {
-  const select = evt.target as HTMLSelectElement;
-  const value = select.value as MetadataLanguageCode | '';
-  if (!value || props.preferredLanguages.includes(value)) {
-    select.value = '';
-    return;
-  }
-  emit('set-preferred-languages', [...props.preferredLanguages, value]);
-  select.value = '';
-}
 </script>
 
 <template>
@@ -256,58 +228,27 @@ function handleAddPreferredLanguage(evt: Event): void {
     <div>animated-series: {{ props.mountPaths['animated-series'] }}</div>
   </section>
 
-  <section class="vo-lang-bar vo-panel" aria-label="Preferred Title Language Order">
-    <span class="vo-lang-bar__label">Title Language Order</span>
-    <div class="vo-lang-bar__chips">
-      <span
-        v-for="(lang, idx) in props.preferredLanguages"
-        :key="lang"
-        class="vo-lang-chip vo-mono"
-      >
-        <span class="vo-lang-chip__rank">{{ idx + 1 }}.</span>
-        <span>{{ METADATA_LANGUAGE_LABELS[lang] }}</span>
-        <button
-          type="button"
-          class="vo-lang-chip__btn"
-          :disabled="idx === 0"
-          :aria-label="`Move ${lang} earlier`"
-          @click="movePreferredLanguage(idx, -1)"
-        >
-          ←
-        </button>
-        <button
-          type="button"
-          class="vo-lang-chip__btn"
-          :disabled="idx === props.preferredLanguages.length - 1"
-          :aria-label="`Move ${lang} later`"
-          @click="movePreferredLanguage(idx, 1)"
-        >
-          →
-        </button>
-        <button
-          v-if="props.preferredLanguages.length > 1"
-          type="button"
-          class="vo-lang-chip__btn vo-lang-chip__btn--remove"
-          :aria-label="`Remove ${lang}`"
-          @click="removePreferredLanguage(lang)"
-        >
-          ×
-        </button>
-      </span>
-      <select
-        v-if="availableExtraLanguages.length > 0"
-        class="vo-lang-bar__select"
-        aria-label="Add preferred title language"
-        :disabled="props.isInitializing"
-        @change="handleAddPreferredLanguage"
-      >
-        <option value="">+ Add language</option>
-        <option v-for="code in availableExtraLanguages" :key="code" :value="code">
-          {{ METADATA_LANGUAGE_LABELS[code] }}
-        </option>
-      </select>
-    </div>
-  </section>
+  <LanguageOrderBar
+    label="Title Language Order"
+    aria-label="Preferred Title Language Order"
+    add-aria-label="Add preferred title language"
+    :languages="props.preferredLanguages"
+    :all-codes="METADATA_LANGUAGE_CODES"
+    :labels-map="METADATA_LANGUAGE_LABELS"
+    :disabled="props.isInitializing"
+    @update="emit('set-preferred-languages', $event)"
+  />
+
+  <LanguageOrderBar
+    label="Audio Language Order"
+    aria-label="Preferred Audio Language Order"
+    add-aria-label="Add preferred audio language"
+    :languages="props.audioPreferredLanguages"
+    :all-codes="AUDIO_LANGUAGE_CODES"
+    :labels-map="AUDIO_LANGUAGE_LABELS"
+    :disabled="props.isInitializing"
+    @update="emit('set-audio-preferred-languages', $event)"
+  />
 </template>
 
 <style scoped lang="scss">
@@ -375,72 +316,6 @@ function handleAddPreferredLanguage(evt: Event): void {
     color: var(--vo-danger);
     border-color: color-mix(in oklch, var(--vo-danger) 50%, var(--vo-border));
   }
-}
-
-.vo-lang-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-2) var(--vo-space-3);
-}
-
-.vo-lang-bar__label {
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-  font-weight: var(--vo-weight-semibold);
-}
-
-.vo-lang-bar__chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-}
-
-.vo-lang-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--vo-space-1);
-  padding: 2px var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background: color-mix(in oklch, var(--vo-accent) 8%, var(--vo-surface));
-  font-size: var(--vo-text-xs);
-}
-
-.vo-lang-chip__rank {
-  color: var(--vo-text-muted);
-}
-
-.vo-lang-chip__btn {
-  padding: 0 3px;
-  border: none;
-  background: transparent;
-  color: var(--vo-text-muted);
-  cursor: pointer;
-
-  &:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
-
-  &:hover:not(:disabled) {
-    color: var(--vo-text);
-  }
-}
-
-.vo-lang-chip__btn--remove:hover:not(:disabled) {
-  color: var(--vo-danger);
-}
-
-.vo-lang-bar__select {
-  padding: 2px var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background: var(--vo-surface);
-  color: var(--vo-text);
-  font-size: var(--vo-text-xs);
 }
 
 .vo-subtitle {

@@ -602,16 +602,16 @@ describe('organizerStore', () => {
     expect(storage.getInitialPreferredLanguages()).toEqual(['eng', 'spa', 'native']);
 
     localStorage.setItem('vo.preferredLanguages.v1', '{bad-json');
-    expect(storage.loadSavedPreferredLanguages()).toBeNull();
+    expect(storage.getInitialPreferredLanguages()).toEqual(['eng', 'spa', 'native']);
 
     localStorage.setItem('vo.preferredLanguages.v1', JSON.stringify('not-an-array'));
-    expect(storage.loadSavedPreferredLanguages()).toBeNull();
+    expect(storage.getInitialPreferredLanguages()).toEqual(['eng', 'spa', 'native']);
 
     localStorage.setItem('vo.preferredLanguages.v1', JSON.stringify(['invalid']));
-    expect(storage.loadSavedPreferredLanguages()).toBeNull();
+    expect(storage.getInitialPreferredLanguages()).toEqual(['eng', 'spa', 'native']);
 
     storage.savePreferredLanguages(['eng', 'spa']);
-    expect(storage.loadSavedPreferredLanguages()).toEqual(['eng', 'spa']);
+    expect(storage.getInitialPreferredLanguages()).toEqual(['eng', 'spa']);
 
     const fetchSpy = vi.fn().mockResolvedValue(
       new Response(JSON.stringify(makeBaseState({ preferredLanguages: ['eng', 'native'] })), {
@@ -622,7 +622,7 @@ describe('organizerStore', () => {
     const store = useOrganizerStore();
     await store.setPreferredLanguages(['eng', 'native']);
     expect(store.preferredLanguages).toEqual(['eng', 'native']);
-    expect(storage.loadSavedPreferredLanguages()).toEqual(['eng', 'native']);
+    expect(storage.getInitialPreferredLanguages()).toEqual(['eng', 'native']);
     vi.unstubAllGlobals();
   });
 
@@ -782,6 +782,119 @@ describe('organizerStore', () => {
       { streamOrder: 1, include: false, language: 'jpn', isDefault: false },
       { streamOrder: 2, include: true, language: 'spa', isDefault: true },
       { streamOrder: 3, include: true, language: 'spa', isDefault: false }
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it('applyTracksToItems merges audio tracks by index, marks audioFilterCustomized, and keeps per-item subtitles', async () => {
+    localStorage.clear();
+    setActivePinia(createPinia());
+
+    const baseItem: Omit<ScannedItem, 'id' | 'sourcePath' | 'relativePath' | 'fileName'> = {
+      mediaKind: 'tv',
+      category: 'tv-shows',
+      include: true,
+      parsedTitle: 'Show',
+      tags: [],
+      episodeOrder: 'aired',
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 100,
+        sizeBytes: 1000,
+        bitrateBps: 1000,
+        videoStreams: [],
+        audioStreams: [],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      trackSelection: {
+        audioTracks: [],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false
+      },
+      warnings: []
+    };
+    const ep1: ScannedItem = {
+      ...baseItem,
+      id: asItemId('bulk-1'),
+      sourcePath: '/in/Show.S01E01.mkv',
+      relativePath: 'Show.S01E01.mkv',
+      fileName: 'Show.S01E01.mkv',
+      trackSelection: {
+        audioTracks: [
+          { streamOrder: 1, include: true, language: asIso639_2Code('eng'), isDefault: true },
+          { streamOrder: 2, include: true, language: asIso639_2Code('spa'), isDefault: false }
+        ],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [3],
+        externalSubtitleOrder: ['ep1.spa.srt'],
+        needsUserPrompt: false
+      }
+    };
+    const ep2: ScannedItem = {
+      ...baseItem,
+      id: asItemId('bulk-2'),
+      sourcePath: '/in/Show.S01E02.mkv',
+      relativePath: 'Show.S01E02.mkv',
+      fileName: 'Show.S01E02.mkv',
+      trackSelection: {
+        audioTracks: [
+          { streamOrder: 1, include: true, language: asIso639_2Code('eng'), isDefault: true },
+          { streamOrder: 2, include: true, language: asIso639_2Code('spa'), isDefault: false }
+        ],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [4, 5],
+        externalSubtitleOrder: ['ep2.spa.srt'],
+        needsUserPrompt: false
+      }
+    };
+
+    const patchedPayloads: unknown[] = [];
+    const fetchSpy = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PATCH' && typeof init.body === 'string') {
+        patchedPayloads.push(JSON.parse(init.body));
+      }
+      return new Response(JSON.stringify(makeBaseState({ items: [ep1, ep2] })), {
+        status: 200
+      });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const store = useOrganizerStore();
+    await store.fetchState();
+    store.items = [ep1, ep2];
+
+    await store.applyTracksToItems([ep1.id, ep2.id], {
+      ...ep1.trackSelection,
+      subtitleMergeMode: 'replace',
+      audioTracks: [
+        { streamOrder: 1, include: false, language: asIso639_2Code('eng'), isDefault: false },
+        { streamOrder: 2, include: true, language: asIso639_2Code('spa'), isDefault: true }
+      ]
+    });
+
+    expect(patchedPayloads).toHaveLength(2);
+    const secondPatch = patchedPayloads[1] as {
+      patch: {
+        trackSelection: {
+          audioFilterCustomized?: boolean;
+          subtitleMergeMode: string;
+          includedInternalSubtitles: number[];
+          externalSubtitleOrder: string[];
+          audioTracks: { include: boolean; isDefault: boolean; language: string }[];
+        };
+      };
+    };
+    expect(secondPatch.patch.trackSelection.audioFilterCustomized).toBe(true);
+    expect(secondPatch.patch.trackSelection.subtitleMergeMode).toBe('replace');
+    expect(secondPatch.patch.trackSelection.includedInternalSubtitles).toEqual([4, 5]);
+    expect(secondPatch.patch.trackSelection.externalSubtitleOrder).toEqual(['ep2.spa.srt']);
+    expect(secondPatch.patch.trackSelection.audioTracks).toEqual([
+      { streamOrder: 1, include: false, language: 'eng', isDefault: false },
+      { streamOrder: 2, include: true, language: 'spa', isDefault: true }
     ]);
     vi.unstubAllGlobals();
   });

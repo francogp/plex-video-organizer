@@ -12,6 +12,8 @@ Backend Maintainers.
 - All `ffmpeg`/`ffprobe` invocations use `node:child_process.spawn` with argument arrays (no shell).
 - Directory traversal uses Node.js 26 native `fs.readdir(..., { recursive: true })`.
 - Non-blocking startup & initialization gate: [index.ts](index.ts) binds the HTTP port immediately while `validateMountDirectories()` and `JobRunner.init()` run asynchronously; `JobRunner` exposes `initStatus` (`'initializing' | 'ready'`) in `getState()`, rejects mutations with `409 SERVER_INITIALIZING` until ready, and `scanner.ts` / `libraryVerifierService.ts` cache `ffprobe` results in `plex-video-organizer.sqlite` via `scanCacheDb.ts` with bounded concurrency.
+- Persist global language preferences (`preferredLanguages`, `audioPreferredLanguages`) in `system_config` via `ScanCacheDb` as the Single Source of Truth, and `await` persistence deterministically inside `JobRunner.updatePreferences()` before returning.
+- Enforce `strict-catch-narrowing` in Express handlers (`routes.ts`) by checking `err instanceof Error` instead of coercing unknown errors.
 - Designed strictly for trusted LAN deployments: `X-Client-Id` provides an optimistic collaborative session lock rather than HTTP authentication, so the server must not be exposed directly to untrusted networks without an authenticating reverse proxy.
 
 ## Key Files

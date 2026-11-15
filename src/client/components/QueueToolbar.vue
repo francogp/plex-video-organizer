@@ -48,6 +48,7 @@ const emit = defineEmits<{
   'bulk-category': [category: OutputCategory];
   'bulk-audio-normalization': [mode: AudioNormalizationMode];
   'search-metadata-bulk': [];
+  'edit-tracks-bulk': [];
   'clear-selection': [];
   'resolve-all-conflicts': [decision: ConflictDecision];
 }>();
@@ -188,6 +189,14 @@ function onBulkAudioChange(event: Event): void {
         {{ AUDIO_MODE_LABELS[mode] }}
       </option>
     </select>
+    <button
+      type="button"
+      class="vo-btn"
+      :disabled="props.disabled"
+      @click="emit('edit-tracks-bulk')"
+    >
+      <span aria-hidden="true">🎛️</span> Edit Tracks
+    </button>
     <button
       type="button"
       class="vo-btn"
