@@ -5,11 +5,8 @@ import { describe, expect, it } from 'vite-plus/test';
 import QueueTable from '../../src/client/components/QueueTable.vue';
 import {
   formatBuenosAiresTimestamp,
-  formatDuration,
   formatEta,
-  formatKbps,
   formatPlexOutputSegments,
-  formatProbeStreams,
   formatSizeDeltaMb,
   splitRelativePathSegments
 } from '../../src/client/utils/formatters.ts';
@@ -179,41 +176,6 @@ describe('QueueTable', () => {
     expect(formatEta(3665)).toBe('ETA 1h 1m');
     expect(splitRelativePathSegments('')).toEqual({ folders: [], fileName: '' });
     expect(formatSizeDeltaMb(0, 1_048_576)).toContain('-');
-    expect(formatKbps(1_500_000)).toBe('1500 kbps');
-    expect(formatDuration(125)).toBe('2m 05s');
-    expect(
-      formatProbeStreams({
-        ...SAMPLE_ITEM.probe,
-        videoStreams: [],
-        audioStreams: [],
-        subtitleStreams: []
-      })
-    ).toBe('no video · audio: none · subs(0): none');
-    expect(
-      formatProbeStreams({
-        ...SAMPLE_ITEM.probe,
-        audioStreams: [
-          {
-            index: 1,
-            streamOrder: 0,
-            codecName: 'aac',
-            language: asIso639_2Code('eng'),
-            channels: 2,
-            isDefault: true
-          }
-        ],
-        subtitleStreams: [
-          {
-            index: 2,
-            streamOrder: 0,
-            codecName: 'subrip',
-            language: asIso639_2Code('spa'),
-            isForced: false,
-            isHearingImpaired: false
-          }
-        ]
-      })
-    ).toBe('1920x1080 · audio: eng · subs(1): spa');
 
     const formatPlexOutputPreview = (
       item: Parameters<typeof formatPlexOutputSegments>[0]
@@ -361,13 +323,19 @@ describe('QueueTable', () => {
       }
     });
 
-    expect(wrapper.text()).toContain('File already exists in output');
-    expect(wrapper.text()).toContain('Existing in Output');
-    expect(wrapper.text()).toContain('2250 kbps');
-    expect(wrapper.text()).toContain('4500 kbps');
+    expect(wrapper.text()).toContain('Exists in output');
+    expect(wrapper.find('tr.vo-row--has-conflict').exists()).toBe(true);
 
-    await wrapper.find('select#cdec-item-1').setValue('overwrite');
-    expect(wrapper.emitted('resolve-conflict')?.[0]).toEqual(['item-1', 'overwrite']);
+    const resolveBtn = wrapper
+      .findAll('.vo-cell-conflict button')
+      .find((b) => b.text().includes('Resolve conflict'));
+    expect(resolveBtn).toBeDefined();
+    await resolveBtn!.trigger('click');
+    expect(wrapper.emitted('open-conflict-modal')?.[0]).toEqual(['item-1']);
+
+    await wrapper.setProps({ conflictResolutions: { 'item-1': 'overwrite' } } as never);
+    expect(wrapper.find('tr.vo-row--has-conflict-resolved').exists()).toBe(true);
+    expect(wrapper.find('.vo-cell-conflict button').text()).toContain('Overwrite');
 
     const bannerBtns = wrapper.findAll('.vo-conflict-banner-actions button');
     await bannerBtns[0]!.trigger('click');
@@ -389,7 +357,8 @@ describe('QueueTable', () => {
         conflictResolutions: { [SAMPLE_ITEM.id]: 'ignore' }
       }
     });
-    expect(intraWrapper.text()).toContain('Duplicate output destination');
+    expect(intraWrapper.text()).toContain('Duplicate destination');
+    expect(intraWrapper.find('.vo-cell-conflict button').text()).toContain('Ignore');
   });
 
   it('renders audio analysis suggestion and emits audio normalization updates', async () => {
@@ -749,5 +718,63 @@ describe('QueueTable', () => {
     expect(providerLink.exists()).toBe(true);
     expect(providerLink.attributes('href')).toBe('https://www.imdb.com/title/tt8579674/');
     expect(providerLink.attributes('target')).toBe('_blank');
+  });
+
+  it('renders quick audio and subtitle track counts in Tracks column including skipped audio', () => {
+    const dualAudioItem: ScannedItem = {
+      ...SAMPLE_ITEM,
+      probe: {
+        ...SAMPLE_ITEM.probe,
+        audioStreams: [
+          {
+            index: 1,
+            streamOrder: 0,
+            codecName: 'eac3',
+            language: asIso639_2Code('spa'),
+            channels: 6,
+            isDefault: true
+          },
+          {
+            index: 2,
+            streamOrder: 1,
+            codecName: 'eac3',
+            language: asIso639_2Code('zho'),
+            channels: 6,
+            isDefault: false
+          }
+        ],
+        subtitleStreams: [
+          {
+            index: 3,
+            streamOrder: 0,
+            codecName: 'subrip',
+            language: asIso639_2Code('eng'),
+            isForced: false,
+            isHearingImpaired: false
+          }
+        ]
+      },
+      trackSelection: {
+        audioTracks: [
+          { streamOrder: 0, include: true, language: asIso639_2Code('spa'), isDefault: true },
+          { streamOrder: 1, include: false, language: asIso639_2Code('zho'), isDefault: false }
+        ],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [0],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false
+      }
+    };
+
+    const wrapper = mount(QueueTable, {
+      props: {
+        items: [dualAudioItem],
+        disabled: false
+      }
+    });
+    const overview = wrapper.find('.vo-tracks-overview');
+    expect(overview.exists()).toBe(true);
+    expect(overview.text()).toContain('Audio: 1/2 (spa)');
+    expect(overview.text()).toContain('Subs: 1 int · 0 ext');
   });
 });

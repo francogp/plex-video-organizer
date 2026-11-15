@@ -9,7 +9,8 @@ import {
   DEFAULT_PREFERRED_LANGUAGES,
   METADATA_LANGUAGE_CODES,
   ORGANIZING_TEMP_MARKER,
-  ORGANIZING_TEMP_SUFFIX
+  ORGANIZING_TEMP_SUFFIX,
+  PROCESS_JOB_CONCURRENCY
 } from '../../domain/constants.ts';
 import { parseProviderReference } from '../../domain/plexFormatter.ts';
 import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
@@ -27,6 +28,7 @@ import {
   type ItemPatch,
   type JobId,
   type JobPhase,
+  type JobStageKind,
   type LockErrorCode,
   type LogLevel,
   type MediaKind,
@@ -82,6 +84,16 @@ import {
 
 const MAX_RECENT_LOGS = 100;
 const PERCENT_MAX = 100;
+const LOUDNORM_PASS1_WEIGHT = 0.45;
+const REMUX_WITH_LOUDNORM_WEIGHT = 0.45;
+const REMUX_ONLY_WEIGHT = 0.9;
+const VERIFY_STAGE_FRACTION = 0.9;
+const MOVE_STAGE_WEIGHT = 0.1;
+const MS_PER_SECOND = 1000;
+const MIN_ETA_FRACTION = 0.001;
+const MIN_ETA_ELAPSED_SECONDS = 1;
+
+type ProcessItemStage = Extract<JobStageKind, 'remuxing' | 'verifying' | 'moving'>;
 
 function resolveCategoryFromMetadata(
   mediaKind: MediaKind,
@@ -104,6 +116,15 @@ function resolveCategoryFromMetadata(
     return 'movies';
   }
   return currentCategory;
+}
+
+function isSameResolvedPath(leftPath: string, rightPath: string): boolean {
+  const left = path.resolve(leftPath);
+  const right = path.resolve(rightPath);
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    return left.toLowerCase() === right.toLowerCase();
+  }
+  return left === right;
 }
 
 export class LockConflictError extends Error {
@@ -1187,9 +1208,11 @@ export class JobRunner {
   async #measureLoudnormForItem(
     item: ScannedItem,
     downmixStereo: boolean,
-    jobId: JobId,
-    totalItems: number,
-    completedItems: number
+    onProgress?: (
+      fraction: number,
+      label: string,
+      activeTasks: readonly ActiveParallelTask[]
+    ) => void
   ): Promise<ReadonlyMap<number, LoudnormMeasurements>> {
     this.#emitLog('info', `Measuring EBU R128 loudness (pass 1) for ${item.fileName}...`);
     const includedTracks = item.trackSelection.audioTracks.filter((t) => t.include);
@@ -1199,38 +1222,26 @@ export class JobRunner {
     }
 
     const workerCount = Math.min(includedTracks.length, Math.max(1, os.cpus().length));
+    const trackSlotTasks = Array.from<ActiveParallelTask | undefined>({ length: workerCount });
     const trackPercents = Array.from({ length: includedTracks.length }, (): number => 0);
-    const trackEtas = Array.from<number | undefined>({ length: includedTracks.length });
-    const activeBySlot = Array.from<ActiveParallelTask | undefined>({ length: workerCount });
     let completedTracks = 0;
 
     const emitPass1Progress = (): void => {
       const sumPct = trackPercents.reduce((acc, p): number => acc + p, 0);
-      const percent = Math.round(sumPct / includedTracks.length);
-      const activeEtas = trackEtas.filter((eta): eta is number => eta !== undefined);
-      const etaSeconds = activeEtas.length > 0 ? Math.max(...activeEtas) : undefined;
-      const stageLabel = `Loudnorm Pass 1/2 (${String(completedTracks)}/${String(includedTracks.length)} tracks)`;
-      this.#updateProgress({
-        jobId,
-        activeTasks: collectActiveTasks(activeBySlot),
-        totalItems,
-        completedItems,
-        percent,
-        stage: 'remuxing',
-        stageLabel,
-        etaSeconds
-      });
+      const fraction = Math.max(0, Math.min(1, sumPct / (includedTracks.length * PERCENT_MAX)));
+      const label = `Loudnorm Pass 1/2 (${String(completedTracks)}/${String(includedTracks.length)} tracks)`;
+      onProgress?.(fraction, label, collectActiveTasks(trackSlotTasks));
     };
 
     await runSlotWorkerPool(
       includedTracks,
       workerCount,
-      async (track, trackIdx, slot) => {
-        const taskLabel = `${item.fileName} · audio #${String(track.streamOrder + 1)} (${track.language})`;
-        activeBySlot[slot] = {
-          slot,
+      async (track, trackIdx, trackSlot) => {
+        const trackLabel = `${item.fileName} · audio #${String(trackIdx + 1)} (${track.language})`;
+        trackSlotTasks[trackSlot] = {
+          slot: trackSlot,
           itemId: item.id,
-          fileName: taskLabel,
+          fileName: trackLabel,
           percent: 0
         };
         emitPass1Progress();
@@ -1241,27 +1252,27 @@ export class JobRunner {
           downmixStereo,
           item.probe.durationSeconds,
           (update): void => {
+            if (this.#cancelledByUnlock) {
+              return;
+            }
             trackPercents[trackIdx] = update.percent;
-            trackEtas[trackIdx] = update.etaSeconds;
-            activeBySlot[slot] = {
-              slot,
+            trackSlotTasks[trackSlot] = {
+              slot: trackSlot,
               itemId: item.id,
-              fileName: taskLabel,
+              fileName: trackLabel,
               percent: update.percent
             };
             emitPass1Progress();
           },
           this.#createChildTracker()
         );
+        trackSlotTasks[trackSlot] = undefined;
         if (this.#cancelledByUnlock) {
-          activeBySlot[slot] = undefined;
           return;
         }
         measuredMap.set(track.streamOrder, measured);
         completedTracks += 1;
         trackPercents[trackIdx] = PERCENT_MAX;
-        trackEtas[trackIdx] = 0;
-        activeBySlot[slot] = undefined;
         emitPass1Progress();
       },
       () => this.#cancelledByUnlock
@@ -1269,16 +1280,48 @@ export class JobRunner {
     return measuredMap;
   }
 
-  async #processSingleJobItem(
-    jobId: JobId,
-    item: ScannedItem,
-    idx: number,
-    totalItems: number,
-    destPath: string,
-    allowOverwrite: boolean,
-    oldExistingPath: string | undefined,
-    createdTempSubs: string[]
-  ): Promise<boolean> {
+  async #pruneEmptyOldParentDirs(oldFilePath: string): Promise<void> {
+    const maxPruneDepth = 2;
+    const protectedRoots = Object.values(buildMountPathsMap(this.#config));
+    let current = path.resolve(path.dirname(oldFilePath));
+    for (let depth = 0; depth < maxPruneDepth; depth += 1) {
+      if (protectedRoots.some((root) => isSameResolvedPath(root, current))) {
+        break;
+      }
+      try {
+        await fs.rmdir(current);
+      } catch {
+        break;
+      }
+      current = path.dirname(current);
+    }
+  }
+
+  async #processSingleJobItem(options: {
+    readonly jobId: JobId;
+    readonly item: ScannedItem;
+    readonly slot: number;
+    readonly destPath: string;
+    readonly allowOverwrite: boolean;
+    readonly oldExistingPath: string | undefined;
+    readonly createdTempSubs: string[];
+    readonly onProgress: (
+      slotTasks: ActiveParallelTask | readonly ActiveParallelTask[] | undefined,
+      itemFraction: number,
+      stage: ProcessItemStage,
+      stageLabel: string
+    ) => void;
+  }): Promise<boolean> {
+    const {
+      jobId,
+      item,
+      slot,
+      destPath,
+      allowOverwrite,
+      oldExistingPath,
+      createdTempSubs,
+      onProgress
+    } = options;
     const sourceDir = path.dirname(item.sourcePath);
     const baseNoExt = path.basename(item.sourcePath, path.extname(item.sourcePath));
     const tempMkvPath = path.join(
@@ -1302,40 +1345,50 @@ export class JobRunner {
       subInputs.push({ sub: subObj, inputPath: normalized.inputPath });
     }
 
-    this.#activeJob = {
-      jobId,
-      totalItems,
-      completedItems: idx,
-      activeTasks: [{ slot: 0, itemId: item.id, fileName: item.fileName, percent: 0 }],
-      currentPercent: 0,
-      stage: 'remuxing',
-      stageLabel: 'Remuxing'
-    };
-    this.#emitState();
+    onProgress(
+      { slot, itemId: item.id, fileName: item.fileName, percent: 0 },
+      0,
+      'remuxing',
+      'Remuxing'
+    );
     this.#emitLog('info', `Remuxing ${item.fileName} -> ${path.basename(destPath)}`);
 
     const norm = item.trackSelection.audioNormalization;
-    const loudnormByStreamOrder =
-      norm?.mode === 'loudnorm'
-        ? await this.#measureLoudnormForItem(item, norm.downmixStereo, jobId, totalItems, idx)
-        : undefined;
+    const hasLoudnorm = norm?.mode === 'loudnorm';
+    const remuxWeight = hasLoudnorm ? REMUX_WITH_LOUDNORM_WEIGHT : REMUX_ONLY_WEIGHT;
+    const remuxOffset = hasLoudnorm ? LOUDNORM_PASS1_WEIGHT : 0;
 
-    const remuxStageLabel = norm?.mode === 'loudnorm' ? 'Loudnorm Pass 2/2 (Remuxing)' : 'Remuxing';
+    const loudnormByStreamOrder = hasLoudnorm
+      ? await this.#measureLoudnormForItem(
+          item,
+          norm.downmixStereo,
+          (fraction, label, activeTrackTasks): void => {
+            onProgress(activeTrackTasks, fraction * LOUDNORM_PASS1_WEIGHT, 'remuxing', label);
+          }
+        )
+      : undefined;
+
+    if (this.#cancelledByUnlock) {
+      return false;
+    }
+
+    const remuxStageLabel = hasLoudnorm ? 'Loudnorm Pass 2/2 (Remuxing)' : 'Remuxing';
     const args = buildFfmpegRemuxArgs(item, tempMkvPath, subInputs, loudnormByStreamOrder);
     await runFfmpegRemux(
       args,
       item.probe.durationSeconds,
-      (percent, etaSeconds): void => {
-        this.#updateProgress({
-          jobId,
-          activeTasks: [{ slot: 0, itemId: item.id, fileName: item.fileName, percent }],
-          totalItems,
-          completedItems: idx,
-          percent,
-          stage: 'remuxing',
-          stageLabel: remuxStageLabel,
-          etaSeconds
-        });
+      (percent): void => {
+        onProgress(
+          {
+            slot,
+            itemId: item.id,
+            fileName: hasLoudnorm ? `${item.fileName} · Pass 2/2` : item.fileName,
+            percent
+          },
+          remuxOffset + (percent / PERCENT_MAX) * remuxWeight,
+          'remuxing',
+          remuxStageLabel
+        );
       },
       this.#createChildTracker()
     );
@@ -1345,53 +1398,37 @@ export class JobRunner {
     }
 
     const destFileName = path.basename(destPath);
-    this.#updateProgress({
-      jobId,
-      activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName }],
-      totalItems,
-      completedItems: idx,
-      percent: 0,
-      stage: 'verifying',
-      stageLabel: 'Verifying'
-    });
+    onProgress(
+      { slot, itemId: item.id, fileName: `${destFileName} · Verifying` },
+      VERIFY_STAGE_FRACTION,
+      'verifying',
+      'Verifying'
+    );
     await probeMedia(tempMkvPath);
 
-    this.#updateProgress({
-      jobId,
-      activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName, percent: 0 }],
-      totalItems,
-      completedItems: idx,
-      percent: 0,
-      stage: 'moving',
-      stageLabel: 'Moving'
-    });
+    onProgress(
+      { slot, itemId: item.id, fileName: `${destFileName} · Moving`, percent: 0 },
+      VERIFY_STAGE_FRACTION,
+      'moving',
+      'Moving'
+    );
     this.#emitLog('info', `Moving ${destFileName} to ${item.category}`);
 
     await moveTempOutputFile(tempMkvPath, destPath, allowOverwrite, (movePercent): void => {
-      this.#updateProgress({
-        jobId,
-        activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName, percent: movePercent }],
-        totalItems,
-        completedItems: idx,
-        percent: movePercent,
-        stage: 'moving',
-        stageLabel: 'Moving'
-      });
+      onProgress(
+        { slot, itemId: item.id, fileName: `${destFileName} · Moving`, percent: movePercent },
+        VERIFY_STAGE_FRACTION + (movePercent / PERCENT_MAX) * MOVE_STAGE_WEIGHT,
+        'moving',
+        'Moving'
+      );
     });
 
-    if (allowOverwrite && oldExistingPath && oldExistingPath !== destPath) {
+    if (allowOverwrite && oldExistingPath && !isSameResolvedPath(oldExistingPath, destPath)) {
       await fs.rm(oldExistingPath, { force: true });
+      await this.#pruneEmptyOldParentDirs(oldExistingPath);
     }
 
-    this.#updateProgress({
-      jobId,
-      activeTasks: [{ slot: 0, itemId: item.id, fileName: destFileName, percent: PERCENT_MAX }],
-      totalItems,
-      completedItems: idx + 1,
-      percent: PERCENT_MAX,
-      stage: 'moving',
-      stageLabel: 'Moved'
-    });
+    onProgress(undefined, 1, 'moving', 'Moved');
     return true;
   }
 
@@ -1414,32 +1451,107 @@ export class JobRunner {
         );
       }
 
-      for (let idx = 0; idx < toProcess.length; idx += 1) {
+      const workerCount = Math.min(PROCESS_JOB_CONCURRENCY, Math.max(1, toProcess.length));
+      const slotStates: Array<{
+        tasks: readonly ActiveParallelTask[];
+        stage?: ProcessItemStage;
+        stageLabel?: string;
+      }> = Array.from({ length: workerCount }, () => ({ tasks: [] }));
+      const itemBytes = toProcess.map((item) => Math.max(1, item.probe.sizeBytes));
+      const totalBytes = itemBytes.reduce((sum, b) => sum + b, 0);
+      const itemFractions = toProcess.map(() => 0);
+      const jobStartedAtMs = performance.now();
+      let completedCount = 0;
+
+      const resolveActiveStage = (
+        fallbackStage: ProcessItemStage,
+        fallbackLabel: string
+      ): {
+        readonly stage: ProcessItemStage;
+        readonly stageLabel: string;
+      } => {
+        for (const candidate of ['remuxing', 'verifying', 'moving'] as const) {
+          const activeSlot = slotStates.find(
+            (state) => state.tasks.length > 0 && state.stage === candidate
+          );
+          if (activeSlot) {
+            return {
+              stage: candidate,
+              stageLabel: activeSlot.stageLabel ?? fallbackLabel
+            };
+          }
+        }
+        return { stage: fallbackStage, stageLabel: fallbackLabel };
+      };
+
+      const emitJobProgress = (fallbackStage: ProcessItemStage, fallbackLabel: string): void => {
         if (this.#cancelledByUnlock) {
-          this.#removeMovedItems(movedItems);
           return;
         }
-        const item = toProcess[idx]!;
-        const destPath = projectedByItemId[item.id];
-        if (!destPath) {
-          throw new Error(`Missing projected destination for ${item.id}`);
+        let doneBytes = 0;
+        for (let i = 0; i < itemBytes.length; i++) {
+          doneBytes += (itemBytes[i] ?? 0) * (itemFractions[i] ?? 0);
         }
-        const completed = await this.#processSingleJobItem(
+        const overallFraction =
+          totalBytes > 0 ? Math.max(0, Math.min(1, doneBytes / totalBytes)) : 1;
+        const percent = Math.min(PERCENT_MAX, Math.round(overallFraction * PERCENT_MAX));
+        const elapsedSec = (performance.now() - jobStartedAtMs) / MS_PER_SECOND;
+        const etaSeconds =
+          overallFraction > MIN_ETA_FRACTION &&
+          completedCount < toProcess.length &&
+          elapsedSec >= MIN_ETA_ELAPSED_SECONDS
+            ? Math.max(0, Math.round((elapsedSec * (1 - overallFraction)) / overallFraction))
+            : undefined;
+        const activeTasks = slotStates
+          .flatMap((state) => state.tasks)
+          .map((task, index) => ({ ...task, slot: index }));
+        const resolved = resolveActiveStage(fallbackStage, fallbackLabel);
+        this.#updateProgress({
           jobId,
-          item,
-          idx,
-          toProcess.length,
-          destPath,
-          conflictResolutions[item.id] === 'overwrite',
-          existingCollisionByItemId[item.id],
-          createdTempSubs
-        );
-        if (!completed) {
-          this.#removeMovedItems(movedItems);
-          return;
-        }
-        movedItems.push(item);
-      }
+          activeTasks,
+          totalItems: toProcess.length,
+          completedItems: completedCount,
+          percent,
+          stage: resolved.stage,
+          stageLabel: resolved.stageLabel,
+          etaSeconds
+        });
+      };
+
+      await runSlotWorkerPool(
+        toProcess,
+        workerCount,
+        async (item, idx, slot): Promise<void> => {
+          const destPath = projectedByItemId[item.id];
+          if (!destPath) {
+            throw new Error(`Missing projected destination for ${item.id}`);
+          }
+          const completed = await this.#processSingleJobItem({
+            jobId,
+            item,
+            slot,
+            destPath,
+            allowOverwrite: conflictResolutions[item.id] === 'overwrite',
+            oldExistingPath: existingCollisionByItemId[item.id],
+            createdTempSubs,
+            onProgress: (slotTasks, itemFraction, stage, stageLabel): void => {
+              const tasks = Array.isArray(slotTasks) ? slotTasks : slotTasks ? [slotTasks] : [];
+              slotStates[slot] = tasks.length > 0 ? { tasks, stage, stageLabel } : { tasks: [] };
+              itemFractions[idx] = itemFraction;
+              emitJobProgress(stage, stageLabel);
+            }
+          });
+          slotStates[slot] = { tasks: [] };
+          if (!completed || this.#cancelledByUnlock) {
+            return;
+          }
+          itemFractions[idx] = 1;
+          completedCount += 1;
+          movedItems.push(item);
+          emitJobProgress('moving', 'Moved');
+        },
+        () => this.#cancelledByUnlock
+      );
 
       if (this.#cancelledByUnlock) {
         this.#removeMovedItems(movedItems);

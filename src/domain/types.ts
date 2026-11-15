@@ -4,6 +4,7 @@ import {
   AUTO_SUBTITLE_STATUSES,
   CONFLICT_DECISIONS,
   CONFLICT_KINDS,
+  CONFLICT_MODAL_MODES,
   CONNECTION_STATUSES,
   EPISODE_ORDER_MODES,
   ISO_639_2_PRESETS,
@@ -48,6 +49,9 @@ export type JobPhase = v.InferOutput<typeof JobPhaseSchema>;
 
 const ConflictDecisionSchema = v.picklist(CONFLICT_DECISIONS);
 export type ConflictDecision = v.InferOutput<typeof ConflictDecisionSchema>;
+
+const ConflictModalModeSchema = v.picklist(CONFLICT_MODAL_MODES);
+export type ConflictModalMode = v.InferOutput<typeof ConflictModalModeSchema>;
 
 const SubtitleMergeModeSchema = v.picklist(SUBTITLE_MERGE_MODES);
 export type SubtitleMergeMode = v.InferOutput<typeof SubtitleMergeModeSchema>;

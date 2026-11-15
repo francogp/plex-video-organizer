@@ -2,15 +2,9 @@
 import { computed, ref, watch } from 'vue';
 
 import {
-  AUDIO_LOUDNORM_TARGET_I,
-  AUDIO_LOUDNORM_TARGET_TP,
-  AUDIO_MEAN_QUIET_THRESHOLD_DB,
-  AUDIO_NORMALIZATION_MODES,
-  AUDIO_OUTPUT_CODECS,
   MEDIA_KINDS,
   OUTPUT_CATEGORIES,
-  type AudioNormalizationMode,
-  type AudioOutputCodec
+  type AudioNormalizationMode
 } from '../../domain/constants.ts';
 import type {
   AudioNormalizationConfig,
@@ -23,21 +17,14 @@ import type {
   ScannedItem,
   SubtitleCandidate
 } from '../../domain/types.ts';
-import {
-  CONFLICT_DECISION_OPTIONS,
-  extractExternalIdLinks,
-  formatDuration,
-  formatKbps,
-  formatPlexOutputSegments,
-  formatProbeStreams,
-  formatSizeDeltaMb,
-  formatSizeMb,
-  splitRelativePathSegments,
-  type ExternalIdLink
-} from '../utils/formatters.ts';
-import ProviderLinks from './ProviderLinks.vue';
+import { formatSizeMb } from '../utils/formatters.ts';
+import QueueAudioCell from './QueueAudioCell.vue';
+import QueueMetadataCell from './QueueMetadataCell.vue';
+import QueueSourceCell from './QueueSourceCell.vue';
+import QueueToolbar from './QueueToolbar.vue';
+import QueueTracksCell from './QueueTracksCell.vue';
+import type { TracksSummary } from './QueueTracksPanel.vue';
 import { areAllVisibleRowsSelected } from './table/tableQueryCore.ts';
-import TableResetCount from './table/TableResetCount.vue';
 import type { TableColumnDef, TableWorkerRowInput } from './table/tableTypes.js';
 import { useTableWorker } from './table/useTableWorker.js';
 import VirtualDataTable from './table/VirtualDataTable.vue';
@@ -116,7 +103,7 @@ const emit = defineEmits<{
   (e: 'preview-subtitle', item: ScannedItem): void;
   (e: 'change-audio-normalization', item: ScannedItem, config: AudioNormalizationConfig): void;
   (e: 'bulk-audio-normalization', itemIds: readonly ItemId[], mode: AudioNormalizationMode): void;
-  (e: 'resolve-conflict', itemId: ItemId, decision: ConflictDecision): void;
+  (e: 'open-conflict-modal', itemId: ItemId): void;
   (e: 'resolve-all-conflicts', decision: ConflictDecision): void;
 }>();
 
@@ -127,10 +114,6 @@ const conflictByItemId = computed<ReadonlyMap<ItemId, ConflictComparison>>(() =>
   }
   return map;
 });
-
-function isSubPickerOpenFor(itemId: ItemId): boolean {
-  return props.subtitlePicker?.itemId === itemId;
-}
 
 const CATEGORY_LABELS: Readonly<Record<OutputCategory, string>> = {
   movies: 'Movies',
@@ -211,12 +194,7 @@ function clearSelection(): void {
   selectedIds.value = new Set();
 }
 
-function onSelectFolderChange(event: Event): void {
-  const select = event.target as HTMLSelectElement;
-  const prefix = select.value;
-  if (!prefix) {
-    return;
-  }
+function selectByFolderPrefix(prefix: string): void {
   const normalizedPrefix = `${prefix}/`;
   const next = new Set(selectedIds.value);
   for (const item of props.items) {
@@ -226,27 +204,6 @@ function onSelectFolderChange(event: Event): void {
     }
   }
   selectedIds.value = next;
-  select.value = '';
-}
-
-function onBulkKindChange(event: Event): void {
-  const select = event.target as HTMLSelectElement;
-  const value = select.value;
-  if (!value || selectedIds.value.size === 0) {
-    return;
-  }
-  emit('bulk-media-kind', [...selectedIds.value], value as MediaKind);
-  select.value = '';
-}
-
-function onBulkCategoryChange(event: Event): void {
-  const select = event.target as HTMLSelectElement;
-  const value = select.value;
-  if (!value || selectedIds.value.size === 0) {
-    return;
-  }
-  emit('bulk-category', [...selectedIds.value], value as OutputCategory);
-  select.value = '';
 }
 
 const vTableRef = ref<InstanceType<typeof VirtualDataTable> | null>(null);
@@ -400,29 +357,10 @@ function getQueueAriaSort(colId: QueueColId): 'ascending' | 'descending' | undef
   return sortDir.value;
 }
 
-function formatCandidateLabel(cand: ScannedItem['candidates'][number]): string {
-  const yearPart = cand.year ? ` (${String(cand.year)})` : '';
-  const idPart = cand.imdbId ? ` {${cand.imdbId}}` : cand.tvdbId ? ` {tvdb-${cand.tvdbId}}` : '';
-  return `${cand.title}${yearPart}${idPart}`;
-}
-
 const DEFAULT_AUDIO_NORM: AudioNormalizationConfig = {
   mode: 'copy',
   codec: 'auto',
   downmixStereo: false
-};
-
-const AUDIO_MODE_LABELS: Readonly<Record<AudioNormalizationMode, string>> = {
-  copy: 'Copy (original)',
-  peak: 'Peak Gain',
-  loudnorm: 'Loudnorm (2-pass)'
-};
-
-const AUDIO_CODEC_LABELS: Readonly<Record<AudioOutputCodec, string>> = {
-  auto: 'Auto (original)',
-  flac: 'FLAC (lossless)',
-  ac3: 'AC3',
-  aac: 'AAC'
 };
 
 function getAudioNorm(item: ScannedItem): AudioNormalizationConfig {
@@ -478,81 +416,6 @@ function getAudioSummary(item: ScannedItem): {
   };
 }
 
-type AudioTone = 'bad' | 'good' | 'neutral';
-
-interface AudioComparisonRow {
-  readonly icon: string;
-  readonly label: string;
-  readonly detail: string;
-  readonly tone: AudioTone;
-}
-
-function getAudioComparisonRows(analysis: AudioTrackAnalysis): readonly AudioComparisonRow[] {
-  const mean = analysis.meanVolumeDb.toFixed(1);
-  const peak = analysis.maxVolumeDb.toFixed(1);
-  const copyTone: AudioTone = analysis.suggestion === 'ok' ? 'good' : 'bad';
-  const copyRow: AudioComparisonRow = {
-    icon: copyTone === 'good' ? '✓' : '✗',
-    label: 'Copy',
-    detail: `Avg ${mean} · Peak ${peak} dB`,
-    tone: copyTone
-  };
-
-  const gain = analysis.recommendedGainDb;
-  let peakRow: AudioComparisonRow;
-  if (gain <= 0) {
-    peakRow = {
-      icon: analysis.suggestion === 'ok' ? '•' : '✗',
-      label: 'Peak',
-      detail: 'No headroom (peak ~0 dB)',
-      tone: analysis.suggestion === 'ok' ? 'neutral' : 'bad'
-    };
-  } else {
-    const projMean = analysis.meanVolumeDb + gain;
-    const projPeak = analysis.maxVolumeDb + gain;
-    const peakEnough = projMean >= AUDIO_MEAN_QUIET_THRESHOLD_DB;
-    peakRow = {
-      icon: peakEnough ? '✓' : '⚠',
-      label: `Peak +${gain.toFixed(1)}`,
-      detail: peakEnough
-        ? `Avg ${projMean.toFixed(1)} · Peak ${projPeak.toFixed(1)} dB`
-        : `Avg ${projMean.toFixed(1)} dB (still quiet)`,
-      tone: peakEnough ? 'good' : 'bad'
-    };
-  }
-
-  const loudnormRow: AudioComparisonRow = {
-    icon: analysis.suggestion === 'ok' ? '•' : '✓',
-    label: 'Loudnorm',
-    detail: `Avg ~${AUDIO_LOUDNORM_TARGET_I.toFixed(1)} · Peak ${AUDIO_LOUDNORM_TARGET_TP.toFixed(1)} dB`,
-    tone: analysis.suggestion === 'ok' ? 'neutral' : 'good'
-  };
-
-  return [copyRow, peakRow, loudnormRow];
-}
-
-function formatAudioTooltip(analysis: AudioTrackAnalysis): string {
-  const base = `volumedetect: mean ${String(analysis.meanVolumeDb)} dB, max ${String(analysis.maxVolumeDb)} dB.`;
-  if (analysis.suggestion === 'peak-gain') {
-    return `${base} Recommended: Peak Gain (+${String(analysis.recommendedGainDb)} dB) to raise volume cleanly without dynamic compression.`;
-  }
-  if (analysis.suggestion === 'loudnorm') {
-    return `${base} Recommended: Loudnorm (2-pass EBU R128) to lift quiet dialogue and balance peaks.`;
-  }
-  return `${base} Audio levels are already well-balanced.`;
-}
-
-interface TracksSummary {
-  readonly addedCount: number;
-  readonly addedText: string;
-  readonly keptCount: number;
-  readonly keptText: string;
-  readonly isReplace: boolean;
-  readonly hasConflict: boolean;
-  readonly conflictText: string;
-  readonly missingSpanishSubs: boolean;
-}
-
 function formatSubTag(sub: {
   readonly language: string;
   readonly isForced: boolean;
@@ -581,7 +444,25 @@ function getTracksSummary(item: ScannedItem): TracksSummary {
     addedSubs.some((s): boolean => s.language === 'spa') ||
     keptInternal.some((s): boolean => s.language === 'spa');
 
+  const totalAudio = item.trackSelection.audioTracks.length;
+  const includedAudio = item.trackSelection.audioTracks.filter((t): boolean => t.include);
+  const audioCountLabel =
+    includedAudio.length === totalAudio
+      ? String(totalAudio)
+      : `${String(includedAudio.length)}/${String(totalAudio)}`;
+  const audioLangs = includedAudio.map((t) => t.language).join(', ');
+  const audioSummaryText = audioLangs ? `${audioCountLabel} (${audioLangs})` : audioCountLabel;
+
+  const totalInternalSubs = item.probe.subtitleStreams.length;
+  const intSubCountLabel =
+    keptInternal.length === totalInternalSubs
+      ? String(totalInternalSubs)
+      : `${String(keptInternal.length)}/${String(totalInternalSubs)}`;
+  const subsSummaryText = `${intSubCountLabel} int · ${String(addedSubs.length)} ext`;
+
   return {
+    audioSummaryText,
+    subsSummaryText,
     addedCount: addedSubs.length,
     addedText: addedSubs.map(formatSubTag).join(', '),
     keptCount: keptInternal.length,
@@ -593,167 +474,46 @@ function getTracksSummary(item: ScannedItem): TracksSummary {
   };
 }
 
-function formatMetadataIds(cand: NonNullable<ScannedItem['selectedMetadata']>): string {
-  const ids: string[] = [];
-  if (cand.imdbId) {
-    ids.push(`{imdb-${cand.imdbId}}`);
+const tracksSummaryByItemId = computed<Map<ItemId, TracksSummary>>(() => {
+  const map = new Map<ItemId, TracksSummary>();
+  for (const item of props.items) {
+    map.set(item.id, getTracksSummary(item));
   }
-  if (cand.tvdbId) {
-    ids.push(`{tvdb-${cand.tvdbId}}`);
-  }
-  if (cand.tmdbId) {
-    ids.push(`{tmdb-${cand.tmdbId}}`);
-  }
-  return ids.join(' ');
-}
+  return map;
+});
 
-function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
-  if (!row.selectedMetadata) {
-    return [];
-  }
-  return extractExternalIdLinks(formatMetadataIds(row.selectedMetadata), row.mediaKind);
-}
-
-function updateAudioNorm(item: ScannedItem, partial: Partial<AudioNormalizationConfig>): void {
-  const current = getAudioNorm(item);
-  emit('change-audio-normalization', item, { ...current, ...partial });
-}
-
-function onBulkAudioChange(event: Event): void {
-  const select = event.target as HTMLSelectElement;
-  const val = select.value as AudioNormalizationMode | '';
-  if (!val) {
-    return;
-  }
-  emit(
-    'bulk-audio-normalization',
-    selectedItems.value.map((i) => i.id),
-    val
-  );
-  select.value = '';
+function getRowTracksSummary(item: ScannedItem): TracksSummary {
+  return tracksSummaryByItemId.value.get(item.id) ?? getTracksSummary(item);
 }
 </script>
 
 <template>
   <div class="vo-table-wrap">
-    <div class="vo-table-toolbar">
-      <input
-        v-model="searchQuery"
-        type="search"
-        class="vo-input vo-table-search"
-        placeholder="Filter by title or file..."
-        aria-label="Filter queue items"
-      />
-      <select v-model="kindFilter" class="vo-select" aria-label="Filter by media type">
-        <option value="all">All types</option>
-        <option v-for="kind in MEDIA_KINDS" :key="kind" :value="kind">
-          {{ kind === 'tv' ? 'Series' : 'Movie' }}
-        </option>
-      </select>
-      <select v-model="categoryFilter" class="vo-select" aria-label="Filter by library">
-        <option value="all">All libraries</option>
-        <option v-for="cat in OUTPUT_CATEGORIES" :key="cat" :value="cat">
-          {{ CATEGORY_LABELS[cat] }}
-        </option>
-      </select>
-      <template v-if="availableFolders.length > 0">
-        <label for="vo-select-folder" class="vo-sr-only">Select folder</label>
-        <select
-          id="vo-select-folder"
-          class="vo-select"
-          :disabled="disabled"
-          @change="onSelectFolderChange"
-        >
-          <option value="">Select folder...</option>
-          <option v-for="folder in availableFolders" :key="folder.prefix" :value="folder.prefix">
-            {{ folder.prefix }} ({{ folder.count }})
-          </option>
-        </select>
-      </template>
-      <TableResetCount
-        :shown-count="filteredIndices.length"
-        :total-count="props.items.length"
-        @reset="vTableRef?.resetColumns()"
-      />
-    </div>
-
-    <div v-if="selectedCount > 0" class="vo-bulk-bar" role="region" aria-label="Bulk actions">
-      <span class="vo-bulk-count vo-mono">{{ selectedCount }} selected</span>
-      <select
-        class="vo-select"
-        aria-label="Bulk set type"
-        :disabled="disabled"
-        @change="onBulkKindChange"
-      >
-        <option value="">Set Type...</option>
-        <option v-for="kind in MEDIA_KINDS" :key="kind" :value="kind">
-          {{ kind === 'tv' ? 'Series' : 'Movie' }}
-        </option>
-      </select>
-      <select
-        class="vo-select"
-        aria-label="Bulk set library"
-        :disabled="disabled"
-        @change="onBulkCategoryChange"
-      >
-        <option value="">Set Library...</option>
-        <option v-for="cat in OUTPUT_CATEGORIES" :key="cat" :value="cat">
-          {{ CATEGORY_LABELS[cat] }}
-        </option>
-      </select>
-      <select
-        class="vo-select"
-        aria-label="Bulk set audio normalization"
-        :disabled="disabled"
-        @change="onBulkAudioChange"
-      >
-        <option value="">Set Audio...</option>
-        <option v-for="mode in AUDIO_NORMALIZATION_MODES" :key="mode" :value="mode">
-          {{ AUDIO_MODE_LABELS[mode] }}
-        </option>
-      </select>
-      <button
-        type="button"
-        class="vo-btn"
-        :disabled="disabled"
-        @click="emit('search-metadata-bulk', selectedItems)"
-      >
-        <span aria-hidden="true">🔍</span> Search Match
-      </button>
-      <button type="button" class="vo-btn" @click="clearSelection">
-        <span aria-hidden="true">🧹</span> Clear
-      </button>
-    </div>
-
-    <div
-      v-if="(props.conflicts?.length ?? 0) > 0"
-      class="vo-conflict-banner-bar"
-      role="region"
-      aria-label="Output conflicts"
-    >
-      <span class="vo-conflict-banner-title vo-mono">
-        ⚠ {{ props.conflicts!.length }} output conflict(s) detected — resolve every conflict in the
-        table before processing
-      </span>
-      <div class="vo-conflict-banner-actions">
-        <button
-          type="button"
-          class="vo-btn"
-          :disabled="disabled"
-          @click="emit('resolve-all-conflicts', 'overwrite')"
-        >
-          <span aria-hidden="true">✅</span> Overwrite All Conflicts
-        </button>
-        <button
-          type="button"
-          class="vo-btn"
-          :disabled="disabled"
-          @click="emit('resolve-all-conflicts', 'ignore')"
-        >
-          <span aria-hidden="true">⏭️</span> Ignore All Conflicts
-        </button>
-      </div>
-    </div>
+    <QueueToolbar
+      v-model:search-query="searchQuery"
+      v-model:kind-filter="kindFilter"
+      v-model:category-filter="categoryFilter"
+      :available-folders="availableFolders"
+      :shown-count="filteredIndices.length"
+      :total-count="props.items.length"
+      :selected-count="selectedCount"
+      :conflict-count="props.conflicts?.length ?? 0"
+      :disabled="disabled"
+      @select-folder="selectByFolderPrefix"
+      @reset-columns="vTableRef?.resetColumns()"
+      @bulk-media-kind="emit('bulk-media-kind', [...selectedIds], $event)"
+      @bulk-category="emit('bulk-category', [...selectedIds], $event)"
+      @bulk-audio-normalization="
+        emit(
+          'bulk-audio-normalization',
+          selectedItems.map((i) => i.id),
+          $event
+        )
+      "
+      @search-metadata-bulk="emit('search-metadata-bulk', selectedItems)"
+      @clear-selection="clearSelection"
+      @resolve-all-conflicts="emit('resolve-all-conflicts', $event)"
+    />
 
     <VirtualDataTable
       ref="vTableRef"
@@ -868,92 +628,14 @@ function onBulkAudioChange(event: Event): void {
       </template>
 
       <template #cell-source="{ row }">
-        <div class="vo-file-cell">
-          <div class="vo-file-header">
-            <span class="vo-file-title">{{ row.parsedTitle }}</span>
-            <span v-if="row.parsedYear" class="vo-badge vo-mono">
-              {{ row.parsedYear }}
-            </span>
-            <span v-if="row.episode" class="vo-badge vo-mono">
-              s{{ String(row.episode.seasonNumber).padStart(2, '0') }}e{{
-                String(row.episode.episodeStart).padStart(2, '0')
-              }}
-            </span>
-            <span v-if="row.extraType" class="vo-badge vo-badge--warn">
-              Extra: {{ row.extraType }}
-            </span>
-            <span v-for="tag in row.tags" :key="tag" class="vo-badge vo-mono">
-              {{ tag }}
-            </span>
-          </div>
-          <div class="vo-path-panels vo-mono">
-            <div class="vo-path-panel vo-path-panel--source">
-              <span class="vo-path-label">Source</span>
-              <div class="vo-path-chain">
-                <template
-                  v-for="(folder, fIdx) in splitRelativePathSegments(row.relativePath).folders"
-                  :key="`sf-${String(fIdx)}`"
-                >
-                  <span class="vo-path-pill vo-path-pill--folder" title="Source Folder">
-                    {{ folder }}
-                  </span>
-                  <span class="vo-path-sep" aria-hidden="true">›</span>
-                </template>
-                <span class="vo-path-pill vo-path-pill--file" title="Source File">
-                  {{ splitRelativePathSegments(row.relativePath).fileName }}
-                </span>
-              </div>
-            </div>
-
-            <div v-if="formatPlexOutputSegments(row)" class="vo-path-panel vo-path-panel--output">
-              <span class="vo-path-label vo-path-label--output">Output</span>
-              <div class="vo-path-chain">
-                <template
-                  v-for="(folder, oIdx) in formatPlexOutputSegments(row)!.folders"
-                  :key="`of-${String(oIdx)}`"
-                >
-                  <span class="vo-path-pill vo-path-pill--out-folder" title="Destination Folder">
-                    {{ folder }}
-                  </span>
-                  <span class="vo-path-sep" aria-hidden="true">›</span>
-                </template>
-                <span class="vo-path-pill vo-path-pill--out-file" title="Destination File">
-                  {{ formatPlexOutputSegments(row)!.fileName }}
-                </span>
-              </div>
-            </div>
-
-            <div v-else class="vo-path-panel vo-path-panel--unresolved">
-              <span class="vo-path-label vo-path-label--unresolved">Output</span>
-              <span class="vo-file-output--unresolved">
-                Unresolved — select or search a Match Candidate
-              </span>
-            </div>
-          </div>
-          <div class="vo-edition-wrap">
-            <label :for="`ed-${row.id}`" class="vo-sr-only">Edition for {{ row.fileName }}</label>
-            <input
-              :id="`ed-${row.id}`"
-              type="text"
-              class="vo-edition-input"
-              :value="row.edition ?? ''"
-              :disabled="disabled"
-              placeholder="Edition (optional)"
-              title="Optional Plex edition tag (e.g. Director's Cut, Extended, IMAX, Unrated). Adds {edition-...} so Plex keeps multiple editions distinct."
-              @change="
-                emit('change-edition', row, ($event.target as HTMLInputElement).value.trim())
-              "
-            />
-            <span
-              class="vo-help-tip vo-mono"
-              title="Plex Edition guide: Leave empty for standard releases. Enter a short tag like 'Director's Cut', 'Extended', 'IMAX', or 'Unrated' to append {edition-...} to the Plex folder/filename."
-              >?</span
-            >
-          </div>
-          <div v-if="row.warnings.length > 0" class="vo-badge vo-badge--warn">
-            {{ row.warnings[0] }}
-          </div>
-        </div>
+        <QueueSourceCell
+          :item="row"
+          :disabled="disabled"
+          :conflict="conflictByItemId.get(row.id)"
+          :decision="props.conflictResolutions?.[row.id]"
+          @change-edition="emit('change-edition', row, $event)"
+          @open-conflict-modal="emit('open-conflict-modal', row.id)"
+        />
       </template>
 
       <template #cell-type="{ row }">
@@ -995,80 +677,12 @@ function onBulkAudioChange(event: Event): void {
       </template>
 
       <template #cell-metadata="{ row }">
-        <div class="vo-audio-cell">
-          <div
-            class="vo-audio-panel"
-            :class="row.selectedMetadata ? 'vo-audio-panel--ok' : 'vo-audio-panel--bad'"
-            :title="
-              row.selectedMetadata
-                ? formatCandidateLabel(row.selectedMetadata)
-                : 'No metadata match selected — use Search to match this item'
-            "
-          >
-            <div class="vo-audio-panel-head">
-              <span class="vo-path-label">MATCH</span>
-              <ProviderLinks
-                v-if="getMetadataLinks(row).length > 0"
-                :links="getMetadataLinks(row)"
-              />
-              <span v-else class="vo-path-pill vo-path-pill--folder vo-mono">{{
-                row.selectedMetadata ? row.selectedMetadata.source.toUpperCase() : 'Unmatched'
-              }}</span>
-            </div>
-            <div class="vo-audio-lines vo-mono">
-              <template v-if="row.selectedMetadata">
-                <div class="vo-audio-option vo-audio-option--good">
-                  <span class="vo-audio-option-icon" aria-hidden="true">✓</span>
-                  <span class="vo-audio-option-label">{{ row.selectedMetadata.title }}</span>
-                  <span v-if="row.selectedMetadata.year">({{ row.selectedMetadata.year }})</span>
-                </div>
-                <div
-                  v-if="formatMetadataIds(row.selectedMetadata)"
-                  class="vo-audio-option vo-audio-option--neutral"
-                >
-                  <span class="vo-audio-option-icon" aria-hidden="true">#</span>
-                  <span class="vo-audio-option-label">ID:</span>
-                  <span>{{ formatMetadataIds(row.selectedMetadata) }}</span>
-                </div>
-              </template>
-              <div v-else class="vo-audio-option vo-audio-option--bad">
-                <span class="vo-audio-option-icon" aria-hidden="true">✗</span>
-                <span class="vo-audio-option-label">No match:</span>
-                <span>Click Search to match</span>
-              </div>
-            </div>
-          </div>
-          <div class="vo-meta-controls">
-            <label :for="`meta-${row.id}`" class="vo-sr-only">Match for {{ row.fileName }}</label>
-            <select
-              :id="`meta-${row.id}`"
-              class="vo-select vo-select--candidate"
-              :title="row.selectedMetadata ? formatCandidateLabel(row.selectedMetadata) : undefined"
-              :disabled="disabled || row.candidates.length === 0"
-              @change="
-                emit('change-candidate', row, Number(($event.target as HTMLSelectElement).value))
-              "
-            >
-              <option v-if="row.candidates.length === 0" value="-1">No match found</option>
-              <option
-                v-for="(cand, idx) in row.candidates"
-                :key="`${cand.source}-${String(idx)}`"
-                :value="idx"
-                :selected="cand === row.selectedMetadata"
-              >
-                {{ formatCandidateLabel(cand) }}
-              </option>
-            </select>
-            <button
-              type="button"
-              class="vo-btn vo-meta-search-btn"
-              :disabled="disabled"
-              @click="emit('search-metadata', row)"
-            >
-              <span aria-hidden="true">🔍</span> Search
-            </button>
-          </div>
-        </div>
+        <QueueMetadataCell
+          :item="row"
+          :disabled="disabled"
+          @change-candidate="emit('change-candidate', row, $event)"
+          @search-metadata="emit('search-metadata', row)"
+        />
       </template>
 
       <template #cell-size="{ row }">
@@ -1076,375 +690,27 @@ function onBulkAudioChange(event: Event): void {
       </template>
 
       <template #cell-audio="{ row }">
-        <div class="vo-audio-cell">
-          <div
-            class="vo-audio-panel"
-            :class="
-              !getAudioSummary(row).analysis
-                ? 'vo-audio-panel--pending'
-                : getAudioSummary(row).analysis!.suggestion === 'loudnorm'
-                  ? 'vo-audio-panel--loudnorm'
-                  : getAudioSummary(row).analysis!.suggestion === 'peak-gain'
-                    ? 'vo-audio-panel--peak'
-                    : 'vo-audio-panel--ok'
-            "
-            :title="
-              getAudioSummary(row).analysis
-                ? formatAudioTooltip(getAudioSummary(row).analysis!)
-                : 'Click Scan Input to run volumedetect analysis'
-            "
-          >
-            <div class="vo-audio-panel-head">
-              <span class="vo-path-label">AUDIO</span>
-              <span class="vo-path-pill vo-path-pill--folder vo-mono">{{
-                getAudioSummary(row).codecText
-              }}</span>
-            </div>
-            <div v-if="getAudioSummary(row).analysis" class="vo-audio-lines vo-mono">
-              <div
-                v-for="aRow in getAudioComparisonRows(getAudioSummary(row).analysis!)"
-                :key="aRow.label"
-                class="vo-audio-option"
-                :class="`vo-audio-option--${aRow.tone}`"
-              >
-                <span class="vo-audio-option-icon" aria-hidden="true">{{ aRow.icon }}</span>
-                <span class="vo-audio-option-label">{{ aRow.label }}:</span>
-                <span>{{ aRow.detail }}</span>
-              </div>
-            </div>
-            <div v-else class="vo-audio-status vo-audio-status--pending vo-mono">
-              <span>Not analyzed · click Scan Input</span>
-            </div>
-          </div>
-          <div class="vo-audio-controls">
-            <label :for="`aud-mode-${row.id}`" class="vo-sr-only"
-              >Audio normalization for {{ row.fileName }}</label
-            >
-            <select
-              :id="`aud-mode-${row.id}`"
-              class="vo-select vo-select--audio"
-              :value="getAudioNorm(row).mode"
-              :disabled="disabled || row.probe.audioStreams.length === 0"
-              @change="
-                updateAudioNorm(row, {
-                  mode: ($event.target as HTMLSelectElement).value as AudioNormalizationMode
-                })
-              "
-            >
-              <option v-for="mode in AUDIO_NORMALIZATION_MODES" :key="mode" :value="mode">
-                {{
-                  mode === 'peak' &amp;&amp;
-                  (getAudioSummary(row).analysis?.recommendedGainDb ?? 0) > 0
-                    ? `Peak (+${getAudioSummary(row).analysis!.recommendedGainDb.toFixed(1)} dB)`
-                    : AUDIO_MODE_LABELS[mode]
-                }}
-              </option>
-            </select>
-            <template v-if="getAudioNorm(row).mode !== 'copy'">
-              <label :for="`aud-codec-${row.id}`" class="vo-sr-only"
-                >Audio codec for {{ row.fileName }}</label
-              >
-              <select
-                :id="`aud-codec-${row.id}`"
-                class="vo-select vo-select--audio"
-                :value="getAudioNorm(row).codec"
-                :disabled="disabled"
-                @change="
-                  updateAudioNorm(row, {
-                    codec: ($event.target as HTMLSelectElement).value as AudioOutputCodec
-                  })
-                "
-              >
-                <option v-for="codec in AUDIO_OUTPUT_CODECS" :key="codec" :value="codec">
-                  {{ AUDIO_CODEC_LABELS[codec] }}
-                </option>
-              </select>
-            </template>
-            <label
-              v-if="getAudioSummary(row).hasSurround"
-              class="vo-audio-downmix vo-mono"
-              title="Downmix 5.1/7.1 surround to 2.0 stereo (-ac 2)"
-            >
-              <input
-                type="checkbox"
-                :checked="getAudioNorm(row).downmixStereo"
-                :disabled="disabled"
-                @change="
-                  updateAudioNorm(row, {
-                    downmixStereo: ($event.target as HTMLInputElement).checked
-                  })
-                "
-              />
-              <span>2.0</span>
-            </label>
-          </div>
-        </div>
+        <QueueAudioCell
+          :item="row"
+          :disabled="disabled"
+          :summary="getAudioSummary(row)"
+          :audio-norm="getAudioNorm(row)"
+          @change-audio-normalization="emit('change-audio-normalization', row, $event)"
+        />
       </template>
 
       <template #cell-tracks="{ row }">
-        <div class="vo-audio-cell">
-          <div
-            v-if="
-              getTracksSummary(row).hasConflict ||
-              getTracksSummary(row).addedCount > 0 ||
-              getTracksSummary(row).missingSpanishSubs
-            "
-            class="vo-audio-panel"
-            :class="
-              getTracksSummary(row).hasConflict
-                ? 'vo-audio-panel--bad'
-                : getTracksSummary(row).missingSpanishSubs
-                  ? 'vo-audio-panel--warning'
-                  : 'vo-audio-panel--ok'
-            "
-            :title="
-              getTracksSummary(row).hasConflict
-                ? getTracksSummary(row).conflictText
-                : getTracksSummary(row).missingSpanishSubs
-                  ? 'No Spanish (spa) subtitles in external files or embedded streams'
-                  : `Adding external subtitles: ${getTracksSummary(row).addedText}`
-            "
-          >
-            <div class="vo-audio-panel-head">
-              <span class="vo-path-label">SUBS</span>
-              <span class="vo-path-pill vo-path-pill--folder vo-mono">{{
-                getTracksSummary(row).hasConflict
-                  ? 'Conflict'
-                  : getTracksSummary(row).addedCount > 0
-                    ? `+${String(getTracksSummary(row).addedCount)} new`
-                    : 'No spa'
-              }}</span>
-            </div>
-            <div class="vo-audio-lines vo-mono">
-              <div
-                v-if="getTracksSummary(row).hasConflict"
-                class="vo-audio-option vo-audio-option--bad"
-              >
-                <span class="vo-audio-option-icon" aria-hidden="true">✗</span>
-                <span class="vo-audio-option-label">Conflict:</span>
-                <span>{{ getTracksSummary(row).conflictText }}</span>
-              </div>
-              <template v-else-if="getTracksSummary(row).addedCount > 0">
-                <div class="vo-audio-option vo-audio-option--good">
-                  <span class="vo-audio-option-icon" aria-hidden="true">+</span>
-                  <span class="vo-audio-option-label">Add:</span>
-                  <span>{{ getTracksSummary(row).addedText }}</span>
-                </div>
-                <div
-                  v-if="getTracksSummary(row).keptCount > 0"
-                  class="vo-audio-option vo-audio-option--neutral"
-                >
-                  <span class="vo-audio-option-icon" aria-hidden="true">✓</span>
-                  <span class="vo-audio-option-label">Keep:</span>
-                  <span>{{ getTracksSummary(row).keptText }}</span>
-                </div>
-                <div
-                  v-else-if="getTracksSummary(row).isReplace"
-                  class="vo-audio-option vo-audio-option--neutral"
-                >
-                  <span class="vo-audio-option-icon" aria-hidden="true">↺</span>
-                  <span class="vo-audio-option-label">Mode:</span>
-                  <span>Replace existing</span>
-                </div>
-              </template>
-              <div
-                v-if="getTracksSummary(row).missingSpanishSubs"
-                class="vo-audio-option vo-audio-option--warning"
-              >
-                <span class="vo-audio-option-icon" aria-hidden="true">⚠</span>
-                <span class="vo-audio-option-label">No spa:</span>
-                <span>No Spanish subtitles (file or embedded)</span>
-              </div>
-            </div>
-          </div>
-          <div class="vo-audio-controls">
-            <button
-              type="button"
-              class="vo-btn"
-              :class="{ 'vo-btn--danger': row.trackSelection.needsUserPrompt }"
-              :disabled="disabled"
-              @click="emit('inspect-tracks', row)"
-            >
-              <span aria-hidden="true">{{ row.trackSelection.needsUserPrompt ? '⚠️' : '🎛️' }}</span>
-              {{ row.trackSelection.needsUserPrompt ? 'Resolve Subs' : 'Tracks' }}
-            </button>
-            <button
-              type="button"
-              class="vo-btn"
-              :disabled="
-                disabled || Boolean(isSubPickerOpenFor(row.id) && props.subtitlePicker?.loading)
-              "
-              :title="
-                getTracksSummary(row).missingSpanishSubs
-                  ? 'Search & download Spanish (spa) subtitles'
-                  : 'Search another Spanish (spa) subtitle'
-              "
-              @click="
-                isSubPickerOpenFor(row.id)
-                  ? emit('close-subtitle-picker')
-                  : emit('search-subtitles', row)
-              "
-            >
-              <span aria-hidden="true">{{
-                isSubPickerOpenFor(row.id) &amp;&amp; props.subtitlePicker?.loading ? '⏳' : '⬇'
-              }}</span>
-              {{ getTracksSummary(row).missingSpanishSubs ? 'Find spa' : 'Sub spa' }}
-            </button>
-            <button
-              v-if="row.externalSubtitles.length > 0"
-              type="button"
-              class="vo-btn"
-              :disabled="disabled"
-              title="Open video + external subtitle in OS default player (or browser preview) to verify sync before remuxing"
-              @click="emit('preview-subtitle', row)"
-            >
-              <span aria-hidden="true">▶</span>
-              Test
-            </button>
-          </div>
-          <div
-            v-if="isSubPickerOpenFor(row.id) && props.subtitlePicker"
-            class="vo-audio-panel vo-audio-panel--neutral vo-mono"
-          >
-            <div class="vo-audio-panel-head">
-              <span class="vo-path-label">SPA SUBS</span>
-              <button
-                type="button"
-                class="vo-btn vo-btn--compact"
-                aria-label="Close subtitle picker"
-                @click="emit('close-subtitle-picker')"
-              >
-                <span aria-hidden="true">✕</span>
-              </button>
-            </div>
-            <div
-              v-if="props.subtitlePicker.loading"
-              class="vo-audio-option vo-audio-option--neutral"
-            >
-              Searching providers...
-            </div>
-            <div
-              v-else-if="props.subtitlePicker.error"
-              class="vo-audio-option vo-audio-option--warning"
-            >
-              {{ props.subtitlePicker.error }}
-            </div>
-            <div v-else class="vo-audio-lines">
-              <button
-                v-for="cand in props.subtitlePicker.candidates.slice(0, 5)"
-                :key="cand.id"
-                type="button"
-                class="vo-btn vo-btn--compact"
-                :disabled="props.subtitlePicker.downloadingId === cand.id"
-                :title="`${cand.provider} · ${cand.variant} · ${cand.releaseName}`"
-                @click="emit('download-subtitle', row, cand)"
-              >
-                <span>{{ cand.hashMatch ? '✓Hash' : cand.variant }}</span>
-                <span>{{ cand.releaseName.slice(0, 26) }}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <template #row-after="{ row, colspan, bindAfterRef }">
-        <tr
-          v-if="conflictByItemId.get(row.id)"
-          :ref="(el) => bindAfterRef(el)"
-          class="vo-conflict-row"
-          :class="{
-            'vo-conflict-row--resolved': Boolean(props.conflictResolutions?.[row.id])
-          }"
-        >
-          <td :colspan="colspan">
-            <div
-              class="vo-row-conflict"
-              :class="{
-                'vo-row-conflict--resolved': Boolean(props.conflictResolutions?.[row.id])
-              }"
-            >
-              <div class="vo-row-conflict__head vo-mono">
-                <span class="vo-row-conflict__title">
-                  <span>
-                    {{
-                      conflictByItemId.get(row.id)!.kind === 'existing-file'
-                        ? '⚠ Conflict: File already exists in output'
-                        : '⚠ Conflict: Duplicate output destination'
-                    }}
-                  </span>
-                  <span class="vo-path-pill vo-path-pill--file">{{ row.fileName }}</span>
-                </span>
-                <label :for="`cdec-${row.id}`" class="vo-sr-only">
-                  Conflict resolution for {{ row.fileName }}
-                </label>
-                <select
-                  :id="`cdec-${row.id}`"
-                  class="vo-select vo-row-conflict__select"
-                  :value="props.conflictResolutions?.[row.id] ?? ''"
-                  :disabled="disabled"
-                  @change="
-                    emit(
-                      'resolve-conflict',
-                      row.id,
-                      ($event.target as HTMLSelectElement).value as ConflictDecision
-                    )
-                  "
-                >
-                  <option
-                    v-for="opt in CONFLICT_DECISION_OPTIONS"
-                    :key="opt.value"
-                    :value="opt.value"
-                    :disabled="opt.disabled"
-                  >
-                    {{ opt.label }}
-                  </option>
-                </select>
-              </div>
-              <div class="vo-row-conflict__path vo-mono">
-                {{
-                  conflictByItemId.get(row.id)!.displayPath ??
-                  conflictByItemId.get(row.id)!.existingPath ??
-                  conflictByItemId.get(row.id)!.destinationPath
-                }}
-              </div>
-              <div class="vo-row-conflict__grid">
-                <div class="vo-row-conflict__side">
-                  <strong>Incoming</strong>
-                  <div class="vo-mono">
-                    {{ formatSizeMb(conflictByItemId.get(row.id)!.incoming.sizeBytes) }}
-                    <template v-if="conflictByItemId.get(row.id)!.existing">
-                      ({{
-                        formatSizeDeltaMb(
-                          conflictByItemId.get(row.id)!.incoming.sizeBytes,
-                          conflictByItemId.get(row.id)!.existing!.sizeBytes
-                        )
-                      }})
-                    </template>
-                    ·
-                    {{ formatDuration(conflictByItemId.get(row.id)!.incoming.durationSeconds) }}
-                    · {{ conflictByItemId.get(row.id)!.incoming.formatName }} ·
-                    {{ formatKbps(conflictByItemId.get(row.id)!.incoming.bitrateBps) }}
-                  </div>
-                  <div class="vo-mono vo-row-conflict__streams">
-                    {{ formatProbeStreams(conflictByItemId.get(row.id)!.incoming) }}
-                  </div>
-                </div>
-                <div v-if="conflictByItemId.get(row.id)!.existing" class="vo-row-conflict__side">
-                  <strong>Existing in Output</strong>
-                  <div class="vo-mono">
-                    {{ formatSizeMb(conflictByItemId.get(row.id)!.existing!.sizeBytes) }} ·
-                    {{ formatDuration(conflictByItemId.get(row.id)!.existing!.durationSeconds) }}
-                    · {{ conflictByItemId.get(row.id)!.existing!.formatName }} ·
-                    {{ formatKbps(conflictByItemId.get(row.id)!.existing!.bitrateBps) }}
-                  </div>
-                  <div class="vo-mono vo-row-conflict__streams">
-                    {{ formatProbeStreams(conflictByItemId.get(row.id)!.existing!) }}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </td>
-        </tr>
+        <QueueTracksCell
+          :item="row"
+          :disabled="disabled"
+          :summary="getRowTracksSummary(row)"
+          :subtitle-picker="props.subtitlePicker"
+          @inspect-tracks="emit('inspect-tracks', row)"
+          @search-subtitles="emit('search-subtitles', row)"
+          @close-subtitle-picker="emit('close-subtitle-picker')"
+          @download-subtitle="emit('download-subtitle', row, $event)"
+          @preview-subtitle="emit('preview-subtitle', row)"
+        />
       </template>
     </VirtualDataTable>
   </div>
@@ -1483,20 +749,6 @@ function onBulkAudioChange(event: Event): void {
 
 .vo-floating-scrollbar-track {
   height: 1px;
-}
-
-.vo-table-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-3);
-  background-color: color-mix(in oklch, var(--vo-surface-elevated) 35%, transparent);
-  border-bottom: 1px solid var(--vo-border);
-}
-
-.vo-table-search {
-  flex: 1 1 220px;
 }
 
 .vo-table-count {
@@ -1570,87 +822,6 @@ th[aria-sort='descending'] .vo-sort-indicator::after {
   font-weight: var(--vo-weight-semibold);
 }
 
-.vo-path-panels {
-  display: grid;
-  gap: var(--vo-space-2);
-  font-size: var(--vo-text-xs);
-  margin-top: var(--vo-space-2);
-}
-
-.vo-path-panel {
-  display: grid;
-  gap: var(--vo-space-1);
-  padding: var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-}
-
-.vo-path-panel--source {
-  background-color: var(--vo-surface-elevated);
-}
-
-.vo-path-panel--output {
-  background-color: color-mix(in oklch, var(--vo-success) 7%, var(--vo-surface));
-  border-color: color-mix(in oklch, var(--vo-success) 38%, var(--vo-border));
-}
-
-.vo-path-panel--unresolved {
-  background-color: color-mix(in oklch, var(--vo-danger) 7%, var(--vo-surface));
-  border-color: color-mix(in oklch, var(--vo-danger) 38%, var(--vo-border));
-}
-
-.vo-path-chain {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-1);
-}
-
-.vo-path-label {
-  color: var(--vo-text-muted);
-  font-weight: var(--vo-weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.vo-path-label--output {
-  color: var(--vo-success);
-}
-
-.vo-path-label--unresolved {
-  color: var(--vo-danger);
-}
-
-.vo-path-sep {
-  color: var(--vo-text-muted);
-  opacity: 0.7;
-}
-
-.vo-file-output {
-  color: var(--vo-success);
-  font-size: var(--vo-text-xs);
-  margin-top: var(--vo-space-1);
-}
-
-.vo-file-output--unresolved {
-  color: var(--vo-danger);
-}
-
-.vo-select {
-  max-width: 16rem;
-  padding: var(--vo-space-1) var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background-color: var(--vo-surface);
-  color: var(--vo-text);
-}
-
-.vo-file-cell {
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-}
-
 .vo-col-shrink {
   width: 1%;
   white-space: nowrap;
@@ -1674,349 +845,6 @@ th[aria-sort='descending'] .vo-sort-indicator::after {
 
 .vo-actions-cell {
   white-space: nowrap;
-}
-
-.vo-audio-cell {
-  display: grid;
-  gap: var(--vo-space-2);
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.vo-audio-panel {
-  display: grid;
-  gap: var(--vo-space-1);
-  padding: var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-  background-color: var(--vo-surface-elevated);
-  font-size: var(--vo-text-xs);
-}
-
-.vo-audio-panel--pending {
-  background-color: var(--vo-surface-elevated);
-}
-
-.vo-audio-panel--ok {
-  background-color: color-mix(in oklch, var(--vo-success) 9%, var(--vo-surface));
-  border-color: color-mix(in oklch, var(--vo-success) 52%, var(--vo-border));
-}
-
-.vo-audio-panel--peak {
-  background-color: color-mix(in oklch, var(--vo-accent) 9%, var(--vo-surface));
-  border-color: color-mix(in oklch, var(--vo-accent) 52%, var(--vo-border));
-}
-
-.vo-audio-panel--loudnorm,
-.vo-audio-panel--warning {
-  background-color: color-mix(in oklch, var(--vo-warning) 9%, var(--vo-surface));
-  border-color: color-mix(in oklch, var(--vo-warning) 52%, var(--vo-border));
-}
-
-.vo-audio-panel--bad {
-  background-color: color-mix(in oklch, var(--vo-danger) 9%, var(--vo-surface));
-  border-color: color-mix(in oklch, var(--vo-danger) 52%, var(--vo-border));
-}
-
-.vo-audio-lines {
-  display: grid;
-  gap: var(--vo-space-1);
-  line-height: 1.3;
-  overflow-wrap: anywhere;
-}
-
-.vo-audio-option {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--vo-space-1);
-  padding: 2px var(--vo-space-1);
-  border-radius: var(--vo-radius-sm);
-}
-
-.vo-audio-option--bad {
-  background-color: color-mix(in oklch, var(--vo-danger) 14%, transparent);
-  color: var(--vo-danger);
-}
-
-.vo-audio-option--good {
-  background-color: color-mix(in oklch, var(--vo-success) 14%, transparent);
-  color: var(--vo-success);
-}
-
-.vo-audio-option--warning {
-  background-color: color-mix(in oklch, var(--vo-warning) 14%, transparent);
-  color: var(--vo-warning);
-}
-
-.vo-audio-option--neutral {
-  color: var(--vo-text-muted);
-}
-
-.vo-audio-option-icon {
-  font-weight: var(--vo-weight-bold);
-  flex-shrink: 0;
-}
-
-.vo-audio-option-label {
-  font-weight: var(--vo-weight-semibold);
-}
-
-.vo-audio-panel-head {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-1);
-}
-
-.vo-audio-status {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--vo-space-1);
-  color: var(--vo-text);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.vo-audio-status--pending {
-  color: var(--vo-text-muted);
-}
-
-.vo-audio-icon {
-  flex-shrink: 0;
-}
-
-.vo-audio-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-1);
-}
-
-.vo-select--audio {
-  max-width: 100%;
-  font-size: var(--vo-text-xs);
-  flex: 1;
-}
-
-.vo-audio-downmix {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--vo-space-1);
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-  cursor: pointer;
-}
-
-.vo-edition-wrap {
-  display: flex;
-  align-items: center;
-  gap: var(--vo-space-2);
-  width: 100%;
-  margin-block-start: var(--vo-space-2);
-}
-
-.vo-edition-input {
-  min-width: 0;
-  max-width: none;
-  padding: var(--vo-space-1) var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background-color: var(--vo-surface-elevated);
-  color: var(--vo-text);
-  font-size: var(--vo-text-xs);
-  flex: 1;
-}
-
-.vo-help-tip {
-  display: inline-flex;
-  justify-content: center;
-  align-items: center;
-  width: 1.25rem;
-  height: 1.25rem;
-  border: 1px solid var(--vo-border);
-  border-radius: 50%;
-  background-color: var(--vo-surface-elevated);
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-  flex-shrink: 0;
-  cursor: help;
-}
-
-.vo-meta-controls {
-  display: grid;
-  gap: var(--vo-space-2);
-  width: 100%;
-  min-width: 0;
-}
-
-.vo-select--candidate {
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.vo-meta-search-btn {
-  width: 100%;
-}
-
-.vo-conflict-banner-bar {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-2) var(--vo-space-3);
-  background-color: color-mix(in oklch, var(--vo-danger) 12%, var(--vo-surface-elevated));
-  border-bottom: 1px solid var(--vo-danger);
-}
-
-.vo-conflict-banner-title {
-  color: var(--vo-danger);
-  font-size: var(--vo-text-xs);
-  font-weight: var(--vo-weight-semibold);
-}
-
-.vo-conflict-banner-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--vo-space-2);
-}
-
-.vo-queue-row--conflict {
-  background-color: color-mix(in oklch, var(--vo-danger) 5%, transparent);
-}
-
-:deep(tr.vo-row--has-conflict) {
-  background-color: color-mix(in oklch, var(--vo-danger) 7%, transparent);
-}
-
-:deep(tr.vo-row--has-conflict td) {
-  border-block-end: none;
-}
-
-:deep(tr.vo-row--has-conflict td:first-child) {
-  border-inline-start: var(--vo-space-1) solid var(--vo-danger);
-}
-
-:deep(tr.vo-row--has-conflict-resolved) {
-  background-color: color-mix(in oklch, var(--vo-warning) 6%, transparent);
-}
-
-:deep(tr.vo-row--has-conflict-resolved td:first-child) {
-  border-inline-start: var(--vo-space-1) solid var(--vo-warning);
-}
-
-.vo-conflict-row {
-  background-color: color-mix(in oklch, var(--vo-danger) 7%, transparent);
-}
-
-.vo-conflict-row td {
-  padding-block-start: 0;
-  border-block-start: none;
-  border-block-end: 2px solid var(--vo-danger);
-  border-inline-start: var(--vo-space-1) solid var(--vo-danger);
-}
-
-.vo-conflict-row--resolved {
-  background-color: color-mix(in oklch, var(--vo-warning) 6%, transparent);
-}
-
-.vo-conflict-row--resolved td {
-  border-block-end: 2px solid var(--vo-warning);
-  border-inline-start: var(--vo-space-1) solid var(--vo-warning);
-}
-
-.vo-row-conflict {
-  display: grid;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-2) var(--vo-space-3);
-  border: 1px solid var(--vo-danger);
-  border-radius: var(--vo-radius-sm);
-  background-color: color-mix(in oklch, var(--vo-danger) 10%, var(--vo-surface-elevated));
-}
-
-.vo-row-conflict--resolved {
-  background-color: color-mix(in oklch, var(--vo-warning) 8%, var(--vo-surface-elevated));
-  border-color: var(--vo-warning);
-}
-
-.vo-row-conflict__head {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-2);
-  color: var(--vo-danger);
-  font-size: var(--vo-text-xs);
-  font-weight: var(--vo-weight-semibold);
-}
-
-.vo-row-conflict__title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-}
-
-.vo-row-conflict--resolved .vo-row-conflict__head {
-  color: var(--vo-warning);
-}
-
-.vo-row-conflict__select {
-  font-size: var(--vo-text-xs);
-}
-
-.vo-row-conflict__path {
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-  overflow-wrap: anywhere;
-}
-
-.vo-row-conflict__grid {
-  display: grid;
-  gap: var(--vo-space-2);
-  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
-  font-size: var(--vo-text-xs);
-}
-
-.vo-row-conflict__side {
-  display: grid;
-  gap: var(--vo-space-1);
-  padding: var(--vo-space-1) var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background-color: var(--vo-surface);
-}
-
-.vo-row-conflict__streams {
-  color: var(--vo-text-muted);
-}
-
-.vo-sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-}
-
-.vo-bulk-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-2) var(--vo-space-3);
-  background-color: color-mix(in oklch, var(--vo-accent) 10%, var(--vo-surface-elevated));
-  border-bottom: 1px solid var(--vo-border-highlight);
-}
-
-.vo-bulk-count {
-  color: var(--vo-accent);
-  font-size: var(--vo-text-xs);
-  font-weight: var(--vo-weight-semibold);
 }
 
 .vo-select-col {

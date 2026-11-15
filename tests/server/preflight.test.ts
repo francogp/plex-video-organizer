@@ -221,6 +221,38 @@ describe('preflight', () => {
         async () => PROBE
       );
       expect(reportClean.ok).toBe(true);
+
+      // Cross-title & sibling-library TV collision matched by external {tvdb-...} ID
+      const legacyShowDir = path.join(
+        tmpDir,
+        'Even the Student Council Has Its Holes (2026) {tvdb-463051}',
+        'Season 1'
+      );
+      await fs.mkdir(legacyShowDir, { recursive: true });
+      const legacyFile = path.join(
+        legacyShowDir,
+        'Even.the.Student.Council.Has.Its.Holes.S01E01.1080p.mkv'
+      );
+      await fs.writeFile(legacyFile, 'legacy-tv');
+
+      const aliasedTvItem: ScannedItem = {
+        ...makeItem('tv-alias', 'Even the Student Council Has Its Holes', 'tt0000003'),
+        mediaKind: 'tv',
+        category: 'animated-series',
+        parsedYear: 2026,
+        tags: [],
+        selectedMetadata: {
+          title: 'There Is Also a Hole in the Student Organization!',
+          year: 2026,
+          tvdbId: asTvdbId('463051'),
+          source: 'tvdb'
+        },
+        episode: { seasonNumber: 1, episodeStart: 1, episodeTitle: 'Even High School Boys Have' }
+      };
+      const reportAliased = await runPreflightCheck([aliasedTvItem], mounts, async () => PROBE);
+      expect(reportAliased.ok).toBe(false);
+      expect(reportAliased.conflicts).toHaveLength(1);
+      expect(reportAliased.conflicts[0]?.existingPath).toBe(legacyFile);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

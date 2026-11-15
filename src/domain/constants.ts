@@ -26,6 +26,9 @@ export const CONNECTION_STATUSES = ['connecting', 'ready'] as const;
 /** Pre-flight conflict resolution decisions. */
 export const CONFLICT_DECISIONS = ['overwrite', 'ignore'] as const;
 
+/** Footer action modes for ConflictResolutionModal. */
+export const CONFLICT_MODAL_MODES = ['confirm', 'save-and-confirm', 'save-only'] as const;
+
 /** Subtitle merge strategies during MKV remuxing. */
 export const SUBTITLE_MERGE_MODES = ['keep-and-add', 'replace', 'selected-only'] as const;
 
@@ -426,6 +429,7 @@ export const AUDIO_SAFE_PEAK_CEILING_DB = -1.0;
 
 /** Maximum concurrent ffmpeg volumedetect processes during input scan. */
 export const AUDIO_SCAN_CONCURRENCY = 3;
+export const PROCESS_JOB_CONCURRENCY = 2;
 
 /** EBU R128 loudnorm target parameters for 2-pass normalization. */
 export const AUDIO_LOUDNORM_TARGET_I = -16;

@@ -1,8 +1,6 @@
-import type { Dirent } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { VIDEO_EXTENSION_SET, isHiddenOrTempEntryName } from '../../domain/constants.ts';
 import {
   formatMovieRelativePath,
   formatTvRelativePath,
@@ -17,6 +15,13 @@ import type {
   OutputCategory,
   ScannedItem
 } from '../../domain/types.ts';
+import {
+  buildExistingFileConflictComparison,
+  buildLibraryRootIndex,
+  findExistingVideoInLibraryFolder,
+  findMatchingLibraryFolders,
+  type LibraryRootEntry
+} from './libraryCollision.ts';
 
 /** Computes the projected absolute destination path for a queue item. */
 export function computeProjectedDestination(item: ScannedItem, mountPaths: MountPathsMap): string {
@@ -56,9 +61,6 @@ export interface PreflightReport {
   readonly projectedByItemId: Readonly<Partial<Record<ItemId, string>>>;
 }
 
-const EXTRA_SUFFIX_REGEX =
-  /-(trailer|behindthescenes|deleted|featurette|interview|scene|short|other)\.[^.]+$/iu;
-
 function toDisplayHostPath(
   targetPath: string,
   category: OutputCategory,
@@ -69,65 +71,70 @@ function toDisplayHostPath(
   return `${category}/${rel.replaceAll('\\', '/')}`;
 }
 
-function buildEpisodeCollisionMarker(item: ScannedItem): string | null {
-  if (item.mediaKind !== 'tv') {
-    return null;
+function getSiblingCategory(category: OutputCategory): OutputCategory {
+  if (category === 'movies') {
+    return 'animated-movies';
   }
-  const ep = item.episode ?? { seasonNumber: 1, episodeStart: 1 };
-  if (ep.airDate) {
-    return ` - ${ep.airDate.toLowerCase()}`;
+  if (category === 'animated-movies') {
+    return 'movies';
   }
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  const start = `s${pad(ep.seasonNumber)}e${pad(ep.episodeStart)}`;
-  const code =
-    ep.episodeEnd && ep.episodeEnd > ep.episodeStart ? `${start}-e${pad(ep.episodeEnd)}` : start;
-  return ` - ${code}`;
+  return category === 'tv-shows' ? 'animated-series' : 'tv-shows';
 }
 
-async function findExistingCollision(item: ScannedItem, dest: string): Promise<string | null> {
+async function getRootIndex(
+  category: OutputCategory,
+  mountPaths: MountPathsMap,
+  cache: Map<OutputCategory, readonly LibraryRootEntry[]>
+): Promise<readonly LibraryRootEntry[]> {
+  const cached = cache.get(category);
+  if (cached) {
+    return cached;
+  }
+  const index = await buildLibraryRootIndex(mountPaths[category]);
+  cache.set(category, index);
+  return index;
+}
+
+interface ExistingCollisionMatch {
+  readonly existingPath: string;
+  readonly category: OutputCategory;
+}
+
+async function findExistingCollision(
+  item: ScannedItem,
+  dest: string,
+  mountPaths: MountPathsMap,
+  rootIndexCache: Map<OutputCategory, readonly LibraryRootEntry[]>
+): Promise<ExistingCollisionMatch | null> {
   try {
     await fs.access(dest);
-    return dest;
+    return { existingPath: dest, category: item.category };
   } catch {
-    // Exact path does not exist; check destination folder for semantic Plex collisions
+    // Exact path does not exist; check destination folder and library-wide aliases/IDs
   }
 
-  const parentDir = path.dirname(dest);
-  let entries: Dirent[];
-  try {
-    entries = await fs.readdir(parentDir, { withFileTypes: true });
-  } catch {
-    return null;
+  const destShowOrMovieDir =
+    item.mediaKind === 'tv' ? path.dirname(path.dirname(dest)) : path.dirname(dest);
+  const directMatch = await findExistingVideoInLibraryFolder(item, destShowOrMovieDir);
+  if (directMatch) {
+    return { existingPath: directMatch, category: item.category };
   }
 
-  const videoExtensions: ReadonlySet<string> = VIDEO_EXTENSION_SET;
-  const videoFiles = entries.filter(
-    (entry): boolean =>
-      entry.isFile() &&
-      !isHiddenOrTempEntryName(entry.name) &&
-      videoExtensions.has(path.extname(entry.name).toLowerCase())
-  );
-  if (videoFiles.length === 0) {
-    return null;
-  }
-
-  if (item.mediaKind === 'tv') {
-    const marker = buildEpisodeCollisionMarker(item);
-    if (!marker) {
-      return null;
+  for (const category of [item.category, getSiblingCategory(item.category)] as const) {
+    const rootIndex = await getRootIndex(category, mountPaths, rootIndexCache);
+    const matchedFolders = findMatchingLibraryFolders(item, rootIndex);
+    for (const folder of matchedFolders) {
+      if (folder.absPath === destShowOrMovieDir) {
+        continue;
+      }
+      const found = await findExistingVideoInLibraryFolder(item, folder.absPath);
+      if (found) {
+        return { existingPath: found, category };
+      }
     }
-    const match = videoFiles.find((entry): boolean => {
-      const lower = entry.name.toLowerCase();
-      return (
-        lower.includes(`${marker} `) || lower.includes(`${marker}.`) || lower.includes(`${marker}-`)
-      );
-    });
-    return match ? path.join(parentDir, match.name) : null;
   }
 
-  // For movies, any main non-extra video inside the dedicated movie folder is a collision
-  const mainMovie = videoFiles.find((entry): boolean => !EXTRA_SUFFIX_REGEX.test(entry.name));
-  return mainMovie ? path.join(parentDir, mainMovie.name) : null;
+  return null;
 }
 
 /** Runs blocking pre-flight checks: destination resolution, intra-batch collisions, existing files, and disk space. */
@@ -154,6 +161,7 @@ export async function runPreflightCheck(
   }
 
   const conflicts: ConflictComparison[] = [];
+  const rootIndexCache = new Map<OutputCategory, readonly LibraryRootEntry[]>();
 
   for (const [dest, group] of destGroups.entries()) {
     if (group.length > 1) {
@@ -175,19 +183,20 @@ export async function runPreflightCheck(
     if (!single) {
       continue;
     }
-    const existingPath = await findExistingCollision(single, dest);
-    if (existingPath) {
-      const existingProbe = await probeFile(existingPath);
-      conflicts.push({
-        itemId: single.id,
-        sourceFileName: single.fileName,
-        kind: 'existing-file',
-        destinationPath: dest,
-        existingPath,
-        displayPath: toDisplayHostPath(existingPath, single.category, mountPaths),
-        incoming: single.probe,
-        existing: existingProbe
-      });
+    const collision = await findExistingCollision(single, dest, mountPaths, rootIndexCache);
+    if (collision) {
+      const existingProbe = await probeFile(collision.existingPath);
+      conflicts.push(
+        buildExistingFileConflictComparison({
+          itemId: single.id,
+          sourceFileName: single.fileName,
+          destinationPath: dest,
+          existingPath: collision.existingPath,
+          displayPath: toDisplayHostPath(collision.existingPath, collision.category, mountPaths),
+          incoming: single.probe,
+          existing: existingProbe
+        })
+      );
     }
   }
 

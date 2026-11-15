@@ -27,13 +27,13 @@ import {
   type VerifierRenameStep
 } from './types.ts';
 
-const TVDB_TAG_REGEX = /\{tvdb-(\d+)\}/i;
-const IMDB_TAG_REGEX = /\{imdb-(tt\d+)\}/i;
-const TMDB_TAG_REGEX = /\{tmdb-(\d+)\}/i;
+export const TVDB_TAG_REGEX = /\{tvdb-(\d+)\}/i;
+export const IMDB_TAG_REGEX = /\{imdb-(tt\d+)\}/i;
+export const TMDB_TAG_REGEX = /\{tmdb-(\d+)\}/i;
 const EDITION_TAG_REGEX = /\{edition-([^}]+)\}/i;
 const BRACKET_TAG_REGEX = /\[([^\]]+)\]/g;
-const YEAR_PAREN_REGEX = /\((\d{4})\)/;
-const SEASON_DIR_REGEX = /^(?:season|temporada|s)[\s._-]*(\d{1,2})$/i;
+export const YEAR_PAREN_REGEX = /\((\d{4})\)/;
+export const SEASON_DIR_REGEX = /^(?:season|temporada|s)[\s._-]*(\d{1,2})$/i;
 const EPISODE_CODE_REGEX =
   /(?:^|[\s._-])(?:s(\d{1,2})e(\d{1,3})(?:-?e(\d{1,3}))?|(\d{1,2})x(\d{2,3}))(?=$|[\s._-])/i;
 

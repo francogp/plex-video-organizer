@@ -7,6 +7,7 @@ import {
   asIso639_2Code,
   asItemId,
   asTvdbId,
+  type ScannedItem,
   type SubtitleCandidate
 } from '../../src/domain/types.ts';
 
@@ -692,6 +693,96 @@ describe('organizerStore', () => {
     const dl = await store.downloadItemSubtitle(asItemId('item-1'), candidate);
     expect(dl.relativePath).toBe('Movie.spa.srt');
     expect(store.revision).toBe(5);
+    vi.unstubAllGlobals();
+  });
+
+  it('propagates audio track include flags and normalizes single default in applyTracksToSeries', async () => {
+    const baseEpisode = {
+      mediaKind: 'tv' as const,
+      category: 'tv-shows' as const,
+      parsedTitle: 'Series',
+      episodeOrder: 'aired' as const,
+      include: true,
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 100,
+        sizeBytes: 1000,
+        bitrateBps: 1000,
+        videoStreams: [],
+        audioStreams: [],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      selectedMetadata: { title: 'Series', tvdbId: asTvdbId('416744'), source: 'tvdb' as const },
+      tags: [],
+      warnings: []
+    };
+    const ep1: ScannedItem = {
+      ...baseEpisode,
+      id: asItemId('ep-1'),
+      sourcePath: '/in/Series.S01E01.mkv',
+      relativePath: 'Series.S01E01.mkv',
+      fileName: 'Series.S01E01.mkv',
+      trackSelection: {
+        subtitleMergeMode: 'keep-and-add' as const,
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false,
+        audioTracks: [
+          { streamOrder: 1, include: false, language: asIso639_2Code('jpn'), isDefault: false },
+          { streamOrder: 2, include: true, language: asIso639_2Code('spa'), isDefault: true }
+        ]
+      }
+    };
+    const ep2: ScannedItem = {
+      ...baseEpisode,
+      id: asItemId('ep-2'),
+      sourcePath: '/in/Series.S01E02.mkv',
+      relativePath: 'Series.S01E02.mkv',
+      fileName: 'Series.S01E02.mkv',
+      trackSelection: {
+        subtitleMergeMode: 'keep-and-add' as const,
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false,
+        audioTracks: [
+          { streamOrder: 1, include: true, language: asIso639_2Code('jpn'), isDefault: true },
+          { streamOrder: 2, include: true, language: asIso639_2Code('eng'), isDefault: false },
+          { streamOrder: 3, include: true, language: asIso639_2Code('spa'), isDefault: true }
+        ]
+      }
+    };
+
+    const patchedPayloads: unknown[] = [];
+    const fetchSpy = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PATCH' && typeof init.body === 'string') {
+        patchedPayloads.push(JSON.parse(init.body));
+      }
+      return new Response(JSON.stringify(makeBaseState({ items: [ep1, ep2] })), {
+        status: 200
+      });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const store = useOrganizerStore();
+    await store.fetchState();
+    store.items = [ep1, ep2];
+    await store.applyTracksToSeries(ep1);
+
+    expect(patchedPayloads).toHaveLength(1);
+    const sent = patchedPayloads[0] as {
+      patch: {
+        trackSelection: {
+          audioTracks: { include: boolean; isDefault: boolean; language: string }[];
+        };
+      };
+    };
+    expect(sent.patch.trackSelection.audioTracks).toEqual([
+      { streamOrder: 1, include: false, language: 'jpn', isDefault: false },
+      { streamOrder: 2, include: true, language: 'spa', isDefault: true },
+      { streamOrder: 3, include: true, language: 'spa', isDefault: false }
+    ]);
     vi.unstubAllGlobals();
   });
 });

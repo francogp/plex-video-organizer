@@ -36,6 +36,7 @@ import {
   type VerifierSummary
 } from '../../domain/types.ts';
 import { buildMountPathsMap, type AppConfig } from '../config.ts';
+import { buildExistingFileConflictComparison } from './libraryCollision.ts';
 import { probeMedia } from './media/ffmpegRunner.ts';
 import { lookupMovieByImdbId, searchMovies } from './metadata/imdbClient.ts';
 import {
@@ -705,15 +706,14 @@ async function buildVerifierCollisionComparison(
           'verifier:'
         )
       ]);
-    return {
+    return buildExistingFileConflictComparison({
       itemId: entry.id,
       sourceFileName: path.posix.join(entry.currentRootName, sourceVideo.relName),
-      kind: 'existing-file',
       destinationPath: destVideo.absPath,
       existingPath: destVideo.absPath,
       incoming: incomingProbe,
       existing: existingProbe
-    };
+    });
   } catch {
     return undefined;
   }

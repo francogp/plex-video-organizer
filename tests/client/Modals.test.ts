@@ -400,4 +400,81 @@ describe('Client Modals & App', () => {
     await wrapper.find('button[aria-label="Close subtitle preview"]').trigger('click');
     expect(wrapper.emitted('close')).toHaveLength(1);
   });
+
+  it('TrackInspectorModal toggles Skip on audio tracks, styles skipped card, reassigns default, and prevents skipping last audio', async () => {
+    const wrapper = mount(TrackInspectorModal, {
+      props: {
+        item: {
+          id: asItemId('trk-skip-1'),
+          sourcePath: '/in/Dual.mkv',
+          relativePath: 'Dual.mkv',
+          fileName: 'Dual.mkv',
+          mediaKind: 'movie',
+          category: 'movies',
+          parsedTitle: 'Dual',
+          include: true,
+          tags: [],
+          probe: {
+            formatName: 'matroska',
+            durationSeconds: 1800,
+            sizeBytes: 1_000_000,
+            bitrateBps: 1_000_000,
+            videoStreams: [],
+            audioStreams: [
+              {
+                index: 1,
+                streamOrder: 0,
+                codecName: 'eac3',
+                language: asIso639_2Code('zho'),
+                channels: 6,
+                isDefault: true
+              },
+              {
+                index: 2,
+                streamOrder: 1,
+                codecName: 'eac3',
+                language: asIso639_2Code('spa'),
+                channels: 6,
+                isDefault: false
+              }
+            ],
+            subtitleStreams: []
+          },
+          externalSubtitles: [],
+          candidates: [],
+          trackSelection: {
+            audioTracks: [
+              { streamOrder: 0, include: true, language: asIso639_2Code('zho'), isDefault: true },
+              { streamOrder: 1, include: true, language: asIso639_2Code('spa'), isDefault: false }
+            ],
+            subtitleMergeMode: 'keep-and-add',
+            includedInternalSubtitles: [],
+            externalSubtitleOrder: [],
+            needsUserPrompt: false
+          },
+          warnings: []
+        }
+      }
+    });
+
+    const skipBtns = wrapper.findAll('.vo-track-actions button');
+    expect(skipBtns).toHaveLength(2);
+    await skipBtns[0]!.trigger('click');
+
+    const cards = wrapper.findAll('.vo-track-card');
+    expect(cards[0]!.classes()).toContain('vo-track-card--skipped');
+    expect(cards[0]!.text()).toContain('Skipped');
+    expect(cards[1]!.classes()).not.toContain('vo-track-card--skipped');
+    // Remaining track cannot be skipped
+    expect(skipBtns[1]!.attributes('disabled')).toBeDefined();
+
+    await wrapper.find('.vo-modal-footer .vo-btn--primary').trigger('click');
+    const saved = wrapper.emitted('save')?.[0]?.[0] as {
+      audioTracks: readonly { streamOrder: number; include: boolean; isDefault: boolean }[];
+    };
+    expect(saved.audioTracks[0]?.include).toBe(false);
+    expect(saved.audioTracks[0]?.isDefault).toBe(false);
+    expect(saved.audioTracks[1]?.include).toBe(true);
+    expect(saved.audioTracks[1]?.isDefault).toBe(true);
+  });
 });

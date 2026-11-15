@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, toRaw, watch } from 'vue';
+import { computed, ref, toRaw, watch } from 'vue';
 
 import {
   ISO_639_2_LABELS,
   ISO_639_2_PRESETS,
   SUBTITLE_MERGE_MODES
 } from '../../domain/constants.ts';
+import { ensureValidAudioTrackSelection } from '../../domain/trackSelection.ts';
 import {
   asIso639_2Code,
   type ScannedItem,
@@ -46,6 +47,28 @@ function updateAudioLang(idx: number, raw: string): void {
   }
   const nextTracks = draft.value.audioTracks.map((t, i) =>
     i === idx ? { ...t, language: asIso639_2Code(clean) } : t
+  );
+  draft.value = { ...draft.value, audioTracks: nextTracks };
+}
+
+const includedAudioCount = computed(
+  (): number => draft.value?.audioTracks.filter((t) => t.include).length ?? 0
+);
+
+function toggleAudioInclude(idx: number): void {
+  if (!draft.value) {
+    return;
+  }
+  const current = draft.value.audioTracks[idx];
+  if (!current) {
+    return;
+  }
+  if (current.include && includedAudioCount.value <= 1) {
+    return;
+  }
+  const nextInclude = !current.include;
+  const nextTracks = ensureValidAudioTrackSelection(
+    draft.value.audioTracks.map((t, i) => (i === idx ? { ...t, include: nextInclude } : t))
   );
   draft.value = { ...draft.value, audioTracks: nextTracks };
 }
@@ -150,7 +173,9 @@ function handleSave(): void {
       <section class="vo-section">
         <div class="vo-section-head">
           <h3>Audio Tracks</h3>
-          <span class="vo-hint">{{ draft.audioTracks.length }} stream(s)</span>
+          <span class="vo-hint">
+            {{ includedAudioCount }}/{{ draft.audioTracks.length }} included
+          </span>
         </div>
 
         <div class="vo-track-list">
@@ -158,6 +183,7 @@ function handleSave(): void {
             v-for="(track, idx) in draft.audioTracks"
             :key="track.streamOrder"
             class="vo-track-card"
+            :class="{ 'vo-track-card--skipped': !track.include }"
           >
             <div class="vo-track-card-top">
               <div class="vo-track-identity">
@@ -168,21 +194,42 @@ function handleSave(): void {
                     · {{ item.probe.audioStreams[idx]?.channels }}ch
                   </template>
                 </span>
+                <span v-if="!track.include" class="vo-badge vo-badge--danger">Skipped</span>
                 <span v-if="item.probe.audioStreams[idx]?.title" class="vo-hint">
                   {{ item.probe.audioStreams[idx]?.title }}
                 </span>
               </div>
 
-              <label :for="`aud-def-${String(idx)}`" class="vo-radio-pill">
-                <input
-                  :id="`aud-def-${String(idx)}`"
-                  type="radio"
-                  name="defaultAudio"
-                  :checked="track.isDefault"
-                  @change="setDefaultAudio(idx)"
-                />
-                Default
-              </label>
+              <div class="vo-track-actions">
+                <button
+                  type="button"
+                  class="vo-btn vo-btn--xs"
+                  :class="{ 'vo-btn--danger': !track.include }"
+                  :disabled="track.include && includedAudioCount <= 1"
+                  :title="
+                    track.include && includedAudioCount <= 1
+                      ? 'At least one audio track must remain included'
+                      : track.include
+                        ? 'Mark track as Skip to remove it from output'
+                        : 'Include this audio track in output'
+                  "
+                  @click="toggleAudioInclude(idx)"
+                >
+                  <span aria-hidden="true">{{ track.include ? '⏭️' : '✅' }}</span>
+                  {{ track.include ? 'Skip' : 'Include' }}
+                </button>
+                <label :for="`aud-def-${String(idx)}`" class="vo-radio-pill">
+                  <input
+                    :id="`aud-def-${String(idx)}`"
+                    type="radio"
+                    name="defaultAudio"
+                    :checked="track.isDefault"
+                    :disabled="!track.include"
+                    @change="setDefaultAudio(idx)"
+                  />
+                  Default
+                </label>
+              </div>
             </div>
 
             <div class="vo-track-controls">
@@ -193,6 +240,7 @@ function handleSave(): void {
                 <select
                   :id="`aud-lang-${String(idx)}`"
                   class="vo-input"
+                  :disabled="!track.include"
                   :value="
                     ISO_639_2_PRESETS.includes(track.language as (typeof ISO_639_2_PRESETS)[number])
                       ? track.language
@@ -209,6 +257,7 @@ function handleSave(): void {
                   type="text"
                   maxlength="3"
                   class="vo-input vo-code-input vo-mono"
+                  :disabled="!track.include"
                   :value="track.language"
                   :aria-label="`Custom ISO 639-2 code for stream ${String(track.streamOrder)}`"
                   @change="updateAudioLang(idx, ($event.target as HTMLInputElement).value)"
@@ -377,6 +426,18 @@ function handleSave(): void {
   border: 1px solid var(--vo-border);
   border-radius: var(--vo-radius-md);
   background-color: var(--vo-surface-elevated);
+}
+
+.vo-track-card--skipped {
+  background-color: color-mix(in oklch, var(--vo-danger) 10%, var(--vo-surface));
+  opacity: 0.85;
+  border-color: var(--vo-danger);
+}
+
+.vo-track-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--vo-space-3);
 }
 
 .vo-track-card-top {

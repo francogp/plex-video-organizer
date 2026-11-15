@@ -1,28 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { onMounted, onUnmounted, ref, computed, watch } from 'vue';
 
-import {
-  METADATA_LANGUAGE_CODES,
-  METADATA_LANGUAGE_LABELS,
-  type AudioNormalizationMode,
-  type JobPhase
-} from '../domain/constants.ts';
 import type {
   AudioNormalizationConfig,
-  ConflictComparison,
   ConflictDecision,
-  EpisodeOrderMode,
   ItemId,
   MediaKind,
-  MetadataCandidate,
-  MetadataLanguageCode,
   OutputCategory,
   ScannedItem,
   SubtitleCandidate,
-  TrackSelection,
   VerifierEntry,
   VerifierEntryId
 } from '../domain/types.ts';
+import AppHeader, { type WorkspaceTab } from './components/AppHeader.vue';
 import ConflictResolutionModal from './components/ConflictResolutionModal.vue';
 import MetadataSearchModal from './components/MetadataSearchModal.vue';
 import OrganizerStatusBar from './components/OrganizerStatusBar.vue';
@@ -33,25 +23,12 @@ import TrackInspectorModal from './components/TrackInspectorModal.vue';
 import VerifierView from './components/VerifierView.vue';
 import { useGsapMotion } from './composables/useGsapMotion.ts';
 import { useOrganizerStore } from './stores/organizerStore.ts';
-import { formatEta } from './utils/formatters.ts';
+import { formatEta, formatPhaseLabel } from './utils/formatters.ts';
 
 declare const __APP_SEMVER__: string;
 
 const store = useOrganizerStore();
 const appSemver = typeof __APP_SEMVER__ === 'string' ? __APP_SEMVER__ : 'v1.0.0';
-
-const PHASE_LABELS: ReadonlyMap<JobPhase, string> = new Map([
-  ['IDLE', 'Idle'],
-  ['SCANNING', 'Scanning'],
-  ['READY', 'Ready'],
-  ['PREFLIGHT_BLOCKED', 'Action Required'],
-  ['PROCESSING', 'Processing'],
-  ['ERROR', 'Error']
-]);
-
-function phaseLabel(phase: JobPhase): string {
-  return PHASE_LABELS.get(phase) ?? phase;
-}
 const rootRef = ref<HTMLElement | null>(null);
 const inspectingItem = ref<ScannedItem | null>(null);
 const searchingItem = ref<ScannedItem | null>(null);
@@ -132,8 +109,7 @@ async function handleTestSubtitleInPlayer(item: ScannedItem): Promise<void> {
 }
 const conflictsOpen = ref(false);
 const confirmUnlockOpen = ref(false);
-const mountsExpanded = ref(false);
-const activeTab = ref<'organizer' | 'verifier'>('organizer');
+const activeTab = ref<WorkspaceTab>('organizer');
 
 const { animateShellTimeline, animateEntrance } = useGsapMotion(rootRef);
 
@@ -170,18 +146,35 @@ onUnmounted((): void => {
   store.disconnectSse();
 });
 
+const organizerModalConflictItemId = ref<ItemId | null>(null);
+const organizerModalConflicts = computed(() =>
+  organizerModalConflictItemId.value
+    ? store.preflightConflicts.filter((c) => c.itemId === organizerModalConflictItemId.value)
+    : store.preflightConflicts
+);
+
 async function handleProcess(): Promise<void> {
+  organizerModalConflictItemId.value = null;
   const ok = await store.runPreflight();
   if (ok || !store.hasUnresolvedConflicts) {
     await store.startJob(store.savedConflictResolutions);
   }
 }
 
-function handleResolveConflict(itemId: ItemId, decision: ConflictDecision): void {
+function handleOpenOrganizerConflictModal(itemId: ItemId): void {
+  organizerModalConflictItemId.value = itemId;
+  conflictsOpen.value = true;
+}
+
+function handleSaveOrganizerConflicts(
+  resolutions: Partial<Record<ItemId, ConflictDecision>>
+): void {
   store.setConflictResolutions({
     ...store.savedConflictResolutions,
-    [itemId]: decision
+    ...resolutions
   });
+  conflictsOpen.value = false;
+  organizerModalConflictItemId.value = null;
 }
 
 function handleResolveAllConflicts(decision: ConflictDecision): void {
@@ -203,8 +196,8 @@ async function patchItemAndRefresh(
 async function handleConfirmConflicts(
   resolutions: Partial<Record<ItemId, ConflictDecision>>
 ): Promise<void> {
-  conflictsOpen.value = false;
-  await store.startJob(resolutions);
+  handleSaveOrganizerConflicts(resolutions);
+  await store.startJob(store.savedConflictResolutions);
 }
 
 async function handleSaveTracks(selection: TrackSelection, applySeries: boolean): Promise<void> {
@@ -387,62 +380,9 @@ async function handleConfirmVerifierConflicts(
     await store.fixVerifier(selectedVerifierIds.value, verifierConflictResolutions.value);
   }
 }
-const availableExtraLanguages = computed<readonly MetadataLanguageCode[]>(() =>
-  METADATA_LANGUAGE_CODES.filter((code) => !store.preferredLanguages.includes(code))
-);
-
-function movePreferredLanguage(index: number, delta: -1 | 1): void {
-  const nextIndex = index + delta;
-  if (nextIndex < 0 || nextIndex >= store.preferredLanguages.length) {
-    return;
-  }
-  const next = [...store.preferredLanguages];
-  const current = next[index];
-  const target = next[nextIndex];
-  if (!current || !target) {
-    return;
-  }
-  next[index] = target;
-  next[nextIndex] = current;
-  void store.setPreferredLanguages(next);
-}
-
-function removePreferredLanguage(code: MetadataLanguageCode): void {
-  if (store.preferredLanguages.length <= 1) {
-    return;
-  }
-  void store.setPreferredLanguages(store.preferredLanguages.filter((c) => c !== code));
-}
-
-function handleAddPreferredLanguage(evt: Event): void {
-  const select = evt.target as HTMLSelectElement;
-  const value = select.value as MetadataLanguageCode | '';
-  if (!value || store.preferredLanguages.includes(value)) {
-    select.value = '';
-    return;
-  }
-  void store.setPreferredLanguages([...store.preferredLanguages, value]);
-  select.value = '';
-}
-
-const phaseBadgeTitle = computed<string | undefined>(() =>
-  store.phase === 'PREFLIGHT_BLOCKED'
-    ? 'Pre-flight check found destination conflicts or insufficient disk space'
-    : undefined
-);
-
-const processQueueTitle = computed<string>(() => {
-  if (store.hasUnresolvedConflicts) {
-    return 'Resolve all output conflicts in the table first';
-  }
-  return store.canProcessQueue
-    ? 'Process included items'
-    : 'Resolve Match Candidate and Tracks for all included items first';
-});
-
 const activeJobSummaryText = computed<string>(() => {
   const job = store.activeJob;
-  const label = phaseLabel(store.phase);
+  const label = formatPhaseLabel(store.phase);
   if (!job || job.totalItems <= 0) {
     return `${label} · Scanning...`;
   }
@@ -450,218 +390,37 @@ const activeJobSummaryText = computed<string>(() => {
   const stagePart = job.stageLabel ? ` · ${job.stageLabel}` : '';
   return `${label} (${job.jobId}) · ${String(job.completedItems)}/${String(job.totalItems)} (${String(job.currentPercent)}%)${etaPart}${stagePart}`;
 });
-
-const mountsToggle = computed(() =>
-  mountsExpanded.value ? { icon: '📂', label: 'Hide Mounts' } : { icon: '📁', label: 'Mounts' }
-);
-
-const themeToggle = computed(() =>
-  store.theme === 'dark' ? { icon: '☀️', label: 'Light Mode' } : { icon: '🌙', label: 'Dark Mode' }
-);
-
-const verifierBusy = computed<boolean>(
-  () => store.isLockedByOther || store.verifierState.scanning || store.verifierState.fixing
-);
-
-const verifierScanButton = computed(() =>
-  store.verifierState.scanning
-    ? { icon: '⏳', label: 'Scanning Libraries...' }
-    : { icon: '🔍', label: 'Scan Libraries' }
-);
-
-const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(store.mountPaths));
 </script>
 
 <template>
   <main ref="rootRef" class="vo-shell">
-    <header class="vo-header vo-panel">
-      <div class="vo-header-left">
-        <div>
-          <div class="vo-title-row">
-            <img
-              :src="'/favicon.svg'"
-              alt=""
-              width="28"
-              height="28"
-              decoding="async"
-              class="vo-brand-icon"
-            />
-            <h1>Plex Video Organizer</h1>
-            <span class="vo-badge vo-badge--compact vo-mono" title="Application version">
-              {{ appSemver }}
-            </span>
-            <span
-              class="vo-badge vo-phase-badge"
-              :data-phase="store.phase"
-              :title="phaseBadgeTitle"
-            >
-              {{ phaseLabel(store.phase) }}
-            </span>
-          </div>
-          <p class="vo-subtitle vo-mono">Client: {{ store.clientId }} · TZ: Buenos Aires (ART)</p>
-        </div>
-        <nav class="vo-tabs" role="tablist" aria-label="Workspace mode">
-          <button
-            type="button"
-            role="tab"
-            class="vo-tab"
-            :aria-selected="activeTab === 'organizer'"
-            :data-active="activeTab === 'organizer'"
-            @click="activeTab = 'organizer'"
-          >
-            Organizer
-            <span v-if="store.items.length > 0" class="vo-badge vo-badge--compact">
-              {{ store.items.length }}
-            </span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            class="vo-tab"
-            :aria-selected="activeTab === 'verifier'"
-            :data-active="activeTab === 'verifier'"
-            @click="activeTab = 'verifier'"
-          >
-            Verifier
-            <span
-              v-if="store.verifierState.entries.length > 0"
-              class="vo-badge vo-badge--danger vo-badge--compact"
-            >
-              {{ store.verifierState.entries.length }}
-            </span>
-          </button>
-        </nav>
-      </div>
-      <div class="vo-header-actions">
-        <button type="button" class="vo-btn" @click="mountsExpanded = !mountsExpanded">
-          <span aria-hidden="true">{{ mountsToggle.icon }}</span>
-          {{ mountsToggle.label }}
-        </button>
-        <button type="button" class="vo-btn" @click="store.toggleTheme()">
-          <span aria-hidden="true">{{ themeToggle.icon }}</span>
-          {{ themeToggle.label }}
-        </button>
-        <template v-if="activeTab === 'organizer'">
-          <button
-            type="button"
-            class="vo-btn vo-btn--scan"
-            :disabled="store.isInitializing || store.isLockedByOther || store.isBusy"
-            @click="void store.startScan().catch(() => undefined)"
-          >
-            <span aria-hidden="true">🔍</span> Scan Input
-          </button>
-          <button
-            type="button"
-            class="vo-btn vo-btn--primary"
-            :disabled="!store.canProcessQueue || store.hasUnresolvedConflicts"
-            :title="processQueueTitle"
-            @click="handleProcess()"
-          >
-            <span aria-hidden="true">⚡</span>
-            <span>Process Queue</span>
-            <span class="vo-badge vo-badge--compact">{{ includedQueueCount }}</span>
-          </button>
-        </template>
-        <template v-else>
-          <label
-            class="vo-btn vo-toggle-pill"
-            :data-active="recalculateVerifierTags"
-            :aria-disabled="verifierBusy"
-            title="Run FFprobe on output movie files to recalculate Plex [tags] (DV, HDR10+, audio channels, Spanish Audio)"
-          >
-            <input v-model="recalculateVerifierTags" type="checkbox" :disabled="verifierBusy" />
-            <span>Recalculate [tags]</span>
-          </label>
-          <button
-            type="button"
-            class="vo-btn vo-btn--scan"
-            :disabled="store.isInitializing || verifierBusy"
-            @click="store.scanVerifier(recalculateVerifierTags)"
-          >
-            <span aria-hidden="true">{{ verifierScanButton.icon }}</span>
-            {{ verifierScanButton.label }}
-          </button>
-          <button
-            type="button"
-            class="vo-btn vo-btn--primary"
-            :disabled="store.isInitializing || verifierBusy || selectedVerifierIds.length === 0"
-            @click="handleFixVerifierSelected"
-          >
-            <template v-if="store.verifierState.fixing">
-              <span aria-hidden="true">⏳</span> Renaming...
-            </template>
-            <template v-else>
-              <span aria-hidden="true">🔧</span>
-              <span>Fix Selected (Rename)</span>
-              <span class="vo-badge vo-badge--compact">{{ selectedVerifierIds.length }}</span>
-            </template>
-          </button>
-        </template>
-      </div>
-    </header>
-
-    <section v-if="mountsVisible" class="vo-mounts vo-panel vo-mono">
-      <div>config: {{ store.mountPaths!.configDir }}</div>
-      <div>input: {{ store.mountPaths!.inputDir }}</div>
-      <div>backup: {{ store.mountPaths!.backupDir }}</div>
-      <div>movies: {{ store.mountPaths!.movies }}</div>
-      <div>animated-movies: {{ store.mountPaths!['animated-movies'] }}</div>
-      <div>tv-shows: {{ store.mountPaths!['tv-shows'] }}</div>
-      <div>animated-series: {{ store.mountPaths!['animated-series'] }}</div>
-    </section>
-
-    <section class="vo-lang-bar vo-panel" aria-label="Preferred Title Language Order">
-      <span class="vo-lang-bar__label">Title Language Order</span>
-      <div class="vo-lang-bar__chips">
-        <span
-          v-for="(lang, idx) in store.preferredLanguages"
-          :key="lang"
-          class="vo-lang-chip vo-mono"
-        >
-          <span class="vo-lang-chip__rank">{{ idx + 1 }}.</span>
-          <span>{{ METADATA_LANGUAGE_LABELS[lang] }}</span>
-          <button
-            type="button"
-            class="vo-lang-chip__btn"
-            :disabled="idx === 0"
-            :aria-label="`Move ${lang} earlier`"
-            @click="movePreferredLanguage(idx, -1)"
-          >
-            ←
-          </button>
-          <button
-            type="button"
-            class="vo-lang-chip__btn"
-            :disabled="idx === store.preferredLanguages.length - 1"
-            :aria-label="`Move ${lang} later`"
-            @click="movePreferredLanguage(idx, 1)"
-          >
-            →
-          </button>
-          <button
-            v-if="store.preferredLanguages.length > 1"
-            type="button"
-            class="vo-lang-chip__btn vo-lang-chip__btn--remove"
-            :aria-label="`Remove ${lang}`"
-            @click="removePreferredLanguage(lang)"
-          >
-            ×
-          </button>
-        </span>
-        <select
-          v-if="availableExtraLanguages.length > 0"
-          class="vo-lang-bar__select"
-          aria-label="Add preferred title language"
-          :disabled="store.isInitializing"
-          @change="handleAddPreferredLanguage"
-        >
-          <option value="">+ Add language</option>
-          <option v-for="code in availableExtraLanguages" :key="code" :value="code">
-            {{ METADATA_LANGUAGE_LABELS[code] }}
-          </option>
-        </select>
-      </div>
-    </section>
+    <AppHeader
+      v-model:active-tab="activeTab"
+      v-model:recalculate-verifier-tags="recalculateVerifierTags"
+      :app-semver="appSemver"
+      :phase="store.phase"
+      :client-id="store.clientId"
+      :queue-count="store.items.length"
+      :verifier-count="store.verifierState.entries.length"
+      :theme="store.theme"
+      :is-initializing="store.isInitializing"
+      :is-locked-by-other="store.isLockedByOther"
+      :is-busy="store.isBusy"
+      :can-process-queue="store.canProcessQueue"
+      :has-unresolved-conflicts="store.hasUnresolvedConflicts"
+      :included-queue-count="includedQueueCount"
+      :verifier-scanning="store.verifierState.scanning"
+      :verifier-fixing="store.verifierState.fixing"
+      :selected-verifier-count="selectedVerifierIds.length"
+      :mount-paths="store.mountPaths"
+      :preferred-languages="store.preferredLanguages"
+      @toggle-theme="store.toggleTheme()"
+      @scan-input="void store.startScan().catch(() => undefined)"
+      @process-queue="handleProcess()"
+      @scan-verifier="store.scanVerifier(recalculateVerifierTags)"
+      @fix-verifier="handleFixVerifierSelected()"
+      @set-preferred-languages="(langs) => void store.setPreferredLanguages(langs)"
+    />
 
     <section
       v-if="store.isInitializing"
@@ -751,7 +510,7 @@ const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(st
           "
           @bulk-audio-normalization="handleBulkAudioNormalization"
           @inspect-tracks="(item) => (inspectingItem = item)"
-          @resolve-conflict="handleResolveConflict"
+          @open-conflict-modal="handleOpenOrganizerConflictModal"
           @resolve-all-conflicts="handleResolveAllConflicts"
         />
       </section>
@@ -792,9 +551,17 @@ const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(st
 
     <ConflictResolutionModal
       :open="conflictsOpen"
-      :conflicts="store.preflightConflicts"
+      :conflicts="organizerModalConflicts"
       :disk-space="store.preflightDiskSpace"
-      @close="conflictsOpen = false"
+      :initial-resolutions="store.savedConflictResolutions"
+      :mode="organizerModalConflictItemId !== null ? 'save-only' : 'confirm'"
+      @close="
+        () => {
+          conflictsOpen = false;
+          organizerModalConflictItemId = null;
+        }
+      "
+      @save="handleSaveOrganizerConflicts"
       @confirm="handleConfirmConflicts"
     />
 
@@ -803,7 +570,7 @@ const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(st
       title="Destination Conflicts"
       :conflicts="verifierConflictComparisons"
       :initial-resolutions="verifierConflictResolutions"
-      :allow-save-only="true"
+      :mode="verifierFixAfterResolve ? 'save-and-confirm' : 'save-only'"
       @close="
         () => {
           verifierConflictsOpen = false;
@@ -830,210 +597,11 @@ const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(st
   max-width: 100%;
 }
 
-.vo-header {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-4);
-  padding: var(--vo-space-4);
-  border: 1px solid var(--vo-border-highlight);
-  border-radius: var(--vo-radius-lg);
-  background: var(--vo-surface-gradient);
-  box-shadow: var(--vo-shadow-panel);
-  will-change: transform;
-
-  h1 {
-    margin: 0;
-    font-size: var(--vo-text-lg);
-  }
-}
-
-.vo-title-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-}
-
-.vo-brand-icon {
-  border-radius: var(--vo-radius-sm);
-  flex: none;
-  inline-size: 1.75rem;
-  block-size: 1.75rem;
-}
-
-.vo-phase-badge {
-  &[data-phase='READY'],
-  &[data-phase='DONE'] {
-    background-color: color-mix(in oklch, var(--vo-success) 14%, var(--vo-surface));
-    color: var(--vo-success);
-    border-color: color-mix(in oklch, var(--vo-success) 50%, var(--vo-border));
-  }
-
-  &[data-phase='SCANNING'],
-  &[data-phase='PROCESSING'] {
-    background-color: color-mix(in oklch, var(--vo-accent) 14%, var(--vo-surface));
-    color: var(--vo-accent);
-    border-color: color-mix(in oklch, var(--vo-accent) 50%, var(--vo-border));
-  }
-
-  &[data-phase='PREFLIGHT_BLOCKED'] {
-    background-color: color-mix(in oklch, var(--vo-warning) 14%, var(--vo-surface));
-    color: var(--vo-warning);
-    border-color: color-mix(in oklch, var(--vo-warning) 50%, var(--vo-border));
-  }
-
-  &[data-phase='ERROR'] {
-    background-color: color-mix(in oklch, var(--vo-danger) 14%, var(--vo-surface));
-    color: var(--vo-danger);
-    border-color: color-mix(in oklch, var(--vo-danger) 50%, var(--vo-border));
-  }
-}
-
-.vo-lang-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-2) var(--vo-space-3);
-}
-
-.vo-lang-bar__label {
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-  font-weight: var(--vo-weight-semibold);
-}
-
-.vo-lang-bar__chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-}
-
-.vo-lang-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--vo-space-1);
-  padding: 2px var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background: color-mix(in oklch, var(--vo-accent) 8%, var(--vo-surface));
-  font-size: var(--vo-text-xs);
-}
-
-.vo-lang-chip__rank {
-  color: var(--vo-text-muted);
-}
-
-.vo-lang-chip__btn {
-  padding: 0 3px;
-  border: none;
-  background: transparent;
-  color: var(--vo-text-muted);
-  cursor: pointer;
-
-  &:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
-
-  &:hover:not(:disabled) {
-    color: var(--vo-text);
-  }
-}
-
-.vo-lang-chip__btn--remove:hover:not(:disabled) {
-  color: var(--vo-danger);
-}
-
-.vo-lang-bar__select {
-  padding: 2px var(--vo-space-2);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background: var(--vo-surface);
-  color: var(--vo-text);
-  font-size: var(--vo-text-xs);
-}
-
-.vo-subtitle {
-  margin: var(--vo-space-1) 0 0;
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-}
-
-.vo-header-left {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-4);
-}
-
 .vo-header-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--vo-space-2);
   margin-inline-start: auto;
-}
-
-.vo-tabs {
-  display: inline-flex;
-  gap: var(--vo-space-1);
-  padding: var(--vo-space-1);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-  background: var(--vo-surface-elevated);
-}
-
-.vo-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--vo-space-1);
-  border: 1px solid transparent;
-  border-radius: var(--vo-radius-sm);
-  background: transparent;
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-sm);
-  font-weight: var(--vo-weight-semibold);
-  padding-block: var(--vo-space-1);
-  padding-inline: var(--vo-space-3);
-  cursor: pointer;
-
-  &[data-active='true'] {
-    background: var(--vo-accent-gradient);
-    color: var(--vo-accent-contrast);
-  }
-}
-
-.vo-mounts {
-  display: grid;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-3) var(--vo-space-4);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-  background-color: var(--vo-surface);
-  font-size: var(--vo-text-xs);
-}
-
-.vo-toggle-pill {
-  user-select: none;
-
-  input[type='checkbox'] {
-    margin: 0;
-    accent-color: var(--vo-accent);
-    cursor: inherit;
-  }
-
-  &[data-active='true'] {
-    background-color: color-mix(in oklch, var(--vo-accent) 14%, var(--vo-surface-elevated));
-    border-color: var(--vo-accent);
-  }
-
-  &[aria-disabled='true'] {
-    color: var(--vo-text-muted);
-    cursor: not-allowed;
-  }
 }
 </style>

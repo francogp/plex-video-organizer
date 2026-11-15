@@ -1,28 +1,23 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 
-import { OUTPUT_CATEGORIES } from '../../domain/constants.ts';
 import type {
   ConflictDecision,
   OutputCategory,
   VerifierEntry,
   VerifierEntryId,
   VerifierIssueCode,
-  VerifierRenameStep,
   VerifierState
 } from '../../domain/types.ts';
-import {
-  extractExternalIdLinks,
-  formatEta,
-  splitRelativePathSegments
-} from '../utils/formatters.ts';
-import ParallelTasksList from './ParallelTasksList.vue';
+import { extractExternalIdLinks } from '../utils/formatters.ts';
+import ConflictActionButton from './ConflictActionButton.vue';
 import ProviderLinks from './ProviderLinks.vue';
 import { areAllVisibleRowsSelected } from './table/tableQueryCore.ts';
-import TableResetCount from './table/TableResetCount.vue';
 import type { TableColumnDef, TableWorkerRowInput } from './table/tableTypes.js';
 import { useTableWorker } from './table/useTableWorker.js';
 import VirtualDataTable from './table/VirtualDataTable.vue';
+import VerifierRenamePlanCell from './VerifierRenamePlanCell.vue';
+import VerifierStatusToolbar from './VerifierStatusToolbar.vue';
 
 type VerifierColId = 'select' | 'library' | 'current' | 'expected' | 'plan';
 
@@ -196,8 +191,15 @@ function getEntryKey(entry: VerifierEntry): string {
   return entry.id;
 }
 
-function getVerifierRowClass(): string {
-  return 'vo-verifier-row';
+function getVerifierRowClass(entry: VerifierEntry): readonly string[] {
+  const classes: string[] = ['vo-verifier-row'];
+  if (entry.issues.includes('DESTINATION_COLLISION')) {
+    classes.push('vo-row--has-conflict');
+    if (props.conflictResolutions?.[entry.id]) {
+      classes.push('vo-row--has-conflict-resolved');
+    }
+  }
+  return classes;
 }
 
 function issueLabel(code: VerifierIssueCode): string {
@@ -207,202 +209,19 @@ function issueLabel(code: VerifierIssueCode): string {
 function categoryLabel(category: OutputCategory): string {
   return CATEGORY_LABELS.get(category) ?? category;
 }
-
-interface FileComparisonItem {
-  readonly fromName: string;
-  readonly toName: string;
-}
-
-interface FilePlanGroup {
-  readonly kind: 'files';
-  readonly key: string;
-  readonly fromFolders: readonly string[];
-  readonly toFolders: readonly string[];
-  readonly sameFolder: boolean;
-  readonly items: readonly FileComparisonItem[];
-}
-
-interface DirPlanItem {
-  readonly stepKind: 'season-dir' | 'root-dir';
-  readonly fromPath: string;
-  readonly toPath: string;
-}
-
-interface DirPlanGroup {
-  readonly kind: 'dirs';
-  readonly key: string;
-  readonly items: readonly DirPlanItem[];
-}
-
-type RenamePlanGroup = FilePlanGroup | DirPlanGroup;
-
-function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly RenamePlanGroup[] {
-  const fileGroups = new Map<
-    string,
-    {
-      readonly kind: 'files';
-      readonly key: string;
-      readonly fromFolders: readonly string[];
-      readonly toFolders: readonly string[];
-      readonly sameFolder: boolean;
-      readonly items: FileComparisonItem[];
-    }
-  >();
-  const dirItems: DirPlanItem[] = [];
-
-  for (const step of steps) {
-    if (step.kind === 'file') {
-      const fromSegs = splitRelativePathSegments(step.fromRelative);
-      const toSegs = splitRelativePathSegments(step.toRelative);
-      const fromKey = fromSegs.folders.join('/');
-      const toKey = toSegs.folders.join('/');
-      const groupKey = `${fromKey}::${toKey}`;
-      let group = fileGroups.get(groupKey);
-      if (!group) {
-        group = {
-          kind: 'files',
-          key: groupKey,
-          fromFolders: fromSegs.folders,
-          toFolders: toSegs.folders,
-          sameFolder: fromKey === toKey,
-          items: []
-        };
-        fileGroups.set(groupKey, group);
-      }
-      group.items.push({
-        fromName: fromSegs.fileName ?? step.fromRelative,
-        toName: toSegs.fileName ?? step.toRelative
-      });
-      continue;
-    }
-
-    dirItems.push({
-      stepKind: step.kind,
-      fromPath: step.fromRelative.replace(/\\/g, '/'),
-      toPath: step.toRelative.replace(/\\/g, '/')
-    });
-  }
-
-  const groups: RenamePlanGroup[] = [...fileGroups.values()];
-  if (dirItems.length > 0) {
-    groups.push({ kind: 'dirs', key: 'dirs', items: dirItems });
-  }
-  return groups;
-}
 </script>
 
 <template>
   <section class="vo-verifier">
-    <section
-      class="vo-status-bar vo-panel"
-      :class="{
-        'vo-status-bar--busy': props.state.scanning || props.state.fixing,
-        'vo-status-bar--error': Boolean(props.state.lastFixResult?.errors.length)
-      }"
-      aria-live="polite"
-    >
-      <template v-if="props.state.scanning || props.state.fixing">
-        <div class="vo-progress__stack">
-          <div class="vo-progress__row">
-            <div class="vo-progress__meta vo-mono">
-              <template v-if="props.state.progress && props.state.progress.total > 0">
-                {{ props.state.fixing ? 'Fixing' : 'Scanning' }} ·
-                {{ props.state.progress.completed }}/{{ props.state.progress.total }} ({{
-                  props.state.progress.percent
-                }}%){{
-                  props.state.progress.etaSeconds !== undefined
-                    ? ` · ${formatEta(props.state.progress.etaSeconds)}`
-                    : ''
-                }}{{
-                  props.state.progress.stageLabel ? ` · ${props.state.progress.stageLabel}` : ''
-                }}
-              </template>
-              <template v-else>
-                {{ props.state.fixing ? 'Fixing' : 'Scanning' }} ·
-                {{ props.state.progress?.stageLabel || 'Discovering libraries...' }}
-              </template>
-            </div>
-          </div>
-          <ParallelTasksList
-            v-if="props.state.progress"
-            :tasks="props.state.progress.activeTasks"
-          />
-          <progress
-            v-if="props.state.progress && props.state.progress.total > 0"
-            class="vo-progress__bar"
-            :value="props.state.progress.percent"
-            max="100"
-          />
-          <progress v-else class="vo-progress__bar" />
-        </div>
-      </template>
-      <template v-else-if="props.state.lastFixResult?.errors.length">
-        <span class="vo-status-bar__error" role="alert">
-          {{ props.state.lastFixResult.errors.join('; ') }}
-        </span>
-        <button type="button" class="vo-btn" @click="emit('dismiss-error')">
-          <span aria-hidden="true">✖️</span> Dismiss
-        </button>
-      </template>
-      <template v-else>
-        <span class="vo-status-bar__idle vo-mono">
-          <template v-if="props.state.summary">
-            Ready · {{ props.state.summary.issueCount }} non-compliant folder(s) across
-            {{ props.state.summary.librariesScanned }} libraries
-          </template>
-          <template v-else>Ready · Click Scan Libraries to verify Plex naming compliance</template>
-        </span>
-      </template>
-    </section>
-
-    <div class="vo-verifier__toolbar vo-panel">
-      <div class="vo-verifier__stats">
-        <template v-if="props.state.summary">
-          <span class="vo-badge">
-            Libraries: <strong>{{ props.state.summary.librariesScanned }}</strong>
-          </span>
-          <span class="vo-badge">
-            Root Folders: <strong>{{ props.state.summary.totalRootsAnalyzed }}</strong>
-          </span>
-          <span class="vo-badge vo-badge--ok">
-            Compliant: <strong>{{ props.state.summary.compliantRoots }}</strong>
-          </span>
-          <span class="vo-badge vo-badge--danger">
-            Non-compliant: <strong>{{ props.state.summary.issueCount }}</strong>
-          </span>
-          <span class="vo-badge">
-            Seasons: <strong>{{ props.state.summary.totalSeasonDirsAnalyzed }}</strong>
-          </span>
-          <span class="vo-badge">
-            Files Analyzed: <strong>{{ props.state.summary.totalFilesAnalyzed }}</strong>
-          </span>
-        </template>
-        <span v-else class="vo-muted">
-          No library audit run yet. Click Scan Libraries to verify Plex naming compliance.
-        </span>
-      </div>
-
-      <div class="vo-verifier__controls">
-        <input
-          v-model="searchQuery"
-          type="search"
-          class="vo-input"
-          placeholder="Filter by folder or issue..."
-          aria-label="Filter non-compliant entries"
-        />
-        <select v-model="filterCategory" class="vo-select" aria-label="Filter by library">
-          <option value="all">All libraries</option>
-          <option v-for="cat in OUTPUT_CATEGORIES" :key="cat" :value="cat">
-            {{ categoryLabel(cat) }}
-          </option>
-        </select>
-        <TableResetCount
-          :shown-count="filteredIndices.length"
-          :total-count="props.state.entries.length"
-          @reset="vTableRef?.resetColumns()"
-        />
-      </div>
-    </div>
+    <VerifierStatusToolbar
+      v-model:search-query="searchQuery"
+      v-model:filter-category="filterCategory"
+      :state="props.state"
+      :shown-count="filteredIndices.length"
+      :total-count="props.state.entries.length"
+      @dismiss-error="emit('dismiss-error')"
+      @reset-columns="vTableRef?.resetColumns()"
+    />
 
     <div class="vo-panel vo-verifier__table-panel">
       <div
@@ -495,14 +314,9 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
                 >
                   Conflict: {{ row.collisionTarget }}
                 </span>
-                <button
+                <ConflictActionButton
                   v-if="hasDestinationCollision(row)"
-                  type="button"
-                  class="vo-btn vo-btn--xs"
-                  :class="{
-                    'vo-btn--primary': props.conflictResolutions?.[row.id] === 'overwrite',
-                    'vo-btn--warn': !props.conflictResolutions?.[row.id]
-                  }"
+                  :decision="props.conflictResolutions?.[row.id]"
                   :disabled="props.disabled || props.state.fixing || !row.collisionComparison"
                   :title="
                     row.collisionComparison
@@ -510,15 +324,7 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
                       : 'No comparable video found in destination folder'
                   "
                   @click="emit('resolve-conflict', row)"
-                >
-                  <template v-if="props.conflictResolutions?.[row.id] === 'overwrite'">
-                    <span aria-hidden="true">✅</span> Overwrite
-                  </template>
-                  <template v-else-if="props.conflictResolutions?.[row.id] === 'ignore'">
-                    <span aria-hidden="true">⏭️</span> Ignore
-                  </template>
-                  <template v-else> <span aria-hidden="true">⚖️</span> Resolve conflict </template>
-                </button>
+                />
               </template>
               <span class="vo-badge vo-badge--compact vo-mono">
                 {{ row.steps.length }} step(s)
@@ -532,74 +338,7 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
         </template>
 
         <template #cell-plan="{ row }">
-          <div v-if="row.steps.length > 0" class="vo-plan-panels vo-mono">
-            <details
-              v-for="group in buildRenamePlanGroups(row.steps)"
-              :key="`${row.id}-${group.key}`"
-              class="vo-plan-panel"
-              open
-            >
-              <summary class="vo-plan-panel__summary">
-                <template v-if="group.kind === 'files'">
-                  <span class="vo-plan-panel__title">
-                    <span class="vo-badge vo-badge--accent">files</span>
-                    <span v-if="group.fromFolders.length > 0" class="vo-plan-panel__path">
-                      {{ group.fromFolders.join(' / ') }}
-                      <template v-if="!group.sameFolder">
-                        -> {{ group.toFolders.join(' / ') }}
-                      </template>
-                    </span>
-                    <span v-else class="vo-muted">root</span>
-                  </span>
-                </template>
-                <template v-else>
-                  <span class="vo-plan-panel__title">
-                    <span class="vo-badge vo-badge--accent">folders</span>
-                    <span class="vo-muted">Directory renames</span>
-                  </span>
-                </template>
-                <span class="vo-badge vo-badge--compact">{{ group.items.length }}</span>
-              </summary>
-
-              <ul v-if="group.kind === 'files'" class="vo-plan-panel__list">
-                <li
-                  v-for="(item, idx) in group.items"
-                  :key="`${group.key}-${idx}`"
-                  class="vo-plan-diff-row"
-                >
-                  <span class="vo-plan-diff-cell vo-plan-diff-cell--from">
-                    {{ item.fromName }}
-                  </span>
-                  <span class="vo-step-arrow" aria-hidden="true">-></span>
-                  <span class="vo-plan-diff-cell vo-plan-diff-cell--to">
-                    {{ item.toName }}
-                  </span>
-                </li>
-              </ul>
-
-              <ul v-else class="vo-plan-panel__list">
-                <li
-                  v-for="(item, idx) in group.items"
-                  :key="`${group.key}-${idx}`"
-                  class="vo-plan-dir-row"
-                >
-                  <span class="vo-badge vo-badge--compact vo-badge--accent">{{
-                    item.stepKind
-                  }}</span>
-                  <span class="vo-plan-diff-cell vo-plan-diff-cell--from">
-                    {{ item.fromPath }}
-                  </span>
-                  <span class="vo-step-arrow" aria-hidden="true">-></span>
-                  <span class="vo-plan-diff-cell vo-plan-diff-cell--to">
-                    {{ item.toPath }}
-                  </span>
-                </li>
-              </ul>
-            </details>
-          </div>
-          <span v-else class="vo-muted vo-mono">
-            Manual metadata resolution required before rename.
-          </span>
+          <VerifierRenamePlanCell :entry-id="row.id" :steps="row.steps" />
         </template>
       </VirtualDataTable>
     </div>
@@ -610,34 +349,6 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
 .vo-verifier {
   display: grid;
   gap: var(--vo-space-3);
-}
-
-.vo-verifier__toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-3);
-  padding: var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-  background: var(--vo-surface-gradient);
-  box-shadow: var(--vo-shadow-panel);
-}
-
-.vo-verifier__stats {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
-  font-size: var(--vo-text-xs);
-}
-
-.vo-verifier__controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
 }
 
 .vo-verifier__table-panel {
@@ -660,10 +371,6 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
   color: var(--vo-text-muted);
   font-size: var(--vo-text-sm);
   text-align: center;
-}
-
-.vo-muted {
-  color: var(--vo-text-muted);
 }
 
 .vo-th-title {
@@ -714,104 +421,5 @@ function buildRenamePlanGroups(steps: readonly VerifierRenameStep[]): readonly R
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: middle;
-}
-
-.vo-plan-panels {
-  display: grid;
-  gap: var(--vo-space-2);
-  min-width: 0;
-  max-width: 100%;
-  max-height: 16rem;
-  padding-right: var(--vo-space-1);
-  overflow-y: auto;
-}
-
-.vo-plan-panel {
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background: color-mix(in oklch, var(--vo-bg) 45%, transparent);
-  overflow: hidden;
-}
-
-.vo-plan-panel__summary {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-1) var(--vo-space-2);
-  background: color-mix(in oklch, var(--vo-border) 24%, transparent);
-  font-size: var(--vo-text-xs);
-  cursor: pointer;
-  user-select: none;
-}
-
-.vo-plan-panel__title {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--vo-space-2);
-  min-width: 0;
-}
-
-.vo-plan-panel__path {
-  color: var(--vo-text);
-  overflow-wrap: anywhere;
-}
-
-.vo-plan-panel__list {
-  display: grid;
-  gap: var(--vo-space-1);
-  margin: 0;
-  padding: var(--vo-space-1) var(--vo-space-2);
-  list-style: none;
-}
-
-%vo-plan-row-base {
-  display: grid;
-  align-items: center;
-  gap: var(--vo-space-2);
-  padding-block: var(--vo-space-1);
-  border-bottom: 1px solid color-mix(in oklch, var(--vo-border) 40%, transparent);
-
-  &:last-child {
-    border-bottom: none;
-  }
-}
-
-.vo-plan-diff-row {
-  @extend %vo-plan-row-base;
-
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-}
-
-.vo-plan-dir-row {
-  @extend %vo-plan-row-base;
-
-  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
-}
-
-.vo-plan-diff-cell {
-  min-width: 0;
-  padding: var(--vo-space-1) var(--vo-space-2);
-  border-radius: var(--vo-radius-sm);
-  font-size: var(--vo-text-xs);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.vo-plan-diff-cell--from {
-  border: 1px solid color-mix(in oklch, var(--vo-danger) 38%, transparent);
-  background: color-mix(in oklch, var(--vo-danger) 9%, transparent);
-  color: var(--vo-text);
-}
-
-.vo-plan-diff-cell--to {
-  border: 1px solid color-mix(in oklch, var(--vo-success) 42%, transparent);
-  background: color-mix(in oklch, var(--vo-success) 10%, transparent);
-  color: var(--vo-text);
-}
-
-.vo-step-arrow {
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
 }
 </style>

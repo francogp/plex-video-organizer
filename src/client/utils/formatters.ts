@@ -1,5 +1,19 @@
 import { fitTvEpisodeTitleToBudget, sanitizePlexSegment } from '../../domain/constants.ts';
-import type { MediaKind, MediaProbeSummary, ScannedItem } from '../../domain/types.ts';
+import type { JobPhase, MediaKind, MediaProbeSummary, ScannedItem } from '../../domain/types.ts';
+
+const PHASE_LABELS: ReadonlyMap<JobPhase, string> = new Map([
+  ['IDLE', 'Idle'],
+  ['SCANNING', 'Scanning'],
+  ['READY', 'Ready'],
+  ['PREFLIGHT_BLOCKED', 'Action Required'],
+  ['PROCESSING', 'Processing'],
+  ['ERROR', 'Error']
+]);
+
+/** Formats a JobPhase enum into a human-readable badge label. */
+export function formatPhaseLabel(phase: JobPhase): string {
+  return PHASE_LABELS.get(phase) ?? phase;
+}
 
 const BYTES_PER_MB = 1024 * 1024;
 const BUENOS_AIRES_TZ = 'America/Argentina/Buenos_Aires';
@@ -140,14 +154,29 @@ export function formatPlexOutputSegments(item: ScannedItem): PathSegments | null
 const KBPS_DIVISOR = 1000;
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3600;
+const BYTES_PER_KIB = 1024;
+const BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB;
+const BYTES_PER_GIB = BYTES_PER_MIB * BYTES_PER_KIB;
+const BYTES_PER_TIB = BYTES_PER_GIB * BYTES_PER_KIB;
+
+/** Formats byte counts into readable `MB`, `GB`, or `TB` labels. */
+export function formatBytesHuman(bytes: number): string {
+  if (bytes >= BYTES_PER_TIB) {
+    return `${(bytes / BYTES_PER_TIB).toFixed(2)} TB`;
+  }
+  if (bytes >= BYTES_PER_GIB) {
+    return `${(bytes / BYTES_PER_GIB).toFixed(1)} GB`;
+  }
+  return `${(bytes / BYTES_PER_MIB).toFixed(1)} MB`;
+}
 
 /** Formats a bitrate in bits/sec as rounded `kbps`. */
-export function formatKbps(bps: number): string {
+function formatKbps(bps: number): string {
   return `${String(Math.round(bps / KBPS_DIVISOR))} kbps`;
 }
 
 /** Formats a duration in seconds as `Xm YYs`. */
-export function formatDuration(seconds: number): string {
+function formatDuration(seconds: number): string {
   const rounded = Math.max(0, Math.round(seconds));
   const mins = Math.floor(rounded / SECONDS_PER_MINUTE);
   const secs = rounded % SECONDS_PER_MINUTE;
@@ -183,19 +212,6 @@ export function formatProbeSpecRows(probe: MediaProbeSummary): readonly ProbeSpe
   ];
 }
 
-/** Formats a probed stream summary for conflict comparison panels. */
-export function formatProbeStreams(probe: MediaProbeSummary): string {
-  const video = probe.videoStreams[0];
-  const res = video ? `${String(video.width)}x${String(video.height)}` : 'no video';
-  const audioLangs =
-    probe.audioStreams.length > 0 ? probe.audioStreams.map((a) => a.language).join('/') : 'none';
-  const subLangs =
-    probe.subtitleStreams.length > 0
-      ? probe.subtitleStreams.map((s) => s.language).join('/')
-      : 'none';
-  return `${res} · audio: ${audioLangs} · subs(${String(probe.subtitleStreams.length)}): ${subLangs}`;
-}
-
 /** Formats remaining ETA seconds into a compact human-readable string (`ETA 1m 24s`). */
 export function formatEta(etaSeconds?: number): string {
   if (etaSeconds === undefined || !Number.isFinite(etaSeconds) || etaSeconds < 0) {
@@ -214,19 +230,6 @@ export function formatEta(etaSeconds?: number): string {
   const mins = Math.floor((total % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
   return `ETA ${String(hours)}h ${String(mins)}m`;
 }
-
-export interface ConflictDecisionOption {
-  readonly value: '' | 'ignore' | 'overwrite';
-  readonly label: string;
-  readonly disabled?: boolean;
-}
-
-/** Shared `<option>` list for conflict resolution `<select>` controls. */
-export const CONFLICT_DECISION_OPTIONS: readonly ConflictDecisionOption[] = [
-  { value: '', label: 'Select decision...', disabled: true },
-  { value: 'ignore', label: 'Ignore (keep source untouched)' },
-  { value: 'overwrite', label: 'Overwrite destination' }
-];
 
 export type ExternalProviderKind = 'tvdb' | 'imdb' | 'tmdb';
 

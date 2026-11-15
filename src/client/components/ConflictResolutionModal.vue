@@ -4,12 +4,13 @@ import { computed, ref, watch } from 'vue';
 import type {
   ConflictComparison,
   ConflictDecision,
+  ConflictModalMode,
   DiskSpaceCheck,
   ItemId,
   VerifierEntryId
 } from '../../domain/types.ts';
 import { useModalVars } from '../composables/useGsapMotion.ts';
-import { formatProbeSpecRows, formatSizeDeltaMb, formatSizeMb } from '../utils/formatters.ts';
+import { formatBytesHuman, formatProbeSpecRows, formatSizeDeltaMb } from '../utils/formatters.ts';
 
 const props = withDefaults(
   defineProps<{
@@ -18,10 +19,11 @@ const props = withDefaults(
     readonly title?: string;
     readonly diskSpace?: readonly DiskSpaceCheck[];
     readonly initialResolutions?: Readonly<Partial<Record<TId, ConflictDecision>>>;
-    readonly allowSaveOnly?: boolean;
+    readonly mode?: ConflictModalMode;
   }>(),
   {
-    title: 'Pre-Flight Conflicts'
+    title: 'Pre-Flight Conflicts',
+    mode: 'confirm'
   }
 );
 
@@ -118,6 +120,31 @@ function getComparisonSides(conflict: ConflictComparison<TId>): readonly Compari
   ];
 }
 
+const FULL_PERCENT = 100;
+const MIN_VISIBLE_BAR_PERCENT = 1;
+const PERCENT_TENTH_SCALE = 1000;
+const PERCENT_TENTH_DIVISOR = 10;
+
+function getDiskUsagePercent(disk: DiskSpaceCheck): number {
+  if (disk.availableBytes <= 0) {
+    return FULL_PERCENT;
+  }
+  if (disk.requiredBytes <= 0) {
+    return 0;
+  }
+  const raw =
+    Math.round((disk.requiredBytes / disk.availableBytes) * PERCENT_TENTH_SCALE) /
+    PERCENT_TENTH_DIVISOR;
+  return Math.min(FULL_PERCENT, Math.max(MIN_VISIBLE_BAR_PERCENT, raw));
+}
+
+const diskSpaceRows = computed(() =>
+  (props.diskSpace ?? []).map((disk) => ({
+    disk,
+    usagePercent: getDiskUsagePercent(disk)
+  }))
+);
+
 const allResolved = computed((): boolean => resolvedCount.value === props.conflicts.length);
 </script>
 
@@ -139,15 +166,33 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
         </button>
       </header>
 
-      <div v-if="diskSpace && diskSpace.length > 0" class="vo-disk-list">
+      <div v-if="diskSpaceRows.length > 0" class="vo-disk-list">
         <div
-          v-for="disk in diskSpace"
+          v-for="{ disk, usagePercent } in diskSpaceRows"
           :key="disk.category"
-          class="vo-mono vo-disk-item"
+          class="vo-disk-item"
           :class="{ 'vo-disk-item--low': !disk.sufficient }"
         >
-          {{ disk.category }}: {{ formatSizeMb(disk.availableBytes) }} free /
-          {{ formatSizeMb(disk.requiredBytes) }} required
+          <div class="vo-disk-item__head vo-mono">
+            <span class="vo-disk-item__category">{{ disk.category }}</span>
+            <span class="vo-disk-item__metrics">
+              {{ formatBytesHuman(disk.requiredBytes) }} required /
+              {{ formatBytesHuman(disk.availableBytes) }} free ({{ usagePercent }}%)
+            </span>
+          </div>
+          <div
+            class="vo-disk-bar"
+            role="progressbar"
+            :aria-valuenow="usagePercent"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <div
+              class="vo-disk-bar__fill"
+              :class="{ 'vo-disk-bar__fill--low': !disk.sufficient }"
+              :style="{ width: `${usagePercent}%` }"
+            />
+          </div>
         </div>
       </div>
 
@@ -243,22 +288,25 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
         </button>
         <div class="vo-modal-footer-actions">
           <button
-            v-if="allowSaveOnly"
+            v-if="mode !== 'confirm'"
             type="button"
             class="vo-btn"
+            :class="{ 'vo-btn--primary': mode === 'save-only' }"
             :disabled="!allResolved"
             @click="emit('save', decisions)"
           >
-            <span aria-hidden="true">💾</span> Save Decisions
+            <span aria-hidden="true">💾</span>
+            {{ conflicts.length === 1 ? 'Save Decision' : 'Save Decisions' }}
           </button>
           <button
+            v-if="mode !== 'save-only'"
             type="button"
             class="vo-btn vo-btn--primary"
             :disabled="!allResolved"
             @click="emit('confirm', decisions)"
           >
             <span aria-hidden="true">⚡</span>
-            {{ allowSaveOnly ? 'Confirm & Apply' : 'Confirm & Process' }}
+            {{ mode === 'save-and-confirm' ? 'Confirm & Apply' : 'Confirm & Process' }}
           </button>
         </div>
       </footer>
@@ -292,6 +340,61 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
   gap: var(--vo-space-2);
   font-size: var(--vo-text-xs);
   margin-top: var(--vo-space-3);
+}
+
+.vo-disk-list {
+  display: grid;
+  gap: var(--vo-space-2);
+  margin-block-start: var(--vo-space-3);
+}
+
+.vo-disk-item {
+  display: grid;
+  gap: var(--vo-space-1);
+  padding: var(--vo-space-2) var(--vo-space-3);
+  border: 1px solid var(--vo-border);
+  border-radius: var(--vo-radius-sm);
+  background: var(--vo-surface-elevated);
+}
+
+.vo-disk-item--low {
+  background: color-mix(in oklch, var(--vo-danger) 8%, var(--vo-surface-elevated));
+  border-color: var(--vo-danger);
+}
+
+.vo-disk-item__head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--vo-space-2);
+  font-size: var(--vo-text-xs);
+}
+
+.vo-disk-item__category {
+  font-weight: var(--vo-weight-semibold);
+}
+
+.vo-disk-item__metrics {
+  color: var(--vo-text-muted);
+}
+
+.vo-disk-bar {
+  width: 100%;
+  height: var(--vo-space-2);
+  border-radius: var(--vo-radius-sm);
+  background: color-mix(in oklch, var(--vo-border) 60%, transparent);
+  overflow: hidden;
+}
+
+.vo-disk-bar__fill {
+  height: 100%;
+  border-radius: var(--vo-radius-sm);
+  background: var(--vo-success);
+}
+
+.vo-disk-bar__fill--low {
+  background: var(--vo-danger);
 }
 
 .vo-bulk-label {

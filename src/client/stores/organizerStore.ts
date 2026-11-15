@@ -2,6 +2,7 @@ import gsap from 'gsap';
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
+import { ensureValidAudioTrackSelection } from '../../domain/trackSelection.ts';
 import type {
   ActiveJobProgress,
   ClientId,
@@ -524,11 +525,17 @@ export const useOrganizerStore = defineStore('organizer', () => {
           trackSelection: {
             ...item.trackSelection,
             subtitleMergeMode: sourceItem.trackSelection.subtitleMergeMode,
-            audioTracks: item.trackSelection.audioTracks.map((t, idx) => ({
-              ...t,
-              language: sourceItem.trackSelection.audioTracks[idx]?.language ?? t.language,
-              isDefault: sourceItem.trackSelection.audioTracks[idx]?.isDefault ?? t.isDefault
-            }))
+            audioTracks: ensureValidAudioTrackSelection(
+              item.trackSelection.audioTracks.map((t, idx) => {
+                const src = sourceItem.trackSelection.audioTracks[idx];
+                return {
+                  ...t,
+                  include: src?.include ?? t.include,
+                  language: src?.language ?? t.language,
+                  isDefault: src?.isDefault ?? t.isDefault
+                };
+              })
+            )
           }
         });
       }

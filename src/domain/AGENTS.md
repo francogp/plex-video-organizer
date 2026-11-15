@@ -21,6 +21,7 @@ Domain Layer Maintainers.
 - [types.ts](types.ts): Branded IDs, Valibot schemas, and domain DTO interfaces.
 - [plexFormatter.ts](plexFormatter.ts): Deterministic Plex sanitization, split-part, edition, and movie/TV path formatting.
 - [plexTagExtractor.ts](plexTagExtractor.ts): Deterministic Plex movie bracket tag extraction from filename, FFprobe, and track selection.
+- [trackSelection.ts](trackSelection.ts): Pure audio track selection invariant helper (`ensureValidAudioTrackSelection`).
 - [libraryVerifier.ts](libraryVerifier.ts): Pure Plex library compliance verifier and bottom-up rename step planner.
 
 ## Work Guidance

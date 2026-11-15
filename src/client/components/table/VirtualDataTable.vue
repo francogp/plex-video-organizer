@@ -411,4 +411,20 @@ defineExpose({
 .vo-td--right {
   text-align: end;
 }
+
+.vo-vtable tr.vo-row--has-conflict {
+  background-color: color-mix(in oklch, var(--vo-danger) 7%, transparent);
+
+  td:first-child {
+    border-inline-start: var(--vo-space-1) solid var(--vo-danger);
+  }
+}
+
+.vo-vtable tr.vo-row--has-conflict-resolved {
+  background-color: color-mix(in oklch, var(--vo-warning) 6%, transparent);
+
+  td:first-child {
+    border-inline-start: var(--vo-space-1) solid var(--vo-warning);
+  }
+}
 </style>
