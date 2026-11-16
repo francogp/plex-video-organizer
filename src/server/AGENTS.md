@@ -14,6 +14,8 @@ Backend Maintainers.
 - Non-blocking startup & initialization gate: [index.ts](index.ts) binds the HTTP port immediately while `validateMountDirectories()` and `JobRunner.init()` run asynchronously; `JobRunner` exposes `initStatus` (`'initializing' | 'ready'`) in `getState()`, rejects mutations with `409 SERVER_INITIALIZING` until ready, and `scanner.ts` / `libraryVerifierService.ts` cache `ffprobe` results in `plex-video-organizer.sqlite` via `scanCacheDb.ts` with bounded concurrency.
 - Persist global language preferences (`preferredLanguages`, `audioPreferredLanguages`) in `system_config` via `ScanCacheDb` as the Single Source of Truth, and `await` persistence deterministically inside `JobRunner.updatePreferences()` before returning.
 - Enforce `strict-catch-narrowing` in Express handlers (`routes.ts`) by checking `err instanceof Error` instead of coercing unknown errors.
+- Resolve cached input and subtitle file paths via `resolvePortableInputPath` (`config.ts`) to support SQLite caches shared between Docker (`/data/input/...`) and local Windows development.
+- Persist `conflictResolutions` in `system_config` via `ScanCacheDb` using `sanitizeConflictResolutions`, pruning stale item keys in `JobRunner` after completing a scan or job.
 - Designed strictly for trusted LAN deployments: `X-Client-Id` provides an optimistic collaborative session lock rather than HTTP authentication, so the server must not be exposed directly to untrusted networks without an authenticating reverse proxy.
 
 ## Key Files

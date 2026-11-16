@@ -4,11 +4,13 @@ import path from 'node:path';
 import {
   asIso639_2Code,
   type ExternalSubtitleFile,
+  type ImdbId,
   type LogLevel,
   type ScannedItem,
   type SubtitleCandidate
 } from '../../../domain/types.ts';
-import type { AppConfig } from '../../config.ts';
+import { type AppConfig, resolvePortableInputPath } from '../../config.ts';
+import { lookupSeriesByTvdbId } from '../metadata/tvdbClient.ts';
 import { searchGestdownSubtitles } from './providers/gestdownProvider.ts';
 import {
   resolveOpenSubtitlesRestDownloadUrl,
@@ -40,14 +42,15 @@ export interface SubtitleServiceDeps {
 function buildSearchQuery(
   item: ScannedItem,
   videoHash?: string,
-  videoSize?: number
+  videoSize?: number,
+  resolvedImdbId?: ImdbId
 ): SubtitleSearchQuery {
   const meta = item.selectedMetadata;
   return {
     mediaKind: item.mediaKind,
     title: meta?.title ?? item.parsedTitle,
     year: meta?.year ?? item.parsedYear,
-    imdbId: meta?.imdbId,
+    imdbId: meta?.imdbId ?? resolvedImdbId,
     tvdbId: meta?.tvdbId,
     seasonNumber: item.episode?.seasonNumber,
     episodeNumber: item.episode?.episodeStart,
@@ -111,7 +114,12 @@ export async function searchSpanishSubtitlesForItem(
   let videoHash: string | undefined;
   let videoSize: number | undefined;
   try {
-    const hashInfo = await computeHash(item.sourcePath);
+    const readableVideoPath = await resolvePortableInputPath(
+      config,
+      item.sourcePath,
+      item.relativePath
+    );
+    const hashInfo = await computeHash(readableVideoPath);
     videoHash = hashInfo.videoHash;
     videoSize = hashInfo.videoSize;
   } catch (err) {
@@ -119,7 +127,21 @@ export async function searchSpanishSubtitlesForItem(
     onLog?.('warn', `Video hash skipped for ${item.fileName}: ${msg}`);
   }
 
-  const query = buildSearchQuery(item, videoHash, videoSize);
+  let resolvedImdbId: ImdbId | undefined = item.selectedMetadata?.imdbId;
+  if (!resolvedImdbId && item.selectedMetadata?.tvdbId && config.tvdbApiKey) {
+    try {
+      const series = await lookupSeriesByTvdbId(
+        item.selectedMetadata.tvdbId,
+        config.tvdbApiKey,
+        fetchFn
+      );
+      resolvedImdbId = series?.imdbId;
+    } catch {
+      // Non-fatal fallback: continue searching with tvdbId/title/hash.
+    }
+  }
+
+  const query = buildSearchQuery(item, videoHash, videoSize, resolvedImdbId);
   const keylessTasks: (() => Promise<readonly SubtitleRawCandidate[]>)[] = [
     () => searchOpenSubtitlesStremio(query, fetchFn),
     () => searchGestdownSubtitles(query, fetchFn),

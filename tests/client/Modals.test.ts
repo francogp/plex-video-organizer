@@ -7,6 +7,7 @@ import { defineComponent, ref } from 'vue';
 import App from '../../src/client/App.vue';
 import ConflictResolutionModal from '../../src/client/components/ConflictResolutionModal.vue';
 import MetadataSearchModal from '../../src/client/components/MetadataSearchModal.vue';
+import SubtitlePickerModal from '../../src/client/components/SubtitlePickerModal.vue';
 import SubtitlePreviewModal from '../../src/client/components/SubtitlePreviewModal.vue';
 import TrackInspectorModal from '../../src/client/components/TrackInspectorModal.vue';
 import { useGsapMotion } from '../../src/client/composables/useGsapMotion.ts';
@@ -393,11 +394,100 @@ describe('Client Modals & App', () => {
       }
     });
 
+    expect(wrapper.find('video').attributes('controls')).toBeUndefined();
     expect(wrapper.find('video').attributes('src')).toBe('/api/queue/items/preview-1/stream');
     expect(wrapper.find('track').attributes('src')).toBe(
       '/api/queue/items/preview-1/subtitles/preview.vtt'
     );
+    expect(wrapper.find('#vo-preview-seek').attributes('max')).toBe('90');
+    await wrapper.find('button[aria-label="Toggle subtitles"]').trigger('click');
+    expect(wrapper.find('button[aria-label="Toggle subtitles"]').text()).toContain('CC Off');
+    await wrapper.find('button[aria-label="Toggle mute"]').trigger('click');
+    expect(wrapper.find('button[aria-label="Toggle mute"]').text()).toContain('Muted');
+    const jumpForwardBtn = wrapper.findAll('button').find((btn) => btn.text().includes('+30s'));
+    expect(jumpForwardBtn).toBeDefined();
+    await jumpForwardBtn!.trigger('click');
+    expect(wrapper.find('video').attributes('src')).toBe('/api/queue/items/preview-1/stream?t=30');
+    expect(wrapper.find('track').attributes('src')).toBe(
+      '/api/queue/items/preview-1/subtitles/preview.vtt?offset=30'
+    );
     await wrapper.find('button[aria-label="Close subtitle preview"]').trigger('click');
+    expect(wrapper.emitted('close')).toHaveLength(1);
+  });
+
+  it('SubtitlePickerModal renders >5 candidates, filters by release, and emits download and close', async () => {
+    const item: ScannedItem = {
+      id: asItemId('sub-pick-1'),
+      sourcePath: '/data/input/Mr.Robot.S01E05.mkv',
+      relativePath: 'Mr.Robot.S01E05.mkv',
+      fileName: 'Mr.Robot.S01E05.mkv',
+      mediaKind: 'tv',
+      category: 'tv-shows',
+      parsedTitle: 'Mr. Robot',
+      include: true,
+      tags: [],
+      episodeOrder: 'aired',
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 2700,
+        sizeBytes: 1000,
+        bitrateBps: 1000,
+        videoStreams: [],
+        audioStreams: [],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      trackSelection: {
+        audioTracks: [],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false
+      },
+      warnings: []
+    };
+
+    const candidates = Array.from({ length: 8 }, (_, idx) => ({
+      id: `sub-${String(idx)}`,
+      provider: 'opensubtitles-rest' as const,
+      language: asIso639_2Code('spa'),
+      variant: idx === 7 ? ('latam' as const) : ('neutral' as const),
+      releaseName:
+        idx === 7 ? 'Mr.Robot.S01E05.1080p.AMZ' : `Mr.Robot.S01E05.Release.${String(idx)}`,
+      downloadUrl: `https://example.com/${String(idx)}.srt`,
+      hashMatch: idx === 7,
+      downloadCount: 100 - idx,
+      score: idx === 7 ? 1380 : 200 + idx
+    }));
+
+    const wrapper = mount(SubtitlePickerModal, {
+      props: {
+        item,
+        picker: {
+          itemId: item.id,
+          loading: false,
+          downloadingId: null,
+          error: null,
+          candidates
+        }
+      }
+    });
+
+    expect(wrapper.findAll('.vo-subtitle-picker__row')).toHaveLength(8);
+    expect(wrapper.findAll('.vo-subtitle-picker__release')[0]?.text()).toBe(
+      'Mr.Robot.S01E05.1080p.AMZ'
+    );
+    expect(wrapper.text()).toContain('8 / 8');
+
+    await wrapper.find('#vo-subtitle-filter').setValue('AMZ');
+    expect(wrapper.findAll('.vo-subtitle-picker__row')).toHaveLength(1);
+    expect(wrapper.text()).toContain('Mr.Robot.S01E05.1080p.AMZ');
+
+    await wrapper.find('.vo-subtitle-picker__dl').trigger('click');
+    expect(wrapper.emitted('download')?.[0]).toEqual([item, candidates[7]]);
+
+    await wrapper.find('button[aria-label="Close subtitle picker"]').trigger('click');
     expect(wrapper.emitted('close')).toHaveLength(1);
   });
 

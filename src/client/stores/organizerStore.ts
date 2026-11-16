@@ -147,6 +147,9 @@ export const useOrganizerStore = defineStore('organizer', () => {
     if (state.audioPreferredLanguages && state.audioPreferredLanguages.length > 0) {
       audioPreferredLanguages.value = state.audioPreferredLanguages;
     }
+    if (state.conflictResolutions) {
+      savedConflictResolutions.value = { ...state.conflictResolutions };
+    }
     if (state.phase === 'ERROR' && state.lastError) {
       errorMessage.value = state.lastError;
     }
@@ -419,10 +422,30 @@ export const useOrganizerStore = defineStore('organizer', () => {
     stopSyncFallback();
   }
 
-  function setConflictResolutions(
+  async function setConflictResolutions(
     resolutions: Readonly<Partial<Record<ItemId, ConflictDecision>>>
-  ): void {
-    savedConflictResolutions.value = { ...resolutions };
+  ): Promise<void> {
+    const previous = { ...savedConflictResolutions.value };
+    const next = { ...resolutions };
+    savedConflictResolutions.value = next;
+    try {
+      await enqueueMutation(async () => {
+        const state = await requestRevisionMutation<OrganizerStatePayload>(
+          '/api/conflict-resolutions',
+          () => ({
+            method: 'POST',
+            body: JSON.stringify({
+              revision: revision.value,
+              conflictResolutions: next
+            })
+          })
+        );
+        applyServerState(state);
+      });
+    } catch (err: unknown) {
+      savedConflictResolutions.value = previous;
+      errorMessage.value = err instanceof Error ? err.message : String(err);
+    }
   }
 
   function clearConflictResolutions(): void {
@@ -447,7 +470,6 @@ export const useOrganizerStore = defineStore('organizer', () => {
   }
 
   async function startScan(): Promise<void> {
-    clearConflictResolutions();
     lastSseActivityAt = performance.now();
     await requestJson<{ readonly revision: number }>('/api/scan', { method: 'POST' });
     if (phase.value !== 'SCANNING') {
@@ -640,15 +662,6 @@ export const useOrganizerStore = defineStore('organizer', () => {
     return res.downloaded;
   }
 
-  async function openItemInPlayer(
-    itemId: ItemId
-  ): Promise<{ readonly launched: boolean; readonly reason?: string }> {
-    return requestJson<{ readonly launched: boolean; readonly reason?: string }>(
-      `/api/queue/items/${encodeURIComponent(itemId)}/open-player`,
-      { method: 'POST', body: JSON.stringify({}) }
-    );
-  }
-
   async function runPreflight(): Promise<boolean> {
     return enqueueMutation(async () => {
       const res = await requestRevisionMutation<{
@@ -728,7 +741,6 @@ export const useOrganizerStore = defineStore('organizer', () => {
     searchMetadata,
     searchItemSubtitles,
     downloadItemSubtitle,
-    openItemInPlayer,
     runPreflight,
     refreshPreflightSafely,
     setConflictResolutions,

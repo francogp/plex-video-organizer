@@ -448,6 +448,27 @@ describe('JobRunner & HTTP routes', () => {
       const okPayload = (await okRes.json()) as { readonly preferredLanguages?: readonly string[] };
       expect(okPayload.preferredLanguages).toEqual(['eng', 'spa', 'native']);
 
+      const conflictRes = await fetch(`${baseUrl}/api/conflict-resolutions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Id': 'clientA:1' },
+        body: JSON.stringify({
+          revision: runner.getState().revision,
+          conflictResolutions: { 'ep-1': 'overwrite', 'ep-2': 'invalid' }
+        })
+      });
+      expect(conflictRes.status).toBe(200);
+      const conflictPayload = (await conflictRes.json()) as {
+        readonly conflictResolutions?: Readonly<Record<string, string>>;
+      };
+      expect(conflictPayload.conflictResolutions).toEqual({ 'ep-1': 'overwrite' });
+
+      // Completing a scan prunes stale conflictResolutions that are no longer in items
+      await runner.startScan(asClientId('clientA:1'));
+      for (let i = 0; i < 40 && runner.getState().phase === 'SCANNING'; i += 1) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      expect(runner.getState().conflictResolutions).toEqual({});
+
       const badRes = await fetch(`${baseUrl}/api/preferences`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

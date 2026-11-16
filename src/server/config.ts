@@ -128,3 +128,27 @@ export async function validateMountDirectories(config: AppConfig): Promise<reado
   }
   return errors;
 }
+
+/** Resolves a stored file path across host boundaries (e.g. Docker `/data/input` vs Windows `inputDir`). */
+export async function resolvePortableInputPath(
+  config: Pick<AppConfig, 'inputDir' | 'configDir'>,
+  storedPath: string,
+  relativePath?: string
+): Promise<string> {
+  const candidates: string[] = [storedPath];
+  if (relativePath) {
+    candidates.push(path.join(config.inputDir, relativePath));
+  }
+  if (storedPath.startsWith('/config/')) {
+    candidates.push(path.join(config.configDir, storedPath.slice('/config/'.length)));
+  }
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // Try next candidate root when cache was populated from another host.
+    }
+  }
+  return relativePath ? path.join(config.inputDir, relativePath) : storedPath;
+}

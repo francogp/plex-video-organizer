@@ -17,6 +17,8 @@ Frontend Maintainers.
 - Modularize large table/view SFCs (`QueueTable.vue`, `VerifierView.vue`, `App.vue`) into dedicated header, toolbar, and cell sub-components, keeping shared cell layout and accessibility utilities (`.vo-audio-cell`, `.vo-audio-controls`, `.vo-sr-only`) in `src/client/styles/main.scss` rather than duplicating scoped CSS blocks.
 - Match selected metadata candidates in `QueueMetadataCell.vue` by value (`provider`, `externalId`, `title`, `year`) rather than object reference (`===`) so selections survive API refreshes and page reloads.
 - Parameterize `LanguageOrderBar.vue` with Vue 3 `generic="T extends string"` and propagate `props.disabled` to every chip action button (`Move left`, `Move right`, `Remove`) in addition to the add-language `<select>`.
+- In `SubtitlePreviewModal.vue`, key `<track :key="vttSrc">` on seek to prevent stale cue accumulation in Chromium, explicitly release the `<video>` stream (`pause` + `removeAttribute('src')` + `load()`) on close/unmount/item change, and suppress benign `AbortError` rejections from `play()`.
+- Render Spanish subtitle discovery in `SubtitlePickerModal.vue` sorted by `hashMatch` first and descending `score` rather than truncated inline lists inside `QueueTracksCell.vue`.
 
 ## Key Files
 
@@ -27,7 +29,7 @@ Frontend Maintainers.
 - [QueueSourceCell.vue](QueueSourceCell.vue): Source/output path chain, edition input, and inline conflict alert cell for `QueueTable.vue`.
 - [QueueMetadataCell.vue](QueueMetadataCell.vue): Metadata match panel, candidate selector, and search button cell for `QueueTable.vue`.
 - [QueueAudioCell.vue](QueueAudioCell.vue): Audio volumedetect comparison panel and normalization/codec controls cell for `QueueTable.vue`.
-- [QueueTracksCell.vue](QueueTracksCell.vue): Track summary, track inspector trigger, and inline Spanish subtitle picker cell for `QueueTable.vue`.
+- [QueueTracksCell.vue](QueueTracksCell.vue): Track summary, track inspector trigger, Spanish subtitle modal trigger, and preview trigger cell for `QueueTable.vue`.
 - [QueueConflictAlert.vue](QueueConflictAlert.vue): Per-row destination conflict badge and action trigger for `QueueTable.vue`.
 - [QueueTracksPanel.vue](QueueTracksPanel.vue): Audio/subtitle count overview and subtitle status panel for `QueueTable.vue`.
 - [ParallelTasksList.vue](ParallelTasksList.vue): Shared multi-row parallel slot progress list for `OrganizerStatusBar.vue` and `VerifierView.vue`.
@@ -36,6 +38,7 @@ Frontend Maintainers.
 - [ServerLogsPanel.vue](ServerLogsPanel.vue): Server log viewer panel with clear action for `App.vue`.
 - [MetadataSearchModal.vue](MetadataSearchModal.vue): Interactive provider search and manual IMDb/TVDB ID override modal.
 - [TrackInspectorModal.vue](TrackInspectorModal.vue): Audio/subtitle track inspector and series batch apply.
+- [SubtitlePickerModal.vue](SubtitlePickerModal.vue): Searchable Spanish subtitle candidate picker modal sorted by best match.
 - [SubtitlePreviewModal.vue](SubtitlePreviewModal.vue): In-browser HTML5 video + WebVTT subtitle sync preview modal.
 - [ConflictResolutionModal.vue](ConflictResolutionModal.vue): Blocking pre-flight conflict comparator.
 - [ConflictActionButton.vue](ConflictActionButton.vue): Shared conflict action button (`Resolve conflict` / `Overwrite` / `Ignore`) for `QueueTable.vue` and `VerifierView.vue`.

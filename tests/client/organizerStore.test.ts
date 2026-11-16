@@ -381,7 +381,21 @@ describe('organizerStore', () => {
     });
 
     await store.refreshPreflightSafely();
-    store.setConflictResolutions({ [asItemId('ep-1')]: 'overwrite' });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify(
+            makeBaseState({
+              revision: 10,
+              conflictResolutions: { [asItemId('ep-1')]: 'overwrite' }
+            })
+          ),
+          { status: 200 }
+        )
+      )
+    );
+    await store.setConflictResolutions({ [asItemId('ep-1')]: 'overwrite' });
     expect(store.savedConflictResolutions[asItemId('ep-1')]).toBe('overwrite');
     expect(store.hasUnresolvedConflicts).toBe(false);
     store.clearConflictResolutions();
@@ -461,7 +475,21 @@ describe('organizerStore', () => {
     );
     await store.refreshPreflightSafely();
     expect(store.hasUnresolvedConflicts).toBe(true);
-    store.setConflictResolutions({ [asItemId('ep-1')]: 'ignore' });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        new Response(
+          JSON.stringify(
+            makeBaseState({
+              revision: 12,
+              conflictResolutions: { [asItemId('ep-1')]: 'ignore' }
+            })
+          ),
+          { status: 200 }
+        )
+      )
+    );
+    await store.setConflictResolutions({ [asItemId('ep-1')]: 'ignore' });
     expect(store.hasUnresolvedConflicts).toBe(false);
 
     listeners.get('state')?.(

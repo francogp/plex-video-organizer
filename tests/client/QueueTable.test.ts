@@ -674,7 +674,7 @@ describe('QueueTable', () => {
         disabled: false,
         subtitlePicker: {
           itemId: item.id,
-          loading: false,
+          loading: true,
           downloadingId: null,
           error: null,
           candidates: [candidate]
@@ -682,15 +682,8 @@ describe('QueueTable', () => {
       }
     });
 
-    const closePickerBtn = wrapper.find('button[aria-label="Close subtitle picker"]');
-    expect(closePickerBtn.exists()).toBe(true);
-    await closePickerBtn.trigger('click');
-    expect(wrapper.emitted('close-subtitle-picker')).toHaveLength(1);
-
-    const candBtn = wrapper.findAll('button').find((b) => b.text().includes('Hash'));
-    expect(candBtn).toBeDefined();
-    await candBtn!.trigger('click');
-    expect(wrapper.emitted('download-subtitle')?.[0]).toEqual([item, candidate]);
+    const loadingSubBtn = wrapper.findAll('button').find((b) => b.text().includes('Sub spa'));
+    expect(loadingSubBtn?.attributes('disabled')).toBeDefined();
 
     const testBtn = wrapper.findAll('button').find((b) => b.text().includes('Test'));
     expect(testBtn).toBeDefined();

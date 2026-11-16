@@ -440,6 +440,7 @@ export interface OrganizerStatePayload {
   readonly verifier?: VerifierState;
   readonly preferredLanguages?: readonly MetadataLanguageCode[];
   readonly audioPreferredLanguages?: readonly AudioLanguageCode[];
+  readonly conflictResolutions?: Readonly<Partial<Record<ItemId, ConflictDecision>>>;
 }
 
 export interface SseProgressEvent {
@@ -485,4 +486,17 @@ export interface MetadataLookupOptions {
   readonly onLog?: (level: LogLevel, message: string) => void;
   readonly throwOnFailure?: boolean;
   readonly preferredLanguages?: readonly MetadataLanguageCode[];
+}
+
+/** Filters an untrusted record into a typed map of valid `ConflictDecision` entries. */
+export function sanitizeConflictResolutions(
+  raw: Record<string, unknown>
+): Partial<Record<ItemId, ConflictDecision>> {
+  const result: Partial<Record<ItemId, ConflictDecision>> = {};
+  for (const [id, decision] of Object.entries(raw)) {
+    if (decision === 'overwrite' || decision === 'ignore') {
+      result[asItemId(id)] = decision;
+    }
+  }
+  return result;
 }

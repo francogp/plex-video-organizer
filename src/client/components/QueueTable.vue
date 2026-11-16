@@ -14,8 +14,7 @@ import type {
   ItemId,
   MediaKind,
   OutputCategory,
-  ScannedItem,
-  SubtitleCandidate
+  ScannedItem
 } from '../../domain/types.ts';
 import { formatSizeMb } from '../utils/formatters.ts';
 import QueueAudioCell from './QueueAudioCell.vue';
@@ -99,8 +98,6 @@ const emit = defineEmits<{
   (e: 'bulk-category', itemIds: readonly ItemId[], category: OutputCategory): void;
   (e: 'inspect-tracks', item: ScannedItem): void;
   (e: 'search-subtitles', item: ScannedItem): void;
-  (e: 'download-subtitle', item: ScannedItem, candidate: SubtitleCandidate): void;
-  (e: 'close-subtitle-picker'): void;
   (e: 'preview-subtitle', item: ScannedItem): void;
   (e: 'change-audio-normalization', item: ScannedItem, config: AudioNormalizationConfig): void;
   (e: 'bulk-audio-normalization', itemIds: readonly ItemId[], mode: AudioNormalizationMode): void;
@@ -709,8 +706,6 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
           :subtitle-picker="props.subtitlePicker"
           @inspect-tracks="emit('inspect-tracks', row)"
           @search-subtitles="emit('search-subtitles', row)"
-          @close-subtitle-picker="emit('close-subtitle-picker')"
-          @download-subtitle="emit('download-subtitle', row, $event)"
           @preview-subtitle="emit('preview-subtitle', row)"
         />
       </template>

@@ -5,12 +5,15 @@ import path from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
 import { SCAN_CACHE_RETENTION_MS, isPermissionOrReadOnlyError } from '../../domain/constants.ts';
-import type {
-  AudioLanguageCode,
-  AudioTrackAnalysis,
-  MediaProbeSummary,
-  MetadataLanguageCode,
-  ScannedItem
+import {
+  sanitizeConflictResolutions,
+  type AudioLanguageCode,
+  type AudioTrackAnalysis,
+  type ConflictDecision,
+  type ItemId,
+  type MediaProbeSummary,
+  type MetadataLanguageCode,
+  type ScannedItem
 } from '../../domain/types.ts';
 import { isDirUnwritable } from './fileMover.ts';
 
@@ -164,6 +167,8 @@ export class ScanCacheDb {
   readonly #getDbVersionStmt: StatementSync;
   readonly #getPreferencesStmt: StatementSync;
   readonly #upsertPreferencesStmt: StatementSync;
+  readonly #getConflictResolutionsStmt: StatementSync;
+  readonly #upsertConflictResolutionsStmt: StatementSync;
   #closed = false;
 
   public constructor(db: DatabaseSync, dbPath = ':memory:') {
@@ -242,6 +247,13 @@ export class ScanCacheDb {
     );
     this.#upsertPreferencesStmt = this.#db.prepare(`
       INSERT INTO system_config (key, value) VALUES ('preferences', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `);
+    this.#getConflictResolutionsStmt = this.#db.prepare(
+      "SELECT value FROM system_config WHERE key = 'conflict_resolutions'"
+    );
+    this.#upsertConflictResolutionsStmt = this.#db.prepare(`
+      INSERT INTO system_config (key, value) VALUES ('conflict_resolutions', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `);
   }
@@ -407,8 +419,8 @@ export class ScanCacheDb {
     }
   }
 
-  public getPreferences(): PersistedPreferences | null {
-    const row = this.#getPreferencesStmt.get();
+  #readSystemConfigObject(stmt: StatementSync): Record<string, unknown> | null {
+    const row = stmt.get();
     if (!row || typeof row.value !== 'string') {
       return null;
     }
@@ -416,19 +428,38 @@ export class ScanCacheDb {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return null;
     }
-    return parsed;
+    return parsed as Record<string, unknown>;
   }
 
-  public savePreferences(prefs: PersistedPreferences): void {
-    const json = JSON.stringify(prefs);
+  #writeSystemConfigObject(stmt: StatementSync, payload: unknown): void {
+    const json = JSON.stringify(payload);
     this.#db.exec('BEGIN IMMEDIATE');
     try {
-      this.#upsertPreferencesStmt.run(json);
+      stmt.run(json);
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  public getPreferences(): PersistedPreferences | null {
+    return this.#readSystemConfigObject(this.#getPreferencesStmt);
+  }
+
+  public savePreferences(prefs: PersistedPreferences): void {
+    this.#writeSystemConfigObject(this.#upsertPreferencesStmt, prefs);
+  }
+
+  public getConflictResolutions(): Partial<Record<ItemId, ConflictDecision>> {
+    const parsed = this.#readSystemConfigObject(this.#getConflictResolutionsStmt);
+    return parsed ? sanitizeConflictResolutions(parsed) : {};
+  }
+
+  public saveConflictResolutions(
+    resolutions: Readonly<Partial<Record<ItemId, ConflictDecision>>>
+  ): void {
+    this.#writeSystemConfigObject(this.#upsertConflictResolutionsStmt, resolutions);
   }
 
   public getAllValidMetadata(nowMs: number = nowEpochMs()): readonly {

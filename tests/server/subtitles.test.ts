@@ -1,7 +1,9 @@
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
-import http from 'node:http';
+import http, { type ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { deflateRawSync } from 'node:zlib';
 
 import { describe, expect, it, vi } from 'vite-plus/test';
@@ -61,6 +63,7 @@ import {
   asImdbId,
   asIso639_2Code,
   asItemId,
+  asTvdbId,
   type ScannedItem
 } from '../../src/domain/types.ts';
 import { loadConfig } from '../../src/server/config.ts';
@@ -68,8 +71,9 @@ import { createRequestHandler } from '../../src/server/routes.ts';
 import { JobRunner } from '../../src/server/services/jobRunner.ts';
 import { scanLibrariesForCompliance } from '../../src/server/services/libraryVerifierService.ts';
 import {
-  openInOsPlayer,
-  streamSubtitlePreviewVtt
+  type PreviewSpawnFn,
+  streamSubtitlePreviewVtt,
+  streamTranscodedPreview
 } from '../../src/server/services/subtitles/playerPreview.ts';
 import { searchGestdownSubtitles } from '../../src/server/services/subtitles/providers/gestdownProvider.ts';
 import {
@@ -181,6 +185,44 @@ describe('subtitles & verifier tag recalculation', () => {
 
     expect(ranked[0]?.id).toBe('2');
     expect(ranked[0]?.score).toBeGreaterThan(ranked[1]?.score ?? 0);
+
+    const releaseRanked = rankSubtitleCandidates(
+      [
+        {
+          id: 'popular-old',
+          provider: 'opensubtitles-rest',
+          language: asIso639_2Code('spa'),
+          variant: 'neutral',
+          releaseName: 'Mr.Robot.S01E05.3xpl0its.1',
+          downloadUrl: 'https://example.com/old.srt',
+          downloadCount: 500_000,
+          hashMatch: false
+        },
+        {
+          id: 'hdtv-mismatch',
+          provider: 'opensubtitles-rest',
+          language: asIso639_2Code('spa'),
+          variant: 'neutral',
+          releaseName: 'Mr.Robot.S01E05.HDTV.x264',
+          downloadUrl: 'https://example.com/hdtv.srt',
+          downloadCount: 200_000,
+          hashMatch: false
+        },
+        {
+          id: 'amz-web',
+          provider: 'opensubtitles-rest',
+          language: asIso639_2Code('spa'),
+          variant: 'neutral',
+          releaseName: 'Mr. Robot s01E05 1080p AMZ',
+          downloadUrl: 'https://example.com/amz.srt',
+          downloadCount: 25,
+          hashMatch: false
+        }
+      ],
+      'Mr.Robot.S01E05.1080p.BluRay.WEB.10bit.DD5.1.x265-POIASD.mkv'
+    );
+    expect(releaseRanked[0]?.id).toBe('amz-web');
+    expect(releaseRanked[2]?.id).toBe('hdtv-mismatch');
   });
 
   it('searches keyless providers and downloads .spa.srt next to input video', async () => {
@@ -670,18 +712,18 @@ describe('subtitles & verifier tag recalculation', () => {
       expect(vttRes.status).toBe(200);
       await expect(vttRes.text()).resolves.toContain('WEBVTT');
 
-      const streamRes = await fetch(
-        `${baseUrl}/api/queue/items/${encodeURIComponent(scannedItem.id)}/stream`,
-        { headers: { Range: 'bytes=0-3' } }
+      const vttOffsetRes = await fetch(
+        `${baseUrl}/api/queue/items/${encodeURIComponent(scannedItem.id)}/subtitles/preview.vtt?offset=5`
       );
-      expect(streamRes.status).toBe(206);
-      await expect(streamRes.text()).resolves.toBe('fake');
+      expect(vttOffsetRes.status).toBe(200);
+      await expect(vttOffsetRes.text()).resolves.toContain('WEBVTT');
 
-      const fullStreamRes = await fetch(
-        `${baseUrl}/api/queue/items/${encodeURIComponent(scannedItem.id)}/stream`
+      const streamRes = await fetch(
+        `${baseUrl}/api/queue/items/${encodeURIComponent(scannedItem.id)}/stream?t=5`
       );
-      expect(fullStreamRes.status).toBe(200);
-      await expect(fullStreamRes.text()).resolves.toBe('fake-video');
+      expect(streamRes.status).toBe(200);
+      expect(streamRes.headers.get('content-type')).toBe('video/mp4');
+      await streamRes.arrayBuffer();
 
       const emptyIdSearchRes = await fetch(`${baseUrl}/api/queue/items//subtitles/search`, {
         method: 'POST',
@@ -702,23 +744,86 @@ describe('subtitles & verifier tag recalculation', () => {
         }
       });
       expect(streamedBody).toContain('WEBVTT');
-      await expect(openInOsPlayer('/tmp/a.mkv', 'linux', {})).resolves.toEqual({
-        launched: false,
-        fallback: 'browser-preview',
-        reason: 'headless'
-      });
-      const fakeSpawn = () => ({ once: () => {}, unref: () => {} });
-      await expect(openInOsPlayer('C:\\v.mkv', 'win32', {}, fakeSpawn)).resolves.toEqual({
-        launched: true
-      });
-      await expect(openInOsPlayer('/v.mkv', 'darwin', {}, fakeSpawn)).resolves.toEqual({
-        launched: true
-      });
-      await expect(
-        openInOsPlayer('/v.mkv', 'linux', { DISPLAY: ':0' }, fakeSpawn)
-      ).resolves.toEqual({
-        launched: true
-      });
+
+      const srtShiftPath = path.join(tmpDir, 'shift.srt');
+      await fs.writeFile(
+        srtShiftPath,
+        '1\n00:00:10,000 --> 00:00:12,000\nToo early\n\n2\n00:00:46,500 --> 00:00:49,250\n{\\an8}Synced line\n',
+        'utf8'
+      );
+      let shiftedVtt = '';
+      await streamSubtitlePreviewVtt(
+        srtShiftPath,
+        {
+          writeHead: () => {},
+          end: (chunk: string) => {
+            shiftedVtt = chunk;
+          }
+        },
+        45
+      );
+      expect(shiftedVtt).not.toContain('Too early');
+      expect(shiftedVtt).toContain('00:00:01.500 --> 00:00:04.250\nSynced line');
+
+      const previewVideoPath = path.join(tmpDir, 'preview.mkv');
+      await fs.writeFile(previewVideoPath, 'dummy');
+      const fakeResEmitter = new EventEmitter();
+      const fakeRes = Object.assign(new PassThrough(), {
+        writeHead: vi.fn(),
+        on: fakeResEmitter.on.bind(fakeResEmitter),
+        off: fakeResEmitter.off.bind(fakeResEmitter)
+      }) as unknown as ServerResponse;
+      const killMock = vi.fn().mockReturnValue(true);
+      let capturedArgs: readonly string[] = [];
+      const fakeSpawn: PreviewSpawnFn = (_cmd, args) => {
+        capturedArgs = args;
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+        const childEmitter = new EventEmitter();
+        queueMicrotask(() => {
+          stdout.end(Buffer.from('ftyp'));
+          childEmitter.emit('exit', 0);
+        });
+        return {
+          stdout,
+          stderr,
+          once: (event, listener) => childEmitter.once(event, listener),
+          kill: killMock
+        };
+      };
+      await streamTranscodedPreview(
+        { sourcePath: previewVideoPath, startSeconds: 120, audioStreamOrder: 2 },
+        fakeRes,
+        fakeSpawn
+      );
+      expect(capturedArgs).toContain('118');
+      expect(capturedArgs).toContain('0:a:2?');
+      expect(capturedArgs).toContain('aac');
+      expect(capturedArgs).toContain('scale=-2:min(720\\,ih)');
+      expect(
+        (fakeRes as unknown as { writeHead: ReturnType<typeof vi.fn> }).writeHead
+      ).toHaveBeenCalledWith(200, expect.objectContaining({ 'Content-Type': 'video/mp4' }));
+
+      // Verify aborting the HTTP response kills the spawned ffmpeg process
+      const abortRes = Object.assign(new PassThrough(), {
+        writeHead: vi.fn()
+      }) as unknown as ServerResponse;
+      const abortKill = vi.fn().mockReturnValue(true);
+      const longSpawn: PreviewSpawnFn = () => {
+        const childEmitter = new EventEmitter();
+        queueMicrotask(() => {
+          abortRes.emit('close');
+          childEmitter.emit('exit', 0);
+        });
+        return {
+          stdout: new PassThrough(),
+          stderr: new PassThrough(),
+          once: (event, listener) => childEmitter.once(event, listener),
+          kill: abortKill
+        };
+      };
+      await streamTranscodedPreview({ sourcePath: previewVideoPath }, abortRes, longSpawn);
+      expect(abortKill).toHaveBeenCalledWith('SIGKILL');
       await expect(
         runner.downloadItemSubtitle(clientId, runner.getState().revision, scannedItem.id)
       ).resolves.toBeDefined();
@@ -1289,6 +1394,95 @@ describe('subtitles & verifier tag recalculation', () => {
       const firstKeyed = events.findIndex((e) => e.startsWith('keyed:'));
       expect(lastKeylessEnd).toBeGreaterThanOrEqual(0);
       expect(firstKeyed).toBeGreaterThan(lastKeylessEnd);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves missing imdbId from TVDB remoteIds before querying OpenSubtitles Stremio', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-tvdb-imdb-'));
+    try {
+      const videoPath = path.join(tmpDir, 'Mr.Robot.S01E05.mkv');
+      await fs.writeFile(videoPath, Buffer.alloc(1024, 3));
+      const cfg = loadConfig({
+        CONFIG_DIR: tmpDir,
+        INPUT_DIR: tmpDir,
+        OUTPUT_MOVIES_DIR: tmpDir,
+        OUTPUT_DOCUMENTARIES_DIR: tmpDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: tmpDir,
+        OUTPUT_TV_SHOWS_DIR: tmpDir,
+        OUTPUT_ANIMATED_SERIES_DIR: tmpDir,
+        TVDB_API_KEY: 'tvdb-test-key'
+      });
+
+      const item: ScannedItem = {
+        id: asItemId('tv-tvdb-only'),
+        sourcePath: videoPath,
+        relativePath: 'Mr.Robot.S01E05.mkv',
+        fileName: 'Mr.Robot.S01E05.mkv',
+        mediaKind: 'tv',
+        category: 'tv-shows',
+        include: true,
+        parsedTitle: 'Mr. Robot',
+        tags: [],
+        episodeOrder: 'aired',
+        episode: { seasonNumber: 1, episodeStart: 5 },
+        probe: {
+          formatName: 'matroska',
+          durationSeconds: 2700,
+          sizeBytes: 1024,
+          bitrateBps: 1000,
+          videoStreams: [],
+          audioStreams: [],
+          subtitleStreams: []
+        },
+        externalSubtitles: [],
+        candidates: [],
+        selectedMetadata: {
+          title: 'Mr. Robot',
+          year: 2015,
+          tvdbId: asTvdbId('289590'),
+          source: 'tvdb'
+        },
+        trackSelection: {
+          audioTracks: [],
+          subtitleMergeMode: 'keep-and-add',
+          includedInternalSubtitles: [],
+          externalSubtitleOrder: [],
+          needsUserPrompt: false
+        },
+        warnings: []
+      };
+
+      const requestedUrls: string[] = [];
+      const fetchFn: typeof fetch = async (input) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        requestedUrls.push(url);
+        if (url.includes('thetvdb.com/v4/login')) {
+          return new Response(JSON.stringify({ data: { token: 'jwt-1' } }), { status: 200 });
+        }
+        if (url.includes('thetvdb.com/v4/series/289590/extended')) {
+          return new Response(
+            JSON.stringify({
+              data: {
+                name: 'Mr. Robot',
+                year: '2015',
+                remoteIds: [{ id: 'tt4158110', sourceName: 'IMDB' }]
+              }
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({ subtitles: [], episodes: [] }), { status: 200 });
+      };
+
+      await searchSpanishSubtitlesForItem(item, cfg, { fetchFn });
+      expect(
+        requestedUrls.some((u) =>
+          decodeURIComponent(u).includes('opensubtitles-v3.strem.io/subtitles/series/tt4158110:1:5')
+        )
+      ).toBe(true);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

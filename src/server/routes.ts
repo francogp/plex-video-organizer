@@ -23,9 +23,8 @@ import {
 } from './services/jobRunner.ts';
 import { MetadataProviderError } from './services/metadata/baseMetadataProvider.ts';
 import {
-  openInOsPlayer,
   streamSubtitlePreviewVtt,
-  streamVideoFile
+  streamTranscodedPreview
 } from './services/subtitles/playerPreview.ts';
 
 const HTTP_OK = 200;
@@ -126,6 +125,250 @@ async function serveStaticDist(
   }
 }
 
+function matchQueueItemRoute(pathname: string, suffix: string): ItemId | null {
+  const prefix = '/api/queue/items/';
+  if (!pathname.startsWith(prefix)) {
+    return null;
+  }
+  const rest = pathname.slice(prefix.length);
+  if (!rest.endsWith(suffix)) {
+    return null;
+  }
+  const rawId = rest.slice(0, -suffix.length);
+  return rawId.length > 0 ? asItemId(rawId) : null;
+}
+
+function readPositiveQuerySeconds(url: URL, key: string): number {
+  const raw = Number(url.searchParams.get(key) ?? '0');
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+async function handleQueueItemRoutes(
+  runner: JobRunner,
+  method: string,
+  pathname: string,
+  url: URL,
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<boolean> {
+  if (method === 'POST') {
+    const searchItemId = matchQueueItemRoute(pathname, '/subtitles/search');
+    if (searchItemId) {
+      requireClientId(req);
+      const candidates = await runner.searchItemSubtitles(searchItemId);
+      sendJson(res, HTTP_OK, { candidates });
+      return true;
+    }
+    const downloadItemId = matchQueueItemRoute(pathname, '/subtitles/download');
+    if (downloadItemId) {
+      const clientId = requireClientId(req);
+      const body = await readJsonBody<{
+        readonly revision: number;
+        readonly candidate?: SubtitleCandidate;
+      }>(req);
+      const result = await runner.downloadItemSubtitle(
+        clientId,
+        body.revision,
+        downloadItemId,
+        body.candidate
+      );
+      sendJson(res, HTTP_OK, result);
+      return true;
+    }
+  }
+
+  if (method === 'GET') {
+    const vttItemId = matchQueueItemRoute(pathname, '/subtitles/preview.vtt');
+    if (vttItemId) {
+      const subPath = await runner.getItemPreviewSubtitlePath(vttItemId);
+      if (!subPath) {
+        sendJson(res, HTTP_NOT_FOUND, {
+          code: 'SUBTITLE_NOT_FOUND',
+          message: 'No external subtitle found for item.'
+        });
+        return true;
+      }
+      await streamSubtitlePreviewVtt(subPath, res, readPositiveQuerySeconds(url, 'offset'));
+      return true;
+    }
+    const streamItemId = matchQueueItemRoute(pathname, '/stream');
+    if (streamItemId) {
+      const streamInfo = await runner.getItemPreviewStreamInfo(streamItemId);
+      await streamTranscodedPreview(
+        { ...streamInfo, startSeconds: readPositiveQuerySeconds(url, 't') },
+        res
+      );
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function handleWorkflowAndVerifierRoutes(
+  runner: JobRunner,
+  method: string,
+  pathname: string,
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<boolean> {
+  if (method !== 'POST') {
+    return false;
+  }
+
+  if (pathname === '/api/metadata/search') {
+    const clientId = requireClientId(req);
+    const body = await readJsonBody<{
+      readonly query: string;
+      readonly year?: number;
+      readonly kind: MediaKind;
+      readonly imdbId?: string;
+      readonly tvdbId?: string;
+      readonly episodeOrder?: EpisodeOrderMode;
+    }>(req);
+    const candidates = await runner.searchMetadata(clientId, body);
+    sendJson(res, HTTP_OK, { candidates });
+    return true;
+  }
+
+  if (pathname === '/api/conflict-resolutions') {
+    const clientId = requireClientId(req);
+    const body = await readJsonBody<{
+      readonly revision: number;
+      readonly conflictResolutions?: Partial<Record<ItemId, ConflictDecision>>;
+    }>(req);
+    const state = await runner.updateConflictResolutions(
+      clientId,
+      body.revision,
+      body.conflictResolutions ?? {}
+    );
+    sendJson(res, HTTP_OK, state);
+    return true;
+  }
+
+  if (pathname === '/api/preflight') {
+    const clientId = requireClientId(req);
+    const body = await readJsonBody<{ readonly revision: number }>(req);
+    const report = await runner.preflight(clientId, body.revision);
+    sendJson(res, HTTP_OK, report);
+    return true;
+  }
+
+  if (pathname === '/api/jobs/start') {
+    const clientId = requireClientId(req);
+    const body = await readJsonBody<{
+      readonly revision: number;
+      readonly conflictResolutions: Partial<Record<ItemId, ConflictDecision>>;
+    }>(req);
+    const result = await runner.startJob(clientId, body.revision, body.conflictResolutions ?? {});
+    sendJson(res, HTTP_ACCEPTED, result);
+    return true;
+  }
+
+  if (pathname === '/api/jobs/unlock') {
+    const clientId = requireClientId(req);
+    const body = await readJsonBody<{ readonly force?: boolean }>(req);
+    const state = await runner.unlock(clientId, Boolean(body.force));
+    sendJson(res, HTTP_OK, state);
+    return true;
+  }
+
+  if (pathname === '/api/logs/clear') {
+    const state = runner.clearLogs();
+    sendJson(res, HTTP_OK, state);
+    return true;
+  }
+
+  if (pathname === '/api/preferences') {
+    const body = await readJsonBody<{
+      readonly preferredLanguages?: unknown;
+      readonly audioPreferredLanguages?: unknown;
+    }>(req);
+    try {
+      const state = await runner.updatePreferences(body);
+      sendJson(res, HTTP_OK, state);
+    } catch (err) {
+      if (err instanceof InvalidPreferencesError) {
+        sendJson(res, HTTP_BAD_REQUEST, {
+          code: 'INVALID_PREFERENCES',
+          message: err instanceof Error ? err.message : String(err)
+        });
+        return true;
+      }
+      throw err;
+    }
+    return true;
+  }
+
+  if (pathname === '/api/verifier/scan') {
+    const clientId = requireClientId(req);
+    const body = await readJsonBody<{ readonly recalculateTags?: boolean }>(req).catch(
+      (): { readonly recalculateTags?: boolean } => ({})
+    );
+    const revision = runner.startVerifierScan(clientId, Boolean(body.recalculateTags));
+    sendJson(res, HTTP_ACCEPTED, { revision });
+    return true;
+  }
+
+  if (pathname === '/api/verifier/fix') {
+    const clientId = requireClientId(req);
+    const body = await readJsonBody<{
+      readonly entryIds: readonly string[];
+      readonly conflictResolutions?: Readonly<Partial<Record<VerifierEntryId, ConflictDecision>>>;
+    }>(req);
+    if (!Array.isArray(body.entryIds) || body.entryIds.length === 0) {
+      sendJson(res, HTTP_BAD_REQUEST, {
+        code: 'INVALID_VERIFIER_FIX',
+        message: 'entryIds must be a non-empty array.'
+      });
+      return true;
+    }
+    const revision = runner.startVerifierFix(
+      clientId,
+      body.entryIds.map((id) => asVerifierEntryId(id)),
+      parseVerifierConflictResolutions(body.conflictResolutions)
+    );
+    sendJson(res, HTTP_ACCEPTED, { revision });
+    return true;
+  }
+
+  return false;
+}
+
+function handleRouteError(runner: JobRunner, res: ServerResponse, err: unknown): void {
+  if (err instanceof ServerInitializingError) {
+    sendJson(res, HTTP_CONFLICT, {
+      error: 'SERVER_INITIALIZING',
+      message: err.message,
+      state: runner.getState()
+    });
+    return;
+  }
+  if (err instanceof LockConflictError) {
+    sendJson(res, HTTP_CONFLICT, {
+      error: err.code,
+      message: err.message,
+      state: runner.getState()
+    });
+    return;
+  }
+  if (err instanceof MetadataProviderError) {
+    const status = err.kind === 'rate_limited' ? HTTP_TOO_MANY_REQUESTS : HTTP_BAD_GATEWAY;
+    sendJson(res, status, {
+      error: err.message,
+      code: err.kind,
+      provider: err.provider
+    });
+    return;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  const status =
+    message.includes('X-Client-Id') || message.includes('Unresolved conflict')
+      ? HTTP_BAD_REQUEST
+      : HTTP_INTERNAL_ERROR;
+  sendJson(res, status, { error: message });
+}
+
 /** Creates the native Node.js HTTP request handler for `/api/*`, SSE `/api/events`, and static `dist/`. */
 export function createRequestHandler(runner: JobRunner, distDir: string) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -211,179 +454,11 @@ export function createRequestHandler(runner: JobRunner, distDir: string) {
         return;
       }
 
-      const matchQueueItemRoute = (suffix: string): ItemId | null => {
-        const prefix = '/api/queue/items/';
-        if (!pathname.startsWith(prefix)) {
-          return null;
-        }
-        const rest = pathname.slice(prefix.length);
-        if (!rest.endsWith(suffix)) {
-          return null;
-        }
-        const rawId = rest.slice(0, -suffix.length);
-        return rawId.length > 0 ? asItemId(rawId) : null;
-      };
-
-      if (method === 'POST') {
-        const searchItemId = matchQueueItemRoute('/subtitles/search');
-        if (searchItemId) {
-          requireClientId(req);
-          const candidates = await runner.searchItemSubtitles(searchItemId);
-          sendJson(res, HTTP_OK, { candidates });
-          return;
-        }
-        const downloadItemId = matchQueueItemRoute('/subtitles/download');
-        if (downloadItemId) {
-          const clientId = requireClientId(req);
-          const body = await readJsonBody<{
-            readonly revision: number;
-            readonly candidate?: SubtitleCandidate;
-          }>(req);
-          const result = await runner.downloadItemSubtitle(
-            clientId,
-            body.revision,
-            downloadItemId,
-            body.candidate
-          );
-          sendJson(res, HTTP_OK, result);
-          return;
-        }
-        const openPlayerItemId = matchQueueItemRoute('/open-player');
-        if (openPlayerItemId) {
-          requireClientId(req);
-          const sourcePath = runner.getItemSourcePath(openPlayerItemId);
-          const result = await openInOsPlayer(sourcePath);
-          sendJson(res, HTTP_OK, result);
-          return;
-        }
-      }
-
-      if (method === 'GET') {
-        const vttItemId = matchQueueItemRoute('/subtitles/preview.vtt');
-        if (vttItemId) {
-          const subPath = runner.getItemPreviewSubtitlePath(vttItemId);
-          if (!subPath) {
-            sendJson(res, HTTP_NOT_FOUND, {
-              code: 'SUBTITLE_NOT_FOUND',
-              message: 'No external subtitle found for item.'
-            });
-            return;
-          }
-          await streamSubtitlePreviewVtt(subPath, res);
-          return;
-        }
-        const streamItemId = matchQueueItemRoute('/stream');
-        if (streamItemId) {
-          const sourcePath = runner.getItemSourcePath(streamItemId);
-          await streamVideoFile(sourcePath, req.headers.range, res);
-          return;
-        }
-      }
-
-      if (method === 'POST' && pathname === '/api/metadata/search') {
-        const clientId = requireClientId(req);
-        const body = await readJsonBody<{
-          readonly query: string;
-          readonly year?: number;
-          readonly kind: MediaKind;
-          readonly imdbId?: string;
-          readonly tvdbId?: string;
-          readonly episodeOrder?: EpisodeOrderMode;
-        }>(req);
-        const candidates = await runner.searchMetadata(clientId, body);
-        sendJson(res, HTTP_OK, { candidates });
+      if (await handleQueueItemRoutes(runner, method, pathname, url, req, res)) {
         return;
       }
 
-      if (method === 'POST' && pathname === '/api/preflight') {
-        const clientId = requireClientId(req);
-        const body = await readJsonBody<{ readonly revision: number }>(req);
-        const report = await runner.preflight(clientId, body.revision);
-        sendJson(res, HTTP_OK, report);
-        return;
-      }
-
-      if (method === 'POST' && pathname === '/api/jobs/start') {
-        const clientId = requireClientId(req);
-        const body = await readJsonBody<{
-          readonly revision: number;
-          readonly conflictResolutions: Partial<Record<ItemId, ConflictDecision>>;
-        }>(req);
-        const result = await runner.startJob(
-          clientId,
-          body.revision,
-          body.conflictResolutions ?? {}
-        );
-        sendJson(res, HTTP_ACCEPTED, result);
-        return;
-      }
-
-      if (method === 'POST' && pathname === '/api/jobs/unlock') {
-        const clientId = requireClientId(req);
-        const body = await readJsonBody<{ readonly force?: boolean }>(req);
-        const state = await runner.unlock(clientId, Boolean(body.force));
-        sendJson(res, HTTP_OK, state);
-        return;
-      }
-
-      if (method === 'POST' && pathname === '/api/logs/clear') {
-        const state = runner.clearLogs();
-        sendJson(res, HTTP_OK, state);
-        return;
-      }
-
-      if (method === 'POST' && pathname === '/api/preferences') {
-        const body = await readJsonBody<{
-          readonly preferredLanguages?: unknown;
-          readonly audioPreferredLanguages?: unknown;
-        }>(req);
-        try {
-          const state = await runner.updatePreferences(body);
-          sendJson(res, HTTP_OK, state);
-        } catch (err) {
-          if (err instanceof InvalidPreferencesError) {
-            sendJson(res, HTTP_BAD_REQUEST, {
-              code: 'INVALID_PREFERENCES',
-              message: err instanceof Error ? err.message : String(err)
-            });
-            return;
-          }
-          throw err;
-        }
-        return;
-      }
-
-      if (method === 'POST' && pathname === '/api/verifier/scan') {
-        const clientId = requireClientId(req);
-        const body = await readJsonBody<{ readonly recalculateTags?: boolean }>(req).catch(
-          (): { readonly recalculateTags?: boolean } => ({})
-        );
-        const revision = runner.startVerifierScan(clientId, Boolean(body.recalculateTags));
-        sendJson(res, HTTP_ACCEPTED, { revision });
-        return;
-      }
-
-      if (method === 'POST' && pathname === '/api/verifier/fix') {
-        const clientId = requireClientId(req);
-        const body = await readJsonBody<{
-          readonly entryIds: readonly string[];
-          readonly conflictResolutions?: Readonly<
-            Partial<Record<VerifierEntryId, ConflictDecision>>
-          >;
-        }>(req);
-        if (!Array.isArray(body.entryIds) || body.entryIds.length === 0) {
-          sendJson(res, HTTP_BAD_REQUEST, {
-            code: 'INVALID_VERIFIER_FIX',
-            message: 'entryIds must be a non-empty array.'
-          });
-          return;
-        }
-        const revision = runner.startVerifierFix(
-          clientId,
-          body.entryIds.map((id) => asVerifierEntryId(id)),
-          parseVerifierConflictResolutions(body.conflictResolutions)
-        );
-        sendJson(res, HTTP_ACCEPTED, { revision });
+      if (await handleWorkflowAndVerifierRoutes(runner, method, pathname, req, res)) {
         return;
       }
 
@@ -394,37 +469,7 @@ export function createRequestHandler(runner: JobRunner, distDir: string) {
 
       await serveStaticDist(distDir, pathname, res);
     } catch (err) {
-      if (err instanceof ServerInitializingError) {
-        sendJson(res, HTTP_CONFLICT, {
-          error: 'SERVER_INITIALIZING',
-          message: err.message,
-          state: runner.getState()
-        });
-        return;
-      }
-      if (err instanceof LockConflictError) {
-        sendJson(res, HTTP_CONFLICT, {
-          error: err.code,
-          message: err.message,
-          state: runner.getState()
-        });
-        return;
-      }
-      if (err instanceof MetadataProviderError) {
-        const status = err.kind === 'rate_limited' ? HTTP_TOO_MANY_REQUESTS : HTTP_BAD_GATEWAY;
-        sendJson(res, status, {
-          error: err.message,
-          code: err.kind,
-          provider: err.provider
-        });
-        return;
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      const status =
-        message.includes('X-Client-Id') || message.includes('Unresolved conflict')
-          ? HTTP_BAD_REQUEST
-          : HTTP_INTERNAL_ERROR;
-      sendJson(res, status, { error: message });
+      handleRouteError(runner, res, err);
     }
   };
 }

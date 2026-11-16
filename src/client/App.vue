@@ -18,6 +18,7 @@ import MetadataSearchModal from './components/MetadataSearchModal.vue';
 import OrganizerStatusBar from './components/OrganizerStatusBar.vue';
 import QueueTable, { type SubtitlePickerViewState } from './components/QueueTable.vue';
 import ServerLogsPanel from './components/ServerLogsPanel.vue';
+import SubtitlePickerModal from './components/SubtitlePickerModal.vue';
 import SubtitlePreviewModal from './components/SubtitlePreviewModal.vue';
 import TrackInspectorModal from './components/TrackInspectorModal.vue';
 import VerifierView from './components/VerifierView.vue';
@@ -38,6 +39,13 @@ const selectedVerifierIds = ref<readonly VerifierEntryId[]>([]);
 const recalculateVerifierTags = ref(false);
 const previewingSubtitleItem = ref<ScannedItem | null>(null);
 const subtitlePicker = ref<SubtitlePickerViewState | null>(null);
+const subtitlePickerItem = computed<ScannedItem | null>(() => {
+  const itemId = subtitlePicker.value?.itemId;
+  if (!itemId) {
+    return null;
+  }
+  return store.items.find((entry) => entry.id === itemId) ?? null;
+});
 
 async function handleSearchSubtitles(item: ScannedItem): Promise<void> {
   subtitlePicker.value = {
@@ -102,11 +110,8 @@ function closeSubtitlePicker(): void {
   subtitlePicker.value = null;
 }
 
-async function handleTestSubtitleInPlayer(item: ScannedItem): Promise<void> {
-  const result = await store.openItemInPlayer(item.id);
-  if (!result.launched) {
-    previewingSubtitleItem.value = item;
-  }
+function handleTestSubtitleInPlayer(item: ScannedItem): void {
+  previewingSubtitleItem.value = item;
 }
 const conflictsOpen = ref(false);
 const confirmUnlockOpen = ref(false);
@@ -497,8 +502,6 @@ const activeJobSummaryText = computed<string>(() => {
           :conflict-resolutions="store.savedConflictResolutions"
           :subtitle-picker="subtitlePicker"
           @search-subtitles="handleSearchSubtitles"
-          @download-subtitle="handleDownloadSubtitle"
-          @close-subtitle-picker="closeSubtitlePicker"
           @preview-subtitle="handleTestSubtitleInPlayer"
           @toggle-include="(item, inc) => patchItemAndRefresh(item.id, { include: inc })"
           @change-media-kind="
@@ -579,6 +582,13 @@ const activeJobSummaryText = computed<string>(() => {
     />
 
     <SubtitlePreviewModal :item="previewingSubtitleItem" @close="previewingSubtitleItem = null" />
+
+    <SubtitlePickerModal
+      :picker="subtitlePicker"
+      :item="subtitlePickerItem"
+      @close="closeSubtitlePicker"
+      @download="handleDownloadSubtitle"
+    />
 
     <ConflictResolutionModal
       :open="conflictsOpen"

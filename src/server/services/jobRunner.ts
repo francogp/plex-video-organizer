@@ -23,6 +23,7 @@ import {
   asJobId,
   asTvdbId,
   collectActiveTasks,
+  sanitizeConflictResolutions,
   type ActiveJobProgress,
   type ActiveParallelTask,
   type AudioLanguageCode,
@@ -54,7 +55,7 @@ import {
   type VerifierEntryId,
   type VerifierState
 } from '../../domain/types.ts';
-import { buildMountPathsMap, type AppConfig } from '../config.ts';
+import { buildMountPathsMap, resolvePortableInputPath, type AppConfig } from '../config.ts';
 import {
   backupAndCleanupAfterJob,
   cleanupOrphanTempFiles,
@@ -177,6 +178,7 @@ export class JobRunner {
   #revision = 0;
   #lockOwnerClientId: ClientId | null = null;
   #items: ScannedItem[] = [];
+  #conflictResolutions: Partial<Record<ItemId, ConflictDecision>> = {};
   #activeJob: ActiveJobProgress | null = null;
   #lastError: string | null = null;
   readonly #activeChildren = new Set<ChildProcess>();
@@ -238,6 +240,7 @@ export class JobRunner {
         this.#revision = savedQueue.revision;
         this.#items = [...savedQueue.items];
       }
+      this.#conflictResolutions = db.getConflictResolutions();
       const savedPrefs = db.getPreferences();
       if (savedPrefs?.preferredLanguages) {
         this.#preferredLanguages = parseUniqueLanguageList(
@@ -280,7 +283,8 @@ export class JobRunner {
       logs: [...this.#recentLogs],
       verifier: this.#verifier,
       preferredLanguages: [...this.#preferredLanguages],
-      audioPreferredLanguages: [...this.#audioPreferredLanguages]
+      audioPreferredLanguages: [...this.#audioPreferredLanguages],
+      conflictResolutions: { ...this.#conflictResolutions }
     };
   }
 
@@ -403,6 +407,62 @@ export class JobRunner {
     } finally {
       db.close();
     }
+  }
+
+  async #persistConflictResolutions(): Promise<void> {
+    const db = await openScanCacheDb(
+      this.#config.configDir,
+      undefined,
+      this.#emitFallbackWarningOnce,
+      true
+    );
+    try {
+      db.saveConflictResolutions(this.#conflictResolutions);
+    } finally {
+      db.close();
+    }
+  }
+
+  public async updateConflictResolutions(
+    clientId: ClientId,
+    revision: number,
+    resolutions: Readonly<Partial<Record<ItemId, ConflictDecision>>>
+  ): Promise<OrganizerStatePayload> {
+    this.#assertInitialized();
+    this.#assertLockOwner(clientId);
+    this.#assertRevision(revision);
+
+    this.#conflictResolutions = sanitizeConflictResolutions(resolutions);
+    this.#revision += 1;
+    await this.#persistConflictResolutions();
+    this.#emitState();
+    return this.getState();
+  }
+
+  async #pruneConflictResolutionsToCurrentItems(): Promise<void> {
+    const validIds = new Set<string>(this.#items.map((item) => item.id));
+    const filtered: Record<string, unknown> = {};
+    let changed = false;
+    for (const [id, decision] of Object.entries(this.#conflictResolutions)) {
+      if (validIds.has(id)) {
+        filtered[id] = decision;
+      } else {
+        changed = true;
+      }
+    }
+    const sanitized = sanitizeConflictResolutions(filtered);
+    if (
+      changed ||
+      Object.keys(sanitized).length !== Object.keys(this.#conflictResolutions).length
+    ) {
+      this.#conflictResolutions = sanitized;
+      await this.#persistConflictResolutions();
+    }
+  }
+
+  async #finalizeMovedItems(movedItems: readonly ScannedItem[]): Promise<void> {
+    this.#removeMovedItems(movedItems);
+    await this.#pruneConflictResolutionsToCurrentItems();
   }
 
   #assertLockOwner(clientId: ClientId): void {
@@ -616,6 +676,7 @@ export class JobRunner {
       this.#activeJob = null;
       this.#lastError = null;
       this.#items = [...withSubtitles];
+      await this.#pruneConflictResolutionsToCurrentItems();
       this.#phase = withSubtitles.length > 0 ? 'READY' : 'IDLE';
       if (withSubtitles.length === 0) {
         this.#lockOwnerClientId = null;
@@ -984,17 +1045,28 @@ export class JobRunner {
     return item;
   }
 
-  public getItemSourcePath(itemId: ItemId): string {
-    return this.#requireItem(itemId).sourcePath;
+  public async getItemPreviewStreamInfo(itemId: ItemId): Promise<{
+    readonly sourcePath: string;
+    readonly audioStreamOrder?: number;
+  }> {
+    const item = this.#requireItem(itemId);
+    const preferredAudio = item.trackSelection.audioTracks.find((track) => track.include);
+    return {
+      sourcePath: await resolvePortableInputPath(this.#config, item.sourcePath, item.relativePath),
+      audioStreamOrder: preferredAudio?.streamOrder
+    };
   }
 
-  public getItemPreviewSubtitlePath(itemId: ItemId): string | undefined {
+  public async getItemPreviewSubtitlePath(itemId: ItemId): Promise<string | undefined> {
     const item = this.#requireItem(itemId);
     const spaSub =
       item.externalSubtitles.find((sub) => sub.language === 'spa' && Boolean(sub.downloadedFrom)) ??
       item.externalSubtitles.find((sub) => sub.language === 'spa') ??
       item.externalSubtitles[0];
-    return spaSub?.path;
+    if (!spaSub) {
+      return undefined;
+    }
+    return resolvePortableInputPath(this.#config, spaSub.path, spaSub.relativePath);
   }
 
   public async searchItemSubtitles(itemId: ItemId): Promise<readonly SubtitleCandidate[]> {
@@ -1642,7 +1714,7 @@ export class JobRunner {
       );
 
       if (this.#cancelledByUnlock) {
-        this.#removeMovedItems(movedItems);
+        await this.#finalizeMovedItems(movedItems);
         return;
       }
 
@@ -1668,7 +1740,7 @@ export class JobRunner {
           });
         }
       );
-      this.#removeMovedItems(movedItems);
+      await this.#finalizeMovedItems(movedItems);
       this.#activeJob = null;
       this.#phase = 'IDLE';
       this.#lockOwnerClientId = null;
@@ -1681,7 +1753,7 @@ export class JobRunner {
       this.#emitState();
     } catch (err) {
       if (this.#cancelledByUnlock) {
-        this.#removeMovedItems(movedItems);
+        await this.#finalizeMovedItems(movedItems);
         return;
       }
       const msg = err instanceof Error ? err.message : String(err);

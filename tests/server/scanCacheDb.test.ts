@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import { SCAN_CACHE_RETENTION_MS } from '../../src/domain/constants.ts';
 import {
   asIso639_2Code,
+  asItemId,
   type AudioTrackAnalysis,
   type MediaProbeSummary
 } from '../../src/domain/types.ts';
@@ -240,6 +241,15 @@ describe('scanCacheDb (node:sqlite)', () => {
         expect(db.getAllValidMetadata()).toHaveLength(2);
         db.clearMetadata();
         expect(db.getAllValidMetadata()).toHaveLength(0);
+
+        db.saveConflictResolutions({
+          [asItemId('item-1')]: 'overwrite',
+          [asItemId('item-2')]: 'ignore'
+        });
+        expect(db.getConflictResolutions()).toEqual({
+          'item-1': 'overwrite',
+          'item-2': 'ignore'
+        });
       } finally {
         db.close();
       }

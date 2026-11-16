@@ -5,8 +5,10 @@ import {
   TVMAZE_WINDOW_MS
 } from '../../../domain/constants.ts';
 import {
+  asImdbId,
   asTvdbId,
   type EpisodeOrderMode,
+  type ImdbId,
   type MetadataCandidate,
   type MetadataLanguageCode,
   type MetadataLookupOptions,
@@ -283,14 +285,40 @@ class TvdbProvider extends BaseMetadataProvider {
     const parsedYear = rawYear !== undefined ? Number.parseInt(String(rawYear), 10) : Number.NaN;
     const title = this.#pickTranslationTitle(data.translations, data.name, preferredLanguages);
     const isAnimated = hasAnimationMetadata(data.genres) || undefined;
+    const imdbId = this.#extractImdbId(data.remoteIds);
     return {
       title,
       year: Number.isInteger(parsedYear) && parsedYear > 0 ? parsedYear : undefined,
       tvdbId,
+      imdbId,
       overview: typeof data.overview === 'string' ? data.overview : undefined,
       isAnimated,
       source: 'tvdb'
     };
+  }
+
+  #extractImdbId(rawRemoteIds: unknown): ImdbId | undefined {
+    if (!Array.isArray(rawRemoteIds)) {
+      return undefined;
+    }
+    for (const rawEntry of rawRemoteIds) {
+      if (!rawEntry || typeof rawEntry !== 'object') {
+        continue;
+      }
+      const entry = rawEntry as { readonly id?: unknown; readonly sourceName?: unknown };
+      if (typeof entry.id !== 'string') {
+        continue;
+      }
+      const trimmed = entry.id.trim().toLowerCase();
+      if (/^tt\d+$/.test(trimmed)) {
+        const sourceName =
+          typeof entry.sourceName === 'string' ? entry.sourceName.toLowerCase() : '';
+        if (!sourceName || sourceName === 'imdb') {
+          return asImdbId(trimmed);
+        }
+      }
+    }
+    return undefined;
   }
 
   #parseEpisodes(raw: unknown): {
