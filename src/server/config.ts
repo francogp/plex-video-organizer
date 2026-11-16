@@ -135,12 +135,16 @@ export async function resolvePortableInputPath(
   storedPath: string,
   relativePath?: string
 ): Promise<string> {
+  const normalizedStored = storedPath.replace(/\\/g, '/');
+  const normalizedRel = relativePath ? relativePath.replace(/\\/g, '/') : undefined;
   const candidates: string[] = [storedPath];
-  if (relativePath) {
-    candidates.push(path.join(config.inputDir, relativePath));
+  if (normalizedRel) {
+    candidates.push(path.join(config.inputDir, ...normalizedRel.split('/')));
   }
-  if (storedPath.startsWith('/config/')) {
-    candidates.push(path.join(config.configDir, storedPath.slice('/config/'.length)));
+  if (normalizedStored.includes('/subtitles/')) {
+    candidates.push(
+      path.join(config.configDir, 'subtitles', path.posix.basename(normalizedStored))
+    );
   }
   for (const candidate of candidates) {
     try {
@@ -150,5 +154,5 @@ export async function resolvePortableInputPath(
       // Try next candidate root when cache was populated from another host.
     }
   }
-  return relativePath ? path.join(config.inputDir, relativePath) : storedPath;
+  return normalizedRel ? path.join(config.inputDir, ...normalizedRel.split('/')) : storedPath;
 }

@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vite-plus/test';
 import {
   buildMountPathsMap,
   loadConfig,
+  resolvePortableInputPath,
   validateMountDirectories
 } from '../../src/server/config.ts';
 
@@ -91,6 +92,39 @@ describe('server config', () => {
       const errors = await validateMountDirectories(badCfg);
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain(blockingFile);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves cross-host input and config subtitle paths across Windows and Docker', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-portable-'));
+    try {
+      const inputDir = path.join(tmpDir, 'input');
+      const configDir = path.join(tmpDir, 'config');
+      const showDir = path.join(inputDir, 'Show', 'Season 01');
+      const subsDir = path.join(configDir, 'subtitles');
+      await fs.mkdir(showDir, { recursive: true });
+      await fs.mkdir(subsDir, { recursive: true });
+
+      const videoFile = path.join(showDir, 'Show.S01E01.mkv');
+      const subFile = path.join(subsDir, '5433501c4728.spa.srt');
+      await fs.writeFile(videoFile, 'v');
+      await fs.writeFile(subFile, 's');
+
+      const resolvedFromDocker = await resolvePortableInputPath(
+        { inputDir, configDir },
+        '/data/input/Show/Season 01/Show.S01E01.mkv',
+        'Show\\Season 01\\Show.S01E01.mkv'
+      );
+      expect(resolvedFromDocker).toBe(videoFile);
+
+      const resolvedSubFromWindows = await resolvePortableInputPath(
+        { inputDir, configDir },
+        'z:\\missing-nas-share\\subtitles\\5433501c4728.spa.srt',
+        '5433501c4728.spa.srt'
+      );
+      expect(resolvedSubFromWindows).toBe(subFile);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

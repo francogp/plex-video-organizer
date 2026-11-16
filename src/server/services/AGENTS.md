@@ -23,12 +23,15 @@ Backend Maintainers.
 ## Key Files
 
 - [scanCacheDb.ts](scanCacheDb.ts): Native `node:sqlite` (`WAL`, `STRICT` tables, schema migrations) unified persistent store (`plex-video-organizer.sqlite`) for probe/audio caches, queue state, and metadata cache with short-lived sessions, 14-day retention pruning, and legacy JSON/`scan-cache.sqlite` auto-migration.
+- [scanMetadataService.ts](scanMetadataService.ts): Media scan, audio volume analysis orchestration, metadata enrichment, item patching, and Spanish subtitle auto-download workflow.
 - [scanner.ts](scanner.ts): Plex-compliant recursive scanner, `.plexignore`/`.plexmatch` parser, and subtitle matcher.
 - [preflight.ts](preflight.ts): Pre-flight destination collision and disk space checks.
 - [libraryCollision.ts](libraryCollision.ts): Shared library root indexer, external-ID/normalized-title collision lookup, and `ConflictComparison` builder for `preflight.ts` and `libraryVerifierService.ts`.
 - [fileMover.ts](fileMover.ts): `EXDEV`-safe file move and deferred end-of-job cleanup.
+- [jobExecutionService.ts](jobExecutionService.ts): Parallel remuxing, Loudnorm pass 1/2, verification, atomic move, and deferred backup/cleanup executor for queued jobs.
 - [jobRunner.ts](jobRunner.ts): In-memory LAN lock, queue state machine, and sequential job execution.
 - [libraryVerifierService.ts](libraryVerifierService.ts): Parallel Plex library compliance scanner and bottom-up rename executor.
+- [verifierJobService.ts](verifierJobService.ts): Verifier scan/fix job orchestration wrapper for `JobRunner`.
 
 ## Work Guidance
 
