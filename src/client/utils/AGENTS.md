@@ -13,6 +13,7 @@ Frontend Maintainers.
 ## Key Files
 
 - [formatters.ts](formatters.ts): Shared UI byte/size, Buenos Aires timestamp, ETA (`formatEta`), and Plex filename preview helpers.
+- [organizerApi.ts](organizerApi.ts): Typed HTTP JSON client, SSE event source factory, and track-selection merge helper for `organizerStore.ts`.
 - [storage.ts](storage.ts): Safe client ID (`browserId:tabId`) and theme mode persistence.
 
 ## Work Guidance

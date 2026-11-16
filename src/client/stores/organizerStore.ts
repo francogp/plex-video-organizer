@@ -2,7 +2,6 @@ import gsap from 'gsap';
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
-import { ensureValidAudioTrackSelection } from '../../domain/trackSelection.ts';
 import type {
   ActiveJobProgress,
   AudioLanguageCode,
@@ -25,12 +24,18 @@ import type {
   ScannedItem,
   ServerInitStatus,
   SseLogEvent,
-  SseProgressEvent,
   SubtitleCandidate,
   TrackSelection,
   VerifierEntryId,
   VerifierState
 } from '../../domain/types.ts';
+import {
+  buildMergedTrackSelection,
+  createOrganizerSseSource,
+  executeJsonFetch,
+  type ApiErrorEnvelope,
+  type OrganizerSseConnection
+} from '../utils/organizerApi.ts';
 import {
   getInitialAudioPreferredLanguages,
   getInitialPreferredLanguages,
@@ -45,12 +50,6 @@ import {
 const MAX_LOG_ENTRIES = 100;
 const HTTP_CONFLICT_STATUS = 409;
 const MAX_STALE_REVISION_ATTEMPTS = 2;
-
-interface ApiErrorEnvelope {
-  readonly error?: string;
-  readonly message?: string;
-  readonly state?: OrganizerStatePayload;
-}
 
 export const useOrganizerStore = defineStore('organizer', () => {
   const clientId = ref<ClientId>(getOrCreateClientId() as ClientId);
@@ -79,7 +78,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     lastFixResult: null
   });
   const errorMessage = ref<string | null>(null);
-  let eventSource: EventSource | null = null;
+  let eventSource: OrganizerSseConnection | null = null;
 
   const isLockedByOther = computed(
     (): boolean => lockOwnerClientId.value !== null && lockOwnerClientId.value !== clientId.value
@@ -214,28 +213,6 @@ export const useOrganizerStore = defineStore('organizer', () => {
     return run;
   }
 
-  async function executeJsonFetch<T>(
-    url: string,
-    init: RequestInit = {}
-  ): Promise<{
-    readonly ok: boolean;
-    readonly status: number;
-    readonly data: T & ApiErrorEnvelope;
-  }> {
-    const headers = new Headers(init.headers);
-    headers.set('X-Client-Id', clientId.value);
-    if (init.body && !headers.has('Content-Type')) {
-      headers.set('Content-Type', 'application/json');
-    }
-    const safeUrl = new URL(
-      url,
-      typeof globalThis.location !== 'undefined' ? globalThis.location.origin : 'http://localhost'
-    ).toString();
-    const res = await fetch(safeUrl, { ...init, headers });
-    const data = (await res.json()) as T & ApiErrorEnvelope;
-    return { ok: res.ok, status: res.status, data };
-  }
-
   function throwApiError(status: number, data: ApiErrorEnvelope): never {
     if (data.state) {
       applyServerState(data.state);
@@ -248,7 +225,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
   async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
     errorMessage.value = null;
     try {
-      const { ok, status, data } = await executeJsonFetch<T>(url, init);
+      const { ok, status, data } = await executeJsonFetch<T>(clientId.value, url, init);
       if (!ok) {
         throwApiError(status, data);
       }
@@ -264,7 +241,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
   async function requestRevisionMutation<T>(url: string, buildInit: () => RequestInit): Promise<T> {
     errorMessage.value = null;
     for (let attempt = 0; attempt < MAX_STALE_REVISION_ATTEMPTS; attempt += 1) {
-      const { ok, status, data } = await executeJsonFetch<T>(url, buildInit());
+      const { ok, status, data } = await executeJsonFetch<T>(clientId.value, url, buildInit());
       if (ok) {
         return data;
       }
@@ -374,45 +351,43 @@ export const useOrganizerStore = defineStore('organizer', () => {
   }
 
   function connectSse(): void {
-    if (eventSource || typeof EventSource === 'undefined') {
+    if (eventSource) {
       return;
     }
-    eventSource = new EventSource('/api/events');
-    eventSource.addEventListener('open', (): void => {
-      lastSseActivityAt = performance.now();
-      if (sseHadError) {
-        sseHadError = false;
-        void resyncStateSafely();
+    eventSource = createOrganizerSseSource({
+      onOpen: (): void => {
+        lastSseActivityAt = performance.now();
+        if (sseHadError) {
+          sseHadError = false;
+          void resyncStateSafely();
+        }
+      },
+      onError: (): void => {
+        sseHadError = true;
+      },
+      onState: (payload): void => {
+        lastSseActivityAt = performance.now();
+        applyServerState(payload);
+      },
+      onProgress: (prog): void => {
+        lastSseActivityAt = performance.now();
+        if (activeJob.value && activeJob.value.jobId === prog.jobId) {
+          activeJob.value = {
+            ...activeJob.value,
+            activeTasks: prog.activeTasks,
+            totalItems: prog.totalItems ?? activeJob.value.totalItems,
+            completedItems: prog.completedItems ?? activeJob.value.completedItems,
+            currentPercent: prog.percent,
+            stage: prog.stage ?? activeJob.value.stage,
+            stageLabel: prog.stageLabel ?? activeJob.value.stageLabel,
+            etaSeconds: prog.etaSeconds
+          };
+        }
+      },
+      onLog: (log): void => {
+        lastSseActivityAt = performance.now();
+        logs.value = [...logs.value.slice(-(MAX_LOG_ENTRIES - 1)), log];
       }
-    });
-    eventSource.addEventListener('error', (): void => {
-      sseHadError = true;
-    });
-    eventSource.addEventListener('state', (evt): void => {
-      lastSseActivityAt = performance.now();
-      const payload = JSON.parse((evt as MessageEvent<string>).data) as OrganizerStatePayload;
-      applyServerState(payload);
-    });
-    eventSource.addEventListener('progress', (evt): void => {
-      lastSseActivityAt = performance.now();
-      const prog = JSON.parse((evt as MessageEvent<string>).data) as SseProgressEvent;
-      if (activeJob.value && activeJob.value.jobId === prog.jobId) {
-        activeJob.value = {
-          ...activeJob.value,
-          activeTasks: prog.activeTasks,
-          totalItems: prog.totalItems ?? activeJob.value.totalItems,
-          completedItems: prog.completedItems ?? activeJob.value.completedItems,
-          currentPercent: prog.percent,
-          stage: prog.stage ?? activeJob.value.stage,
-          stageLabel: prog.stageLabel ?? activeJob.value.stageLabel,
-          etaSeconds: prog.etaSeconds
-        };
-      }
-    });
-    eventSource.addEventListener('log', (evt): void => {
-      lastSseActivityAt = performance.now();
-      const log = JSON.parse((evt as MessageEvent<string>).data) as SseLogEvent;
-      logs.value = [...logs.value.slice(-(MAX_LOG_ENTRIES - 1)), log];
     });
   }
 
@@ -562,29 +537,6 @@ export const useOrganizerStore = defineStore('organizer', () => {
       );
       applyServerState(next);
     });
-  }
-
-  function buildMergedTrackSelection(
-    target: TrackSelection,
-    template: TrackSelection
-  ): TrackSelection {
-    return {
-      ...target,
-      subtitleMergeMode: template.subtitleMergeMode,
-      needsUserPrompt: false,
-      audioFilterCustomized: true,
-      audioTracks: ensureValidAudioTrackSelection(
-        target.audioTracks.map((t, idx) => {
-          const src = template.audioTracks[idx];
-          return {
-            ...t,
-            include: src?.include ?? t.include,
-            language: src?.language ?? t.language,
-            isDefault: src?.isDefault ?? t.isDefault
-          };
-        })
-      )
-    };
   }
 
   async function applyTracksToSeries(sourceItem: ScannedItem): Promise<void> {

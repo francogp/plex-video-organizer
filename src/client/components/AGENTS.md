@@ -35,6 +35,8 @@ Frontend Maintainers.
 - [ParallelTasksList.vue](ParallelTasksList.vue): Shared multi-row parallel slot progress list for `OrganizerStatusBar.vue` and `VerifierView.vue`.
 - [ProviderLinks.vue](ProviderLinks.vue): Shared clickable external provider badge links (`IMDb`, `TVDB`, `TMDB`) for `QueueTable.vue` and `VerifierView.vue`.
 - [OrganizerStatusBar.vue](OrganizerStatusBar.vue): Organizer active job progress, error, and idle status bar for `App.vue`.
+- [OrganizerWorkspace.vue](OrganizerWorkspace.vue): Tabbed workspace container (`OrganizerStatusBar`, `QueueTable`, `VerifierView`, `ServerLogsPanel`, `OrganizerModals`) for `App.vue`.
+- [OrganizerModals.vue](OrganizerModals.vue): Grouped modal host (`MetadataSearchModal`, `TrackInspectorModal`, `SubtitlePreviewModal`, `SubtitlePickerModal`, `ConflictResolutionModal`) for `App.vue`.
 - [ServerLogsPanel.vue](ServerLogsPanel.vue): Server log viewer panel with clear action for `App.vue`.
 - [MetadataSearchModal.vue](MetadataSearchModal.vue): Interactive provider search and manual IMDb/TVDB ID override modal.
 - [TrackInspectorModal.vue](TrackInspectorModal.vue): Audio/subtitle track inspector and series batch apply.

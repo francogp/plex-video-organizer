@@ -13,6 +13,7 @@ Frontend Maintainers.
 ## Key Files
 
 - [useGsapMotion.ts](useGsapMotion.ts): Scoped GSAP entrance animation composable.
+- [useOrganizerWorkflow.ts](useOrganizerWorkflow.ts): Modal state, bulk actions, subtitle picker, and verifier conflict workflow composable for `App.vue`.
 
 ## Work Guidance
 
