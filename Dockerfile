@@ -1,4 +1,4 @@
-FROM mwader/static-ffmpeg:9.0.2-1 AS ffmpeg-source
+FROM mwader/static-ffmpeg:latest AS ffmpeg-source
 
 FROM busybox:1.38.0-musl AS ffmpeg-provider
 
