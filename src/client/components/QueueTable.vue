@@ -561,9 +561,7 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
           />
           <button type="button" class="vo-sort-btn" @click="toggleSort('include')">
             Include
-            <span v-if="sortKey === 'include'" class="vo-sort-indicator" aria-hidden="true">
-              {{ sortDir === 'ascending' ? '▲' : '▼' }}
-            </span>
+            <span class="vo-sort-indicator" aria-hidden="true" />
           </button>
         </div>
       </template>
@@ -571,36 +569,28 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
       <template #header-source>
         <button type="button" class="vo-sort-btn" @click="toggleSort('title')">
           Source File
-          <span v-if="sortKey === 'title'" class="vo-sort-indicator" aria-hidden="true">
-            {{ sortDir === 'ascending' ? '▲' : '▼' }}
-          </span>
+          <span class="vo-sort-indicator" aria-hidden="true" />
         </button>
       </template>
 
       <template #header-type>
         <button type="button" class="vo-sort-btn" @click="toggleSort('mediaKind')">
           Type
-          <span v-if="sortKey === 'mediaKind'" class="vo-sort-indicator" aria-hidden="true">
-            {{ sortDir === 'ascending' ? '▲' : '▼' }}
-          </span>
+          <span class="vo-sort-indicator" aria-hidden="true" />
         </button>
       </template>
 
       <template #header-category>
         <button type="button" class="vo-sort-btn" @click="toggleSort('category')">
           Library
-          <span v-if="sortKey === 'category'" class="vo-sort-indicator" aria-hidden="true">
-            {{ sortDir === 'ascending' ? '▲' : '▼' }}
-          </span>
+          <span class="vo-sort-indicator" aria-hidden="true" />
         </button>
       </template>
 
       <template #header-size>
         <button type="button" class="vo-sort-btn" @click="toggleSort('size')">
           Size
-          <span v-if="sortKey === 'size'" class="vo-sort-indicator" aria-hidden="true">
-            {{ sortDir === 'ascending' ? '▲' : '▼' }}
-          </span>
+          <span class="vo-sort-indicator" aria-hidden="true" />
         </button>
       </template>
 
