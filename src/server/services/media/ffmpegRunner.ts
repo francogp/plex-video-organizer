@@ -69,6 +69,7 @@ interface FfprobeRawOutput {
 const PERCENT_MAX = 100;
 const MICROSECONDS_PER_SECOND = 1_000_000;
 const DEFAULT_FFMPEG_STALL_TIMEOUT_MS = 120_000;
+const FFMPEG_VERSION_TIMEOUT_MS = 3000;
 const UTF8_BOM_FIRST = 0xef;
 const UTF8_BOM_SECOND = 0xbb;
 const UTF8_BOM_THIRD = 0xbf;
@@ -728,4 +729,47 @@ export async function runFfmpegRemux(
     (update) => onProgress(update.percent, update.etaSeconds, update),
     registerChild
   );
+}
+
+/** Extracts the FFmpeg version token from `ffmpeg -version` stdout. */
+function parseFfmpegVersionOutput(stdout: string): string | null {
+  const match = /^ffmpeg\s+version\s+(\S+)/im.exec(stdout);
+  return match?.[1] ?? null;
+}
+
+/** Probes the installed `ffmpeg` binary version (`null` if unavailable). */
+export function detectFfmpegVersion(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn('ffmpeg', ['-version'], {
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const chunks: Buffer[] = [];
+    let settled = false;
+    const finish = (value: string | null): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(null);
+    }, FFMPEG_VERSION_TIMEOUT_MS);
+    child.stdout.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+    child.on('error', () => {
+      finish(null);
+    });
+    child.on('close', (code) => {
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      const output = Buffer.concat(chunks).toString('utf8');
+      finish(parseFfmpegVersionOutput(output));
+    });
+  });
 }

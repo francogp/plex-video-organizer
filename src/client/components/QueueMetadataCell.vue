@@ -9,6 +9,7 @@ import {
   type ExternalIdLink
 } from '../utils/formatters.ts';
 import ProviderLinks from './ProviderLinks.vue';
+import UiIcon from './UiIcon.vue';
 
 const props = defineProps<{
   item: ScannedItem;
@@ -132,7 +133,7 @@ const selectedCandidateIndex = computed((): number => {
         :disabled="props.disabled"
         @click="emit('search-metadata')"
       >
-        <span aria-hidden="true">🔍</span> Search
+        <UiIcon name="search" /> Search
       </button>
     </div>
   </div>

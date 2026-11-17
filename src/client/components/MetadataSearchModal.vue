@@ -18,6 +18,7 @@ import {
 import { useModalVars } from '../composables/useGsapMotion.ts';
 import { extractCandidateLinks } from '../utils/formatters.ts';
 import ProviderLinks from './ProviderLinks.vue';
+import UiIcon from './UiIcon.vue';
 
 const props = defineProps<{
   readonly item: ScannedItem | null;
@@ -210,7 +211,7 @@ const filePillLabel = computed<string>(() => {
           :disabled="searching"
           @click="handleSearch"
         >
-          <span aria-hidden="true">{{ searching ? '⏳' : '🔍' }}</span>
+          <UiIcon :name="searching ? 'spinner' : 'search'" />
           {{ searching ? 'Searching...' : 'Search Providers' }}
         </button>
         <button type="button" class="vo-btn" @click="handleApplyManual">

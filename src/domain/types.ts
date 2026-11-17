@@ -438,6 +438,7 @@ export type ConnectionStatus = v.InferOutput<typeof ConnectionStatusSchema>;
 export interface OrganizerStatePayload {
   readonly phase: JobPhase;
   readonly initStatus?: ServerInitStatus;
+  readonly ffmpegVersion?: string | null;
   readonly revision: number;
   readonly lockOwnerClientId: ClientId | null;
   readonly mountPaths: MountPathsMap;

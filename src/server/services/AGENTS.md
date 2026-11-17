@@ -22,6 +22,8 @@ Backend Maintainers.
 - `EtaPredictor` (`etaPredictor.ts`) partitions `eta_samples` by `SERVER_ID` (`env:<id>`) or hardware fingerprint (`hw:<hash>`), avoids mutating `#activeWorkType` inside `startTask()` under parallel workers (advancing stages monotonically via `setActiveStage` and `#advanceActiveStageIfExhausted`), and keeps `ETA_EMA_ALPHA = 0.3` unscaled.
 - Graceful job draining (`JobRunner.requestDrain` / `POST /api/jobs/drain`) stops dispatching new items in `runSlotWorkerPool` while completing in-flight tasks, finalizes moved items, and transitions back to `READY` when remaining items stay in the queue.
 - `unifyTvSeriesMetadataByTvdbId` unifies multi-episode TV scans sharing the same `tvdbId` (preferring `tvdb`), and `searchMetadataCatalog` returns deduplicated multi-provider candidates prioritized by `mediaKind` (`tvdb` first for `tv`, `imdb` first for `movie`).
+- Per-item sequential finalization during `executeMoveJob` (`jobExecutionService.ts`): as soon as each item finishes moving to output (`completedItem`), `enqueueItemFinalization` serially runs `backupAndCleanupAfterJob([completedItem], ...)` and `onFinalizeMovedItems([completedItem])` (removing it from `#items`, persisting SQLite queue state, and emitting SSE state immediately) so cancelling (`unlock` or `requestDrain`) never leaves completed items in the queue or orphaned sources in `INPUT_DIR`.
+- Rescan audio option preservation (`jobRunner.ts` `#preserveAudioNormalizationOnRescan`): re-scanning `INPUT_DIR` preserves prior `trackSelection.audioNormalization` settings and recalculates `[tags]` for unchanged files matching `sourcePath` and `probe.sizeBytes`.
 
 ## Key Files
 

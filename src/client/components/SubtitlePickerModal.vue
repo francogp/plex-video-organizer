@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue';
 import type { ScannedItem, SubtitleCandidate } from '../../domain/types.ts';
 import { useModalVars } from '../composables/useGsapMotion.ts';
 import type { SubtitlePickerViewState } from './QueueTable.vue';
+import UiIcon from './UiIcon.vue';
 
 const props = defineProps<{
   readonly picker: SubtitlePickerViewState | null;
@@ -114,9 +115,7 @@ watch(
                 :disabled="props.picker.downloadingId === cand.id"
                 @click="emit('download', props.item, cand)"
               >
-                <span aria-hidden="true">{{
-                  props.picker.downloadingId === cand.id ? '⏳' : '⬇'
-                }}</span>
+                <UiIcon :name="props.picker.downloadingId === cand.id ? 'spinner' : 'download'" />
                 {{ props.picker.downloadingId === cand.id ? 'Downloading' : 'Download' }}
               </button>
             </div>

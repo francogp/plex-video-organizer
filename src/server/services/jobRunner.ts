@@ -8,6 +8,7 @@ import {
   DEFAULT_AUDIO_PREFERRED_LANGUAGES,
   DEFAULT_PREFERRED_LANGUAGES
 } from '../../domain/constants.ts';
+import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
 import { reapplyAudioFilterToItem } from '../../domain/trackSelection.ts';
 import {
   AudioLanguageCodeSchema,
@@ -43,7 +44,7 @@ import { buildMountPathsMap, resolvePortableInputPath, type AppConfig } from '..
 import { EtaPredictor } from './etaPredictor.ts';
 import { cleanupOrphanTempFiles } from './fileMover.ts';
 import { executeMoveJob } from './jobExecutionService.ts';
-import { probeMedia } from './media/ffmpegRunner.ts';
+import { detectFfmpegVersion, probeMedia } from './media/ffmpegRunner.ts';
 import { configureMetadataCache } from './metadata/metadataCache.ts';
 import { runPreflightCheck, type PreflightReport } from './preflight.ts';
 import { openScanCacheDb } from './scanCacheDb.ts';
@@ -102,6 +103,7 @@ export interface SseSubscriber {
 export class JobRunner {
   readonly #config: AppConfig;
   #initStatus: ServerInitStatus = 'initializing';
+  #ffmpegVersion: string | null = null;
   #phase: JobPhase = 'IDLE';
   #revision = 0;
   #lockOwnerClientId: ClientId | null = null;
@@ -188,6 +190,7 @@ export class JobRunner {
       db.close();
     }
 
+    this.#ffmpegVersion = await detectFfmpegVersion();
     this.#initStatus = 'ready';
     this.#emitState();
   }
@@ -204,6 +207,7 @@ export class JobRunner {
     return {
       phase: this.#phase,
       initStatus: this.#initStatus,
+      ffmpegVersion: this.#ffmpegVersion,
       revision: this.#revision,
       lockOwnerClientId: this.#lockOwnerClientId,
       mountPaths: buildMountPathsMap(this.#config),
@@ -395,6 +399,9 @@ export class JobRunner {
   async #finalizeMovedItems(movedItems: readonly ScannedItem[]): Promise<void> {
     this.#removeMovedItems(movedItems);
     await this.#pruneConflictResolutionsToCurrentItems();
+    this.#revision += 1;
+    await this.#persistQueue();
+    this.#emitState();
   }
 
   #assertLockOwner(clientId: ClientId): void {
@@ -510,8 +517,28 @@ export class JobRunner {
     };
   }
 
+  #preserveAudioNormalizationOnRescan(
+    items: readonly ScannedItem[],
+    previousByPath: ReadonlyMap<string, ScannedItem>
+  ): ScannedItem[] {
+    return items.map((item) => {
+      const prev = previousByPath.get(item.sourcePath);
+      const savedNorm = prev?.trackSelection.audioNormalization;
+      if (!prev || prev.probe.sizeBytes !== item.probe.sizeBytes || !savedNorm) {
+        return item;
+      }
+      const updatedTrackSelection = { ...item.trackSelection, audioNormalization: savedNorm };
+      const baseNoExt = path.basename(item.fileName, path.extname(item.fileName));
+      const tags = extractPlexTags(baseNoExt, item.probe, {
+        trackSelection: updatedTrackSelection
+      });
+      return { ...item, trackSelection: updatedTrackSelection, tags };
+    });
+  }
+
   async #executeScan(): Promise<void> {
     const scanJobId = asJobId('scan');
+    const previousByPath = new Map(this.#items.map((item) => [item.sourcePath, item]));
     const session = await this.#createEtaPredictorSession();
     this.#activeEtaPredictor = session.etaPredictor;
     try {
@@ -546,12 +573,12 @@ export class JobRunner {
           this.#emitState();
         },
         onCancelledItems: (items) => {
-          this.#items = [...items];
+          this.#items = this.#preserveAudioNormalizationOnRescan(items, previousByPath);
         },
         onCompleted: async (withSubtitles) => {
           this.#activeJob = null;
           this.#lastError = null;
-          this.#items = [...withSubtitles];
+          this.#items = this.#preserveAudioNormalizationOnRescan(withSubtitles, previousByPath);
           await this.#pruneConflictResolutionsToCurrentItems();
           this.#phase = withSubtitles.length > 0 ? 'READY' : 'IDLE';
           if (withSubtitles.length === 0) {

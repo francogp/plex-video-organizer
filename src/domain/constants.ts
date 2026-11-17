@@ -182,39 +182,8 @@ export const ISO_639_2_LABELS: Record<(typeof ISO_639_2_PRESETS)[number], string
   und: 'Undetermined'
 };
 
-/** Supported metadata title language codes in priority order. */
-export const METADATA_LANGUAGE_CODES = [
-  'spa',
-  'eng',
-  'jpn',
-  'por',
-  'fra',
-  'deu',
-  'ita',
-  'native'
-] as const;
-
-/** Human-readable labels for metadata title language codes. */
-export const METADATA_LANGUAGE_LABELS: Record<(typeof METADATA_LANGUAGE_CODES)[number], string> = {
-  spa: 'Español (spa)',
-  eng: 'English (eng)',
-  jpn: 'Japanese (jpn)',
-  por: 'Português (por)',
-  fra: 'Français (fra)',
-  deu: 'Deutsch (deu)',
-  ita: 'Italiano (ita)',
-  native: 'Native'
-};
-
-/** Default preferred metadata title language order. */
-export const DEFAULT_PREFERRED_LANGUAGES: readonly (typeof METADATA_LANGUAGE_CODES)[number][] = [
-  'eng',
-  'spa',
-  'native'
-];
-
-/** Canonical ISO-639-2/T audio language preference codes. */
-export const AUDIO_LANGUAGE_CODES = [
+/** Standard ISO-639-2/T languages shared by metadata title and audio track preferences. */
+const STANDARD_ISO_639_2_LANGUAGES = [
   'eng',
   'spa',
   'zho',
@@ -236,9 +205,42 @@ export const AUDIO_LANGUAGE_CODES = [
   'nor',
   'dan',
   'fin',
-  'tur',
-  'und'
+  'tur'
 ] as const;
+
+type StandardIsoLanguageCode = (typeof STANDARD_ISO_639_2_LANGUAGES)[number];
+
+function buildStandardLanguageLabels(): Readonly<Record<StandardIsoLanguageCode, string>> {
+  return Object.fromEntries(
+    STANDARD_ISO_639_2_LANGUAGES.map((code) => {
+      const base = ISO_639_2_LABELS[code];
+      return [code, base.endsWith(`(${code})`) ? base : `${base} (${code})`];
+    })
+  ) as Readonly<Record<StandardIsoLanguageCode, string>>;
+}
+
+const STANDARD_LANGUAGE_LABELS = buildStandardLanguageLabels();
+
+/** Supported metadata title language codes in priority order. */
+export const METADATA_LANGUAGE_CODES = [...STANDARD_ISO_639_2_LANGUAGES, 'native'] as const;
+
+/** Human-readable labels for metadata title language codes. */
+export const METADATA_LANGUAGE_LABELS: Readonly<
+  Record<(typeof METADATA_LANGUAGE_CODES)[number], string>
+> = {
+  ...STANDARD_LANGUAGE_LABELS,
+  native: 'Native'
+};
+
+/** Default preferred metadata title language order. */
+export const DEFAULT_PREFERRED_LANGUAGES: readonly (typeof METADATA_LANGUAGE_CODES)[number][] = [
+  'eng',
+  'spa',
+  'native'
+];
+
+/** Canonical ISO-639-2/T audio language preference codes. */
+export const AUDIO_LANGUAGE_CODES = [...STANDARD_ISO_639_2_LANGUAGES, 'und'] as const;
 
 type AudioLanguageCode = (typeof AUDIO_LANGUAGE_CODES)[number];
 
@@ -252,13 +254,10 @@ export const DEFAULT_AUDIO_PREFERRED_LANGUAGES: readonly AudioLanguageCode[] = [
 ];
 
 /** Human-readable labels with explicit ISO-639-2/T codes for audio language preference chips. */
-export const AUDIO_LANGUAGE_LABELS: Readonly<Record<AudioLanguageCode, string>> =
-  Object.fromEntries(
-    AUDIO_LANGUAGE_CODES.map((code) => {
-      const base = ISO_639_2_LABELS[code];
-      return [code, base.endsWith(`(${code})`) ? base : `${base} (${code})`];
-    })
-  ) as Readonly<Record<AudioLanguageCode, string>>;
+export const AUDIO_LANGUAGE_LABELS: Readonly<Record<AudioLanguageCode, string>> = {
+  ...STANDARD_LANGUAGE_LABELS,
+  und: `${ISO_639_2_LABELS.und} (und)`
+};
 
 /** Log event severity levels. */
 export const LOG_LEVELS = ['info', 'warn', 'error'] as const;

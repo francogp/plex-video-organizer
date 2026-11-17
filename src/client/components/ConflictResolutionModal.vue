@@ -11,6 +11,7 @@ import type {
 } from '../../domain/types.ts';
 import { useModalVars } from '../composables/useGsapMotion.ts';
 import { formatBytesHuman, formatProbeSpecRows, formatSizeDeltaMb } from '../utils/formatters.ts';
+import UiIcon from './UiIcon.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -305,7 +306,7 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
             :disabled="!allResolved"
             @click="emit('confirm', decisions)"
           >
-            <span aria-hidden="true">⚡</span>
+            <UiIcon name="bolt" />
             {{ mode === 'save-and-confirm' ? 'Confirm & Apply' : 'Confirm & Process' }}
           </button>
         </div>

@@ -12,6 +12,7 @@ import { asIso639_2Code, asItemId, type ScannedItem } from '../../src/domain/typ
 import {
   analyzeAudioVolume,
   buildFfmpegRemuxArgs,
+  detectFfmpegVersion,
   measureLoudnormPass1,
   normalizeSubtitleToUtf8,
   probeMedia,
@@ -641,5 +642,36 @@ describe('ffmpegRunner', () => {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it('parses and detects ffmpeg version output safely', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      kill: vi.fn()
+    });
+    spawnMock.mockReturnValueOnce(child);
+    const pending = detectFfmpegVersion();
+    child.stdout.emit('data', Buffer.from('ffmpeg version 8.0-static Copyright (c) 2000-2025\n'));
+    child.emit('close', 0);
+    await expect(pending).resolves.toBe('8.0-static');
+
+    const badChild = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      kill: vi.fn()
+    });
+    spawnMock.mockReturnValueOnce(badChild);
+    const badPending = detectFfmpegVersion();
+    badChild.stdout.emit('data', Buffer.from('unexpected output\n'));
+    badChild.emit('close', 0);
+    await expect(badPending).resolves.toBeNull();
+
+    const failChild = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      kill: vi.fn()
+    });
+    spawnMock.mockReturnValueOnce(failChild);
+    const failPending = detectFfmpegVersion();
+    failChild.emit('error', new Error('ENOENT'));
+    await expect(failPending).resolves.toBeNull();
   });
 });

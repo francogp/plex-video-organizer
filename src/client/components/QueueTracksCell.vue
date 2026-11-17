@@ -3,6 +3,7 @@ import { computed } from 'vue';
 
 import type { ItemId, ScannedItem } from '../../domain/types.ts';
 import QueueTracksPanel, { type TracksSummary } from './QueueTracksPanel.vue';
+import UiIcon from './UiIcon.vue';
 
 export interface TracksSubtitlePickerState {
   readonly itemId: ItemId;
@@ -54,7 +55,7 @@ const isPickerLoading = computed<boolean>(
         "
         @click="emit('search-subtitles')"
       >
-        <span aria-hidden="true">{{ isPickerLoading ? '⏳' : '⬇' }}</span>
+        <UiIcon :name="isPickerLoading ? 'spinner' : 'download'" />
         {{ props.summary.missingSpanishSubs ? 'Find spa' : 'Sub spa' }}
       </button>
       <button

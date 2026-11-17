@@ -169,7 +169,8 @@ export default defineAuditConfig({
     enabled: true
   },
   packageHygiene: {
-    enabled: true
+    enabled: true,
+    ignoreBinaries: ['ffmpeg']
   },
   packageScripts: {
     enabled: true,

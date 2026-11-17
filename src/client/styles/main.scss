@@ -63,6 +63,7 @@ body {
   transition:
     border-color 0.15s ease,
     background-color 0.15s ease;
+  min-block-size: 2.375rem;
   cursor: pointer;
 
   &:hover:not(:disabled) {

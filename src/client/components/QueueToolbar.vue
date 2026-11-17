@@ -7,6 +7,7 @@ import {
 } from '../../domain/constants.ts';
 import type { ConflictDecision, MediaKind, OutputCategory } from '../../domain/types.ts';
 import TableResetCount from './table/TableResetCount.vue';
+import UiIcon from './UiIcon.vue';
 
 export interface FolderOption {
   readonly prefix: string;
@@ -203,7 +204,7 @@ function onBulkAudioChange(event: Event): void {
       :disabled="props.disabled"
       @click="emit('search-metadata-bulk')"
     >
-      <span aria-hidden="true">🔍</span> Search Match
+      <UiIcon name="search" /> Search Match
     </button>
     <button type="button" class="vo-btn" @click="emit('clear-selection')">
       <span aria-hidden="true">🧹</span> Clear

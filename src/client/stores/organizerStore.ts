@@ -60,6 +60,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
   );
   const connectionStatus = ref<ConnectionStatus>('connecting');
   const serverInitStatus = ref<ServerInitStatus>('initializing');
+  const ffmpegVersion = ref<string | null>(null);
   const phase = ref<JobPhase>('IDLE');
   const revision = ref<number>(0);
   const lockOwnerClientId = ref<ClientId | null>(null);
@@ -129,6 +130,9 @@ export const useOrganizerStore = defineStore('organizer', () => {
   function applyServerState(state: OrganizerStatePayload): void {
     phase.value = state.phase;
     serverInitStatus.value = state.initStatus ?? 'ready';
+    if (state.ffmpegVersion !== undefined) {
+      ffmpegVersion.value = state.ffmpegVersion;
+    }
     revision.value = state.revision;
     lockOwnerClientId.value = state.lockOwnerClientId;
     mountPaths.value = state.mountPaths;
@@ -668,6 +672,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     connectionStatus,
     serverInitStatus,
     isInitializing,
+    ffmpegVersion,
     phase,
     revision,
     lockOwnerClientId,

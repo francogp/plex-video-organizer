@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ConflictDecision } from '../../domain/types.ts';
+import UiIcon from './UiIcon.vue';
 
 withDefaults(
   defineProps<{
@@ -37,7 +38,7 @@ const emit = defineEmits<{
     <template v-else-if="decision === 'ignore'">
       <span aria-hidden="true">⏭️</span> Ignore
     </template>
-    <template v-else> <span aria-hidden="true">⚖️</span> Resolve conflict </template>
+    <template v-else> <UiIcon name="scale" /> Resolve conflict </template>
   </button>
 </template>
 

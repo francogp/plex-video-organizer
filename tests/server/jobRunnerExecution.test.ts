@@ -811,4 +811,54 @@ describe('JobRunner execution pipeline', () => {
 
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
+
+  it('preserves user-selected audioNormalization options across rescan', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-rescan-audio-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const configDir = path.join(tmpDir, 'config');
+    const outputDir = path.join(tmpDir, 'output');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.writeFile(path.join(inputDir, 'Movie (2024).mkv'), 'v');
+
+    const cfg = loadConfig({
+      CONFIG_DIR: configDir,
+      INPUT_DIR: inputDir,
+      OUTPUT_MOVIES_DIR: outputDir,
+      OUTPUT_DOCUMENTARIES_DIR: outputDir,
+      OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+      OUTPUT_TV_SHOWS_DIR: outputDir,
+      OUTPUT_ANIMATED_SERIES_DIR: outputDir
+    });
+
+    const runner = new JobRunner(cfg);
+    await runner.init();
+
+    const clientId = asClientId('c1:rescan');
+    runner.startScan(clientId);
+    for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const firstState = runner.getState();
+    const firstItem = firstState.items[0]!;
+    await runner.patchItem(clientId, firstState.revision, firstItem.id, {
+      audioNormalization: { mode: 'loudnorm', codec: 'aac', downmixStereo: true }
+    });
+
+    runner.startScan(clientId);
+    for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const rescanned = runner.getState().items[0]!;
+    expect(rescanned.trackSelection.audioNormalization).toEqual({
+      mode: 'loudnorm',
+      codec: 'aac',
+      downmixStereo: true
+    });
+
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
 });

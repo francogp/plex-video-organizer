@@ -15,11 +15,13 @@ import type {
 } from '../../domain/types.ts';
 import { formatPhaseLabel } from '../utils/formatters.ts';
 import LanguageOrderBar from './LanguageOrderBar.vue';
+import UiIcon, { type UiIconName } from './UiIcon.vue';
 
 export type WorkspaceTab = 'organizer' | 'verifier';
 
 const props = defineProps<{
   appSemver: string;
+  ffmpegVersion?: string | null;
   phase: JobPhase;
   clientId: string;
   activeTab: WorkspaceTab;
@@ -57,13 +59,25 @@ const mountsExpanded = ref(false);
 
 const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(props.mountPaths));
 
-const mountsToggle = computed(() =>
-  mountsExpanded.value ? { icon: '📂', label: 'Hide Mounts' } : { icon: '📁', label: 'Mounts' }
+const mountsToggle = computed<{ readonly icon: UiIconName; readonly label: string }>(() =>
+  mountsExpanded.value
+    ? { icon: 'folder-open', label: 'Hide Mounts' }
+    : { icon: 'folder', label: 'Mounts' }
 );
 
-const themeToggle = computed(() =>
-  props.theme === 'dark' ? { icon: '☀️', label: 'Light Mode' } : { icon: '🌙', label: 'Dark Mode' }
+const themeToggle = computed<{ readonly icon: UiIconName; readonly label: string }>(() =>
+  props.theme === 'dark'
+    ? { icon: 'sun', label: 'Light Mode' }
+    : { icon: 'moon', label: 'Dark Mode' }
 );
+
+const shortFfmpegVersion = computed<string | null>(() => {
+  const raw = props.ffmpegVersion?.trim();
+  if (!raw) {
+    return null;
+  }
+  return /^([0-9]+(?:\.[0-9]+)*)/.exec(raw)?.[1] ?? raw;
+});
 
 const phaseBadgeTitle = computed<string | undefined>(() =>
   props.phase === 'PREFLIGHT_BLOCKED'
@@ -84,10 +98,10 @@ const verifierBusy = computed<boolean>(
   () => props.isLockedByOther || props.verifierScanning || props.verifierFixing
 );
 
-const verifierScanButton = computed(() =>
+const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label: string }>(() =>
   props.verifierScanning
-    ? { icon: '⏳', label: 'Scanning Libraries...' }
-    : { icon: '🔍', label: 'Scan Libraries' }
+    ? { icon: 'spinner', label: 'Scanning Libraries...' }
+    : { icon: 'search', label: 'Scan Libraries' }
 );
 </script>
 
@@ -112,7 +126,15 @@ const verifierScanButton = computed(() =>
             {{ formatPhaseLabel(props.phase) }}
           </span>
         </div>
-        <p class="vo-subtitle vo-mono">Client: {{ props.clientId }} · TZ: Buenos Aires (ART)</p>
+        <p class="vo-subtitle vo-mono">
+          Client: {{ props.clientId }} · TZ: Buenos Aires (ART)<template v-if="shortFfmpegVersion">
+            ·
+            <span class="vo-ffmpeg-chip" :title="props.ffmpegVersion ?? undefined">
+              <span class="vo-status-dot" aria-hidden="true" />
+              FFmpeg {{ shortFfmpegVersion }}
+            </span>
+          </template>
+        </p>
       </div>
       <nav class="vo-tabs" role="tablist" aria-label="Workspace mode">
         <button
@@ -145,11 +167,11 @@ const verifierScanButton = computed(() =>
     </div>
     <div class="vo-header-actions">
       <button type="button" class="vo-btn" @click="mountsExpanded = !mountsExpanded">
-        <span aria-hidden="true">{{ mountsToggle.icon }}</span>
+        <UiIcon :name="mountsToggle.icon" />
         {{ mountsToggle.label }}
       </button>
       <button type="button" class="vo-btn" @click="emit('toggle-theme')">
-        <span aria-hidden="true">{{ themeToggle.icon }}</span>
+        <UiIcon :name="themeToggle.icon" />
         {{ themeToggle.label }}
       </button>
       <template v-if="props.activeTab === 'organizer'">
@@ -159,7 +181,8 @@ const verifierScanButton = computed(() =>
           :disabled="props.isInitializing || props.isLockedByOther || props.isBusy"
           @click="emit('scan-input')"
         >
-          <span aria-hidden="true">🔍</span> Scan Input
+          <UiIcon name="search" />
+          Scan Input
         </button>
         <button
           type="button"
@@ -168,7 +191,7 @@ const verifierScanButton = computed(() =>
           :title="processQueueTitle"
           @click="emit('process-queue')"
         >
-          <span aria-hidden="true">⚡</span>
+          <UiIcon name="bolt" />
           <span>Process Queue</span>
           <span class="vo-badge vo-badge--compact">{{ props.includedQueueCount }}</span>
         </button>
@@ -196,7 +219,7 @@ const verifierScanButton = computed(() =>
           :disabled="props.isInitializing || verifierBusy"
           @click="emit('scan-verifier')"
         >
-          <span aria-hidden="true">{{ verifierScanButton.icon }}</span>
+          <UiIcon :name="verifierScanButton.icon" />
           {{ verifierScanButton.label }}
         </button>
         <button
@@ -206,10 +229,11 @@ const verifierScanButton = computed(() =>
           @click="emit('fix-verifier')"
         >
           <template v-if="props.verifierFixing">
-            <span aria-hidden="true">⏳</span> Renaming...
+            <UiIcon name="spinner" />
+            Renaming...
           </template>
           <template v-else>
-            <span aria-hidden="true">🔧</span>
+            <UiIcon name="wrench" />
             <span>Fix Selected (Rename)</span>
             <span class="vo-badge vo-badge--compact">{{ props.selectedVerifierCount }}</span>
           </template>
@@ -228,27 +252,31 @@ const verifierScanButton = computed(() =>
     <div>animated-series: {{ props.mountPaths['animated-series'] }}</div>
   </section>
 
-  <LanguageOrderBar
-    label="Title Language Order"
-    aria-label="Preferred Title Language Order"
-    add-aria-label="Add preferred title language"
-    :languages="props.preferredLanguages"
-    :all-codes="METADATA_LANGUAGE_CODES"
-    :labels-map="METADATA_LANGUAGE_LABELS"
-    :disabled="props.isInitializing"
-    @update="emit('set-preferred-languages', $event)"
-  />
+  <div class="vo-lang-bars">
+    <LanguageOrderBar
+      label="Title Language Order"
+      aria-label="Preferred Title Language Order"
+      add-aria-label="Add preferred title language"
+      :languages="props.preferredLanguages"
+      :all-codes="METADATA_LANGUAGE_CODES"
+      :labels-map="METADATA_LANGUAGE_LABELS"
+      :locked-codes="['native']"
+      :disabled="props.isInitializing"
+      @update="emit('set-preferred-languages', $event)"
+    />
 
-  <LanguageOrderBar
-    label="Audio Language Order"
-    aria-label="Preferred Audio Language Order"
-    add-aria-label="Add preferred audio language"
-    :languages="props.audioPreferredLanguages"
-    :all-codes="AUDIO_LANGUAGE_CODES"
-    :labels-map="AUDIO_LANGUAGE_LABELS"
-    :disabled="props.isInitializing"
-    @update="emit('set-audio-preferred-languages', $event)"
-  />
+    <LanguageOrderBar
+      label="Audio Language Order"
+      aria-label="Preferred Audio Language Order"
+      add-aria-label="Add preferred audio language"
+      :languages="props.audioPreferredLanguages"
+      :all-codes="AUDIO_LANGUAGE_CODES"
+      :labels-map="AUDIO_LANGUAGE_LABELS"
+      :locked-codes="['und']"
+      :disabled="props.isInitializing"
+      @update="emit('set-audio-preferred-languages', $event)"
+    />
+  </div>
 </template>
 
 <style scoped lang="scss">
@@ -322,6 +350,30 @@ const verifierScanButton = computed(() =>
   margin: var(--vo-space-1) 0 0;
   color: var(--vo-text-muted);
   font-size: var(--vo-text-xs);
+}
+
+.vo-ffmpeg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--vo-space-1);
+}
+
+.vo-status-dot {
+  border-radius: var(--vo-radius-pill);
+  background-color: var(--vo-success);
+  inline-size: 6px;
+  block-size: 6px;
+  flex: none;
+}
+
+.vo-lang-bars {
+  display: grid;
+  gap: var(--vo-space-1);
+  grid-template-columns: minmax(0, 1fr);
+
+  @media (width >= 1024px) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .vo-header-left {

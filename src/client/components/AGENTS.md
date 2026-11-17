@@ -12,11 +12,11 @@ Frontend Maintainers.
 - Scoped styles must consume CSS custom properties from `src/client/styles/_tokens.scss`.
 - Table headers (`<th>`) must use an opaque surface (`var(--vo-surface-elevated)`) with explicit cell borders, a single horizontal scrollbar on the table wrapper, and `min-width: 0; max-width: 100%;` on cells so content never overlaps adjacent columns.
 - `table/VirtualDataTable.vue` owns shared conflict row highlighting (`tr.vo-row--has-conflict` and `tr.vo-row--has-conflict-resolved` using `--vo-danger` / `--vo-warning` tokens, never `--vo-warn`), while `QueueTable.vue` (via `.vo-cell-conflict`) and `VerifierView.vue` render `ConflictActionButton.vue` directly inside the row cell rather than an expanded `#row-after` panel.
-- Include descriptive `<span aria-hidden="true">` emojis on action buttons, count badges on primary batch triggers, and keep the active progress banner structured into header metrics/cancel controls, one stable `.vo-progress__file` row per slot in `activeTasks` (with optional per-task percentage), and the bottom `<progress>` bar.
+- Use monochrome `<UiIcon>` SVG icons (or descriptive `<span aria-hidden="true">` indicators where appropriate) on action buttons, count badges on primary batch triggers, and keep the active progress banner structured into header metrics/cancel controls, one stable `.vo-progress__file` row per slot in `activeTasks` (with optional per-task percentage), and the bottom `<progress>` bar.
 - Expose visible-row bulk selection exclusively via the `#vo-select-all-visible` header checkbox in `QueueTable.vue` (never duplicate a toolbar `Select Visible` button), and serve the standalone vector Chevron Stack icon from `public/favicon.svg` across `index.html` and the `src/client/App.vue` header.
 - Modularize large table/view SFCs (`QueueTable.vue`, `VerifierView.vue`, `App.vue`) into dedicated header, toolbar, and cell sub-components, keeping shared cell layout and accessibility utilities (`.vo-audio-cell`, `.vo-audio-controls`, `.vo-sr-only`) in `src/client/styles/main.scss` rather than duplicating scoped CSS blocks.
 - Match selected metadata candidates in `QueueMetadataCell.vue` by value (`provider`, `externalId`, `title`, `year`) rather than object reference (`===`) so selections survive API refreshes and page reloads.
-- Parameterize `LanguageOrderBar.vue` with Vue 3 `generic="T extends string"` and propagate `props.disabled` to every chip action button (`Move left`, `Move right`, `Remove`) in addition to the add-language `<select>`.
+- Parameterize `LanguageOrderBar.vue` with Vue 3 `generic="T extends string"`, support `lockedCodes` (e.g. `native`, `und`) that can be reordered but not removed, and propagate `props.disabled` to every chip action button (`Move earlier`, `Move later`, `Remove`) in addition to the searchable `+ Add` language picker.
 - In `SubtitlePreviewModal.vue`, key `<track :key="vttSrc">` on seek to prevent stale cue accumulation in Chromium, explicitly release the `<video>` stream (`pause` + `removeAttribute('src')` + `load()`) on close/unmount/item change, and suppress benign `AbortError` rejections from `play()`.
 - Render Spanish subtitle discovery in `SubtitlePickerModal.vue` sorted by `hashMatch` first and descending `score` rather than truncated inline lists inside `QueueTracksCell.vue`.
 - Reuse `ProviderLinks.vue` (via `extractCandidateLinks` from `src/client/utils/formatters.ts`) inside both `QueueMetadataCell.vue` and `MetadataSearchModal.vue`, persist discovered candidates via `ItemPatch.candidates`, highlight the active selection (`✓ Selected` vs `Select`), and expose `Stop After Current` (`drain`) in `OrganizerStatusBar.vue` during `PROCESSING`.
@@ -48,6 +48,7 @@ Frontend Maintainers.
 - [VerifierView.vue](VerifierView.vue): Plex library naming compliance verifier and bottom-up rename view.
 - [VerifierStatusToolbar.vue](VerifierStatusToolbar.vue): Library audit progress bar, summary stats, and filter toolbar for `VerifierView.vue`.
 - [VerifierRenamePlanCell.vue](VerifierRenamePlanCell.vue): Grouped bottom-up file and directory rename plan cell for `VerifierView.vue`.
+- [UiIcon.vue](UiIcon.vue): Shared monochrome inline SVG icon component (`UiIconName`) inheriting `currentColor` for crisp button contrast.
 
 ## Work Guidance
 

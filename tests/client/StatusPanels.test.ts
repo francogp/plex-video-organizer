@@ -185,7 +185,11 @@ describe('StatusPanels', () => {
     expect(wrapper.text()).toContain('Title Language Order');
     expect(wrapper.text()).toContain('Audio Language Order');
 
+    const titleBar = wrapper.find('section[aria-label="Preferred Title Language Order"]');
+    expect(titleBar.find('button[aria-label="Remove native"]').exists()).toBe(false);
+
     const audioBar = wrapper.find('section[aria-label="Preferred Audio Language Order"]');
+    expect(audioBar.find('button[aria-label="Remove und"]').exists()).toBe(false);
     const removeEngBtn = audioBar.find('button[aria-label="Remove eng"]');
     await removeEngBtn.trigger('click');
     expect(wrapper.emitted('set-audio-preferred-languages')?.[0]).toEqual([
@@ -198,8 +202,13 @@ describe('StatusPanels', () => {
       ['spa', 'eng', 'zho', 'jpn', 'und']
     ]);
 
-    const addSelect = audioBar.find('select');
-    await addSelect.setValue('kor');
+    const addBtn = audioBar.find('button[aria-label="Add preferred audio language"]');
+    await addBtn.trigger('click');
+    const searchInput = audioBar.find('input[type="search"]');
+    await searchInput.setValue('kor');
+    const korOption = audioBar.find('button[role="option"]');
+    expect(korOption.text()).toContain('kor');
+    await korOption.trigger('click');
     expect(wrapper.emitted('set-audio-preferred-languages')?.[2]).toEqual([
       ['eng', 'spa', 'zho', 'jpn', 'und', 'kor']
     ]);

@@ -575,6 +575,7 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
   } = options;
   const movedItems: ScannedItem[] = [];
   const createdTempSubs: string[] = [];
+  let finalizeChain: Promise<void> = Promise.resolve();
 
   try {
     const purged = await purgeExpiredBackups(config.backupDir);
@@ -598,6 +599,29 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
       stage?: ProcessItemStage;
       stageLabel?: string;
     }> = Array.from({ length: workerCount }, () => ({ tasks: [] }));
+    const enqueueItemFinalization = (completedItem: ScannedItem): Promise<void> => {
+      const next = finalizeChain.then(async () => {
+        onProgress({
+          jobId,
+          activeTasks: [{ slot: 0, fileName: completedItem.fileName }],
+          totalItems: toProcess.length,
+          completedItems: movedItems.length,
+          percent: Math.min(
+            PERCENT_MAX,
+            Math.round(((movedItems.length + 1) / toProcess.length) * PERCENT_MAX)
+          ),
+          stage: 'cleanup',
+          stageLabel: 'Cleaning up'
+        });
+        await backupAndCleanupAfterJob([completedItem], config.inputDir, config.backupDir);
+        movedItems.push(completedItem);
+        await onFinalizeMovedItems([completedItem]);
+      });
+      finalizeChain = next.catch((err: unknown) => {
+        onLog('error', err instanceof Error ? err.message : String(err));
+      });
+      return next;
+    };
     const itemBytes = toProcess.map((item) => Math.max(1, item.probe.sizeBytes));
     const totalBytes = itemBytes.reduce((sum, b) => sum + b, 0);
     const itemFractions = toProcess.map(() => 0);
@@ -682,48 +706,29 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
           }
         });
         slotStates[slot] = { tasks: [] };
-        if (!completedItem || isCancelled()) {
+        if (!completedItem) {
           return;
         }
+        await enqueueItemFinalization(completedItem);
         itemFractions[idx] = 1;
         completedCount += 1;
-        movedItems.push(completedItem);
+        if (isCancelled()) {
+          return;
+        }
         emitJobProgress('moving', 'Moved');
       },
       (): boolean => isCancelled() || Boolean(isDraining?.())
     );
 
+    await finalizeChain;
     if (isCancelled()) {
-      await onFinalizeMovedItems(movedItems);
       return;
     }
 
-    onLog(
-      'info',
-      `Backing up & cleaning up ${String(movedItems.length)} processed source item(s)...`
-    );
-    await backupAndCleanupAfterJob(
-      movedItems,
-      config.inputDir,
-      config.backupDir,
-      (cleaned, total, fileName): void => {
-        const cleanPercent = total > 0 ? Math.round((cleaned / total) * PERCENT_MAX) : PERCENT_MAX;
-        onProgress({
-          jobId,
-          activeTasks: [{ slot: 0, fileName }],
-          totalItems: total,
-          completedItems: cleaned,
-          percent: cleanPercent,
-          stage: 'cleanup',
-          stageLabel: 'Cleaning up'
-        });
-      }
-    );
-    await onFinalizeMovedItems(movedItems);
     await onComplete(movedItems.length);
   } catch (err) {
+    await finalizeChain;
     if (isCancelled()) {
-      await onFinalizeMovedItems(movedItems);
       return;
     }
     const msg = err instanceof Error ? err.message : String(err);

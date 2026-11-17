@@ -90,6 +90,7 @@ const activeJobSummaryText = computed<string>(() => {
     v-model:active-tab="activeTab"
     v-model:recalculate-verifier-tags="wf.recalculateVerifierTags.value"
     :app-semver="appSemver"
+    :ffmpeg-version="store.ffmpegVersion"
     :phase="store.phase"
     :client-id="store.clientId"
     :queue-count="store.items.length"
