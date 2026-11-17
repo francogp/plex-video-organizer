@@ -81,42 +81,18 @@ TVDB_API_KEY=your_tvdb_key
 
 ### Option A: Prebuilt Image (Arcane, Container Station, Portainer — No Git Required)
 
-GitHub Actions builds and publishes two decoupled multi-architecture images (`linux/amd64`, `linux/arm64`) **on release tags `v*`** (plus independent FFmpeg companion updates via the scheduled/manual `ffmpeg-publish.yml` workflow, never on untagged commits to `main`):
+GitHub Actions builds and publishes a single multi-architecture image (`linux/amd64`, `linux/arm64`) **on release tags `v*`** (never on untagged commits to `main`):
 
-- `ghcr.io/francogp/plex-video-organizer:latest` — hardened rootless Node.js 26 runtime (`read_only: true`, `cap_drop: [ALL]`, pruned of frontend build dependencies and OS-bundled FFmpeg).
-- `ghcr.io/francogp/plex-video-organizer-ffmpeg:latest` — lightweight static `ffmpeg` + `ffprobe` init container (`mwader/static-ffmpeg` + `busybox`) that populates the shared `ffmpeg-bin` volume and initializes `/config` ownership.
+- `ghcr.io/francogp/plex-video-organizer:latest` — hardened rootless Node.js 26 runtime (`read_only: true`, `cap_drop: [ALL]`) with static `ffmpeg` + `ffprobe` (`mwader/static-ffmpeg:latest`) bundled directly inside the image.
 
 #### Complete `compose.yaml`
 
 ```yaml
 name: plex-video-organizer
 services:
-  ffmpeg-provider:
-    image: ghcr.io/francogp/plex-video-organizer-ffmpeg:latest
-    container_name: plex-video-organizer-ffmpeg
-    restart: 'no'
-    environment:
-      PUID: '${PUID:-1000}'
-      PGID: '${PGID:-1000}'
-      CONFIG_DIR: /config
-    volumes:
-      - ffmpeg-bin:/opt/ffmpeg
-      - '${CONFIG_DIR:?Set CONFIG_DIR in .env to a writable host directory}:/config'
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-
   plex-video-organizer:
     image: ghcr.io/francogp/plex-video-organizer:latest
     container_name: plex-video-organizer
-    depends_on:
-      ffmpeg-provider:
-        condition: service_completed_successfully
     user: '${PUID:-1000}:${PGID:-1000}'
     read_only: true
     tmpfs:
@@ -140,7 +116,6 @@ services:
       OUTPUT_TV_SHOWS_DIR: /data/output/tv-shows
       OUTPUT_ANIMATED_SERIES_DIR: /data/output/animated-series
     volumes:
-      - ffmpeg-bin:/opt/ffmpeg:ro
       - '${CONFIG_DIR:?Set CONFIG_DIR in .env to a writable host directory}:/config'
       - '${INPUT_DIR:?Set INPUT_DIR in .env to your staging host directory}:/data/input'
       - '${BACKUP_DIR:?Set BACKUP_DIR in .env to your backup host directory}:/data/backup'
@@ -160,9 +135,6 @@ services:
       timeout: 3s
       retries: 12
       start_period: 5s
-
-volumes:
-  ffmpeg-bin:
 ```
 
 #### Complete `.env` Example (NAS / Arcane)
@@ -192,7 +164,7 @@ TVDB_API_KEY=
 2. Paste the **`compose.yaml`** above into the Compose editor.
 3. Paste the **`.env`** variables above into the **Environment (`.env`)** section, adjusting `PUID`, `PGID`, and your host folder paths.
 4. Click **Deploy / Up**. Open `http://<NAS-LAN-IP>:3000` in your browser.
-5. **To update later**: click **Pull** (or **Update / Redeploy**) in Arcane to fetch the latest images (`ghcr.io/francogp/plex-video-organizer:latest` and/or `ghcr.io/francogp/plex-video-organizer-ffmpeg:latest`). You can update `plex-video-organizer-ffmpeg:latest` independently and redeploy the stack without rebuilding or changing the app container image.
+5. **To update later**: click **Pull** (or **Update / Redeploy**) in Arcane to fetch the latest `ghcr.io/francogp/plex-video-organizer:latest` image and redeploy the container.
 
 > **Private vs. Public GHCR Package**: When the GitHub packages are **Public**, Arcane and Docker pull them without authentication. If you keep the packages **Private**, create a GitHub Personal Access Token with `read:packages` and add `ghcr.io` credentials once under **Arcane -> Settings -> Registries** (or run `docker login ghcr.io` on the host).
 

@@ -1,12 +1,5 @@
 FROM mwader/static-ffmpeg:latest AS ffmpeg-source
 
-FROM busybox:1.38.0-musl AS ffmpeg-provider
-
-COPY --from=ffmpeg-source /ffmpeg /opt/ffmpeg-src/ffmpeg
-COPY --from=ffmpeg-source /ffprobe /opt/ffmpeg-src/ffprobe
-
-ENTRYPOINT ["sh", "-c", "mkdir -p /opt/ffmpeg && cp -f /opt/ffmpeg-src/ffmpeg /opt/ffmpeg/.ffmpeg.tmp && cp -f /opt/ffmpeg-src/ffprobe /opt/ffmpeg/.ffprobe.tmp && chmod 0755 /opt/ffmpeg/.ffmpeg.tmp /opt/ffmpeg/.ffprobe.tmp && mv -f /opt/ffmpeg/.ffmpeg.tmp /opt/ffmpeg/ffmpeg && mv -f /opt/ffmpeg/.ffprobe.tmp /opt/ffmpeg/ffprobe && if [ -n \"${CONFIG_DIR:-}\" ] && [ \"$(id -u)\" = \"0\" ]; then mkdir -p \"${CONFIG_DIR}\" && (chown -R \"${PUID:-1000}:${PGID:-1000}\" \"${CONFIG_DIR}\" || true) && (chmod 0775 \"${CONFIG_DIR}\" || true); fi"]
-
 FROM --platform=$BUILDPLATFORM node:26.13.1-alpine3.24 AS builder
 
 RUN apk add --no-cache git \
@@ -32,9 +25,10 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
   APP_PORT=3000 \
-  HOME=/tmp \
-  PATH="/opt/ffmpeg:${PATH}"
+  HOME=/tmp
 
+COPY --from=ffmpeg-source --chmod=0755 /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-source --chmod=0755 /ffprobe /usr/local/bin/ffprobe
 COPY package.json ./package.json
 COPY --from=builder /app/node_modules/valibot ./node_modules/valibot
 COPY --from=builder /app/dist ./dist
