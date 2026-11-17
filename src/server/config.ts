@@ -20,6 +20,7 @@ const PortSchema = v.pipe(
 );
 
 const EnvSchema = v.object({
+  SERVER_ID: v.optional(v.string()),
   APP_PORT: PortSchema,
   DEV_CLIENT_PORT: PortSchema,
   PUID: PortSchema,
@@ -40,6 +41,7 @@ const EnvSchema = v.object({
 });
 
 export interface AppConfig {
+  readonly serverId?: string;
   readonly appPort: number;
   readonly devClientPort: number;
   readonly puid: number;
@@ -63,6 +65,7 @@ export interface AppConfig {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = v.parse(EnvSchema, env);
   return {
+    serverId: parsed.SERVER_ID?.trim() || undefined,
     appPort: parsed.APP_PORT ?? DEFAULT_APP_PORT,
     devClientPort: parsed.DEV_CLIENT_PORT ?? DEFAULT_DEV_CLIENT_PORT,
     puid: parsed.PUID ?? DEFAULT_PUID,

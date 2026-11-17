@@ -13,6 +13,8 @@ QA Engineering Agents.
 ## Key Files
 
 - [config.test.ts](config.test.ts): Environment configuration and mount validation tests.
+- [etaPredictor.test.ts](etaPredictor.test.ts): `EtaPredictor` host partitioning, calibration gating, live EMA, and batch flush tests.
+- [scanCacheDb.test.ts](scanCacheDb.test.ts): `ScanCacheDb` migrations, cache persistence, and ETA sample retention tests.
 - [scanner.test.ts](scanner.test.ts): Recursive Plex scanner, `.plexignore`, `.plexmatch`, and subtitle tests.
 - [metadata.test.ts](metadata.test.ts): IMDb, OMDb, TVDB v4, and TVmaze client tests.
 - [preflight.test.ts](preflight.test.ts): Destination collision and disk space check tests.

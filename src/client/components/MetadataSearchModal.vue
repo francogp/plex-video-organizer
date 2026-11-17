@@ -2,7 +2,11 @@
 import { computed, ref, watch } from 'vue';
 
 import { EPISODE_ORDER_MODES } from '../../domain/constants.ts';
-import { formatTitleWithYear, parseProviderReference } from '../../domain/plexFormatter.ts';
+import {
+  formatTitleWithYear,
+  mergeDeduplicatedCandidates,
+  parseProviderReference
+} from '../../domain/plexFormatter.ts';
 import {
   asImdbId,
   asTvdbId,
@@ -12,6 +16,8 @@ import {
   type ScannedItem
 } from '../../domain/types.ts';
 import { useModalVars } from '../composables/useGsapMotion.ts';
+import { extractCandidateLinks } from '../utils/formatters.ts';
+import ProviderLinks from './ProviderLinks.vue';
 
 const props = defineProps<{
   readonly item: ScannedItem | null;
@@ -28,7 +34,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void;
-  (e: 'apply', candidate: MetadataCandidate, episodeOrder: EpisodeOrderMode): void;
+  (
+    e: 'apply',
+    candidate: MetadataCandidate,
+    episodeOrder: EpisodeOrderMode,
+    candidates: readonly MetadataCandidate[]
+  ): void;
 }>();
 
 const modalVars = useModalVars(1);
@@ -58,6 +69,19 @@ watch(
   { immediate: true }
 );
 
+function isSelectedCandidate(cand: MetadataCandidate): boolean {
+  const selected = props.item?.selectedMetadata;
+  if (!selected) {
+    return false;
+  }
+  return (
+    selected.source === cand.source &&
+    selected.title.toLowerCase() === cand.title.toLowerCase() &&
+    selected.tvdbId === cand.tvdbId &&
+    selected.imdbId === cand.imdbId
+  );
+}
+
 async function handleSearch(): Promise<void> {
   if (!props.item) {
     return;
@@ -66,7 +90,7 @@ async function handleSearch(): Promise<void> {
   errorText.value = null;
   try {
     const parsedYear = Number(yearInput.value);
-    results.value = await props.searchFn({
+    const fetched = await props.searchFn({
       query: query.value.trim(),
       year: yearInput.value.trim() && Number.isInteger(parsedYear) ? parsedYear : undefined,
       kind: props.item.mediaKind,
@@ -74,6 +98,7 @@ async function handleSearch(): Promise<void> {
       tvdbId: tvdbInput.value.trim() || undefined,
       episodeOrder: episodeOrder.value
     });
+    results.value = mergeDeduplicatedCandidates(fetched, results.value);
   } catch (err: unknown) {
     errorText.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -98,16 +123,18 @@ function handleApplyManual(): void {
     return;
   }
   const parsedYear = Number(yearInput.value);
+  const manualCandidate: MetadataCandidate = {
+    title: query.value.trim() || props.item.parsedTitle,
+    year: yearInput.value.trim() && Number.isInteger(parsedYear) ? parsedYear : undefined,
+    imdbId: cleanImdb ? asImdbId(cleanImdb) : undefined,
+    tvdbId: cleanTvdb ? asTvdbId(cleanTvdb) : undefined,
+    source: 'manual'
+  };
   emit(
     'apply',
-    {
-      title: query.value.trim() || props.item.parsedTitle,
-      year: yearInput.value.trim() && Number.isInteger(parsedYear) ? parsedYear : undefined,
-      imdbId: cleanImdb ? asImdbId(cleanImdb) : undefined,
-      tvdbId: cleanTvdb ? asTvdbId(cleanTvdb) : undefined,
-      source: 'manual'
-    },
-    episodeOrder.value
+    manualCandidate,
+    episodeOrder.value,
+    mergeDeduplicatedCandidates([manualCandidate], results.value)
   );
 }
 
@@ -198,17 +225,31 @@ const filePillLabel = computed<string>(() => {
           v-for="(cand, idx) in results"
           :key="`${cand.source}-${String(idx)}`"
           class="vo-result-item"
+          :class="{ 'vo-result-item--selected': isSelectedCandidate(cand) }"
         >
-          <div>
-            <strong>{{ formatTitleWithYear(cand.title, cand.year) }}</strong>
-            <span class="vo-mono vo-muted"> · {{ cand.source }}</span>
+          <div class="vo-result-item__meta">
+            <div class="vo-result-item__title-row">
+              <strong>{{ formatTitleWithYear(cand.title, cand.year) }}</strong>
+              <span class="vo-mono vo-muted"> · {{ cand.source }}</span>
+              <ProviderLinks
+                v-if="props.item"
+                :links="extractCandidateLinks(cand, props.item.mediaKind)"
+              />
+            </div>
             <div class="vo-mono vo-muted">
-              <span v-if="cand.imdbId">{{ cand.imdbId }} </span>
+              <span v-if="cand.imdbId">{{ cand.imdbId }}</span>
+              <span v-if="cand.imdbId && cand.tvdbId"> · </span>
               <span v-if="cand.tvdbId">tvdb-{{ cand.tvdbId }}</span>
             </div>
           </div>
-          <button type="button" class="vo-btn" @click="emit('apply', cand, episodeOrder)">
-            <span aria-hidden="true">✅</span> Select
+          <button
+            type="button"
+            class="vo-btn"
+            :class="{ 'vo-btn--primary': isSelectedCandidate(cand) }"
+            :disabled="isSelectedCandidate(cand)"
+            @click="emit('apply', cand, episodeOrder, results)"
+          >
+            {{ isSelectedCandidate(cand) ? '✓ Selected' : 'Select' }}
           </button>
         </article>
         <p v-if="results.length === 0" class="vo-muted">No metadata candidates yet.</p>
@@ -287,6 +328,24 @@ const filePillLabel = computed<string>(() => {
   border: 1px solid var(--vo-border);
   border-radius: var(--vo-radius-md);
   background-color: var(--vo-surface-elevated);
+
+  &--selected {
+    background-color: color-mix(in sRGB, var(--vo-accent) 10%, var(--vo-surface-elevated));
+    border-color: var(--vo-accent);
+  }
+}
+
+.vo-result-item__meta {
+  display: grid;
+  gap: var(--vo-space-1);
+  min-width: 0;
+}
+
+.vo-result-item__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--vo-space-2);
 }
 
 .vo-muted {

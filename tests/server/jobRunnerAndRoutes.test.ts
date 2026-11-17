@@ -356,6 +356,7 @@ describe('JobRunner & HTTP routes', () => {
         await new Promise((r) => setTimeout(r, 20));
       }
       expect(verifierRunner.getState().verifier?.entries).toEqual([]);
+      await fs.rm(fixableDir, { recursive: true, force: true });
 
       const verifierScanRes = await fetch(`${baseUrl}/api/verifier/scan`, {
         method: 'POST',
@@ -379,6 +380,9 @@ describe('JobRunner & HTTP routes', () => {
         })
       });
       expect([404, 409]).toContain(validConflictRes.status);
+      for (let i = 0; i < 25 && runner.getState().verifier?.scanning; i += 1) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await fs.rm(tmpDir, { recursive: true, force: true });

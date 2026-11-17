@@ -519,12 +519,20 @@ describe('ffmpegRunner', () => {
 
     // Remux progress + completion
     spawnMock.mockImplementationOnce(() =>
-      makeFakeChild('out_time_us=50000000\nout_time_us=100000000\n', '', 0)
+      makeFakeChild('speed=1.5x\nout_time_us=50000000\nout_time_us=100000000\n', '', 0)
     );
     const percents: number[] = [];
-    await runFfmpegRemux(['-i', 'in.mkv', 'out.mkv'], 100, (p) => percents.push(p));
+    const remuxUpdates: { readonly outTimeSec?: number; readonly speed?: number }[] = [];
+    await runFfmpegRemux(['-i', 'in.mkv', 'out.mkv'], 100, (p, _eta, update) => {
+      percents.push(p);
+      if (update) {
+        remuxUpdates.push(update);
+      }
+    });
     expect(percents).toContain(50);
     expect(percents.at(-1)).toBe(100);
+    expect(remuxUpdates[0]?.outTimeSec).toBe(50);
+    expect(remuxUpdates[0]?.speed).toBe(1.5);
 
     // Loudnorm pass 1 progress + ETA
     spawnMock.mockImplementationOnce(() =>
@@ -534,13 +542,20 @@ describe('ffmpegRunner', () => {
         0
       )
     );
-    const pass1Updates: { readonly percent: number; readonly etaSeconds?: number }[] = [];
+    const pass1Updates: {
+      readonly percent: number;
+      readonly etaSeconds?: number;
+      readonly outTimeSec?: number;
+      readonly speed?: number;
+    }[] = [];
     const pass1Measured = await measureLoudnormPass1('/input/Movie.mkv', 0, false, 100, (u) => {
       pass1Updates.push(u);
     });
     expect(pass1Measured.inputI).toBe('-20.00');
     expect(pass1Updates[0]?.percent).toBe(50);
     expect(pass1Updates[0]?.etaSeconds).toBe(25);
+    expect(pass1Updates[0]?.outTimeSec).toBe(50);
+    expect(pass1Updates[0]?.speed).toBe(2);
     expect(pass1Updates.at(-1)?.percent).toBe(100);
 
     // Fallback ETA from elapsed time when speed= is absent

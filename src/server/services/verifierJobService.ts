@@ -7,12 +7,14 @@ import type {
   VerifierState
 } from '../../domain/types.ts';
 import type { AppConfig } from '../config.ts';
+import type { EtaPredictor } from './etaPredictor.ts';
 import { applyVerifierRenames, scanLibrariesForCompliance } from './libraryVerifierService.ts';
 
 export async function executeVerifierScan(options: {
   readonly config: AppConfig;
   readonly preferredLanguages: readonly MetadataLanguageCode[];
   readonly recalculateTags: boolean;
+  readonly etaPredictor?: EtaPredictor;
   readonly onLog: (level: LogLevel, message: string) => void;
   readonly onProgress: (progress: NonNullable<VerifierState['progress']>) => void;
   readonly onComplete: (
@@ -30,7 +32,8 @@ export async function executeVerifierScan(options: {
       undefined,
       options.onProgress,
       options.preferredLanguages,
-      options.recalculateTags
+      options.recalculateTags,
+      options.etaPredictor
     );
     options.onComplete(
       {
@@ -56,6 +59,7 @@ export async function executeVerifierFix(options: {
   readonly preferredLanguages: readonly MetadataLanguageCode[];
   readonly selected: readonly VerifierEntry[];
   readonly conflictResolutions?: Readonly<Partial<Record<VerifierEntryId, ConflictDecision>>>;
+  readonly etaPredictor?: EtaPredictor;
   readonly onLog: (level: LogLevel, message: string) => void;
   readonly onProgress: (progress: NonNullable<VerifierState['progress']>) => void;
   readonly onComplete: (nextState: VerifierState) => void;
@@ -83,7 +87,9 @@ export async function executeVerifierFix(options: {
           stageLabel: `Re-verifying · ${progress.stageLabel}`
         });
       },
-      options.preferredLanguages
+      options.preferredLanguages,
+      false,
+      options.etaPredictor
     );
     options.onComplete({
       scanning: false,

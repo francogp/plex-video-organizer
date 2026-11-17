@@ -83,8 +83,36 @@ describe('StatusPanels', () => {
     });
     expect(busyWrapper.text()).toContain('Processing 1/2');
     expect(busyWrapper.text()).toContain('Clip.mkv');
-    await busyWrapper.find('.vo-progress__cancel').trigger('click');
+    const actionButtons = busyWrapper.findAll('.vo-progress__cancel');
+    expect(actionButtons).toHaveLength(2);
+    await actionButtons[0]!.trigger('click');
     expect(busyWrapper.emitted('cancel')).toHaveLength(1);
+    await actionButtons[1]!.trigger('click');
+    expect(busyWrapper.emitted('drain')).toHaveLength(1);
+
+    const drainingWrapper = mount(OrganizerStatusBar, {
+      props: {
+        isBusy: true,
+        activeJob: {
+          jobId: asJobId('job-1'),
+          totalItems: 2,
+          completedItems: 1,
+          currentPercent: 50,
+          activeTasks: [],
+          drainRequested: true
+        },
+        errorMessage: null,
+        isLockedByOther: false,
+        isCancellingJob: false,
+        itemCount: 2,
+        summaryText: 'Processing 1/2',
+        phase: 'PROCESSING'
+      }
+    });
+    expect(drainingWrapper.text()).toContain('Stopping After Current...');
+    expect(
+      (drainingWrapper.findAll('.vo-progress__cancel')[1]!.element as HTMLButtonElement).disabled
+    ).toBe(true);
   });
 
   it('ServerLogsPanel renders empty state, log items, and emits clear', async () => {

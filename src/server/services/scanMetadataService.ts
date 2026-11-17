@@ -2,7 +2,8 @@ import type { ChildProcess } from 'node:child_process';
 import path from 'node:path';
 
 import { runSlotWorkerPool } from '../../domain/concurrency.ts';
-import { parseProviderReference } from '../../domain/plexFormatter.ts';
+import { computeLinearFallbackEta } from '../../domain/eta.ts';
+import { mergeDeduplicatedCandidates, parseProviderReference } from '../../domain/plexFormatter.ts';
 import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
 import {
   asJobId,
@@ -28,6 +29,7 @@ import {
   type TvdbId
 } from '../../domain/types.ts';
 import type { AppConfig } from '../config.ts';
+import type { EtaPredictor } from './etaPredictor.ts';
 import { analyzeAudioVolume, probeMedia } from './media/ffmpegRunner.ts';
 import { lookupMovieByImdbId, searchMovies } from './metadata/imdbClient.ts';
 import {
@@ -45,8 +47,6 @@ import {
 
 const PERCENT_MAX = 100;
 const MS_PER_SECOND = 1000;
-const MIN_ETA_FRACTION = 0.001;
-const MIN_ETA_ELAPSED_SECONDS = 1;
 const SUBTITLE_DOWNLOAD_CONCURRENCY = 3;
 
 function resolveCategoryFromMetadata(
@@ -142,18 +142,12 @@ export async function applyPatchToItem(
   }
 
   let nextCandidates = current.candidates;
-  if (patch.selectedMetadata) {
-    const target = patch.selectedMetadata;
-    const alreadyPresent = current.candidates.some(
-      (c): boolean =>
-        c.source === target.source &&
-        c.title === target.title &&
-        c.imdbId === target.imdbId &&
-        c.tvdbId === target.tvdbId
+  if (patch.candidates || patch.selectedMetadata) {
+    nextCandidates = mergeDeduplicatedCandidates(
+      patch.selectedMetadata ? [patch.selectedMetadata] : [],
+      patch.candidates ?? [],
+      current.candidates
     );
-    if (!alreadyPresent) {
-      nextCandidates = [target, ...current.candidates];
-    }
   }
 
   const nextEdition =
@@ -236,6 +230,90 @@ export async function applyBulkPatchToItems(
   return { nextItems, updatedCount };
 }
 
+const PROVIDER_PRIORITY_TV: Readonly<Record<MetadataCandidate['source'], number>> = {
+  tvdb: 0,
+  tvmaze: 1,
+  imdb: 2,
+  omdb: 3,
+  plexmatch: 4,
+  manual: 5
+};
+
+const PROVIDER_PRIORITY_MOVIE: Readonly<Record<MetadataCandidate['source'], number>> = {
+  imdb: 0,
+  omdb: 1,
+  tvdb: 2,
+  tvmaze: 3,
+  plexmatch: 4,
+  manual: 5
+};
+
+function sortCandidatesByMediaKind(
+  candidates: readonly MetadataCandidate[],
+  kind: MediaKind
+): MetadataCandidate[] {
+  const priorityMap = kind === 'tv' ? PROVIDER_PRIORITY_TV : PROVIDER_PRIORITY_MOVIE;
+  return [...candidates].sort((a, b) => priorityMap[a.source] - priorityMap[b.source]);
+}
+
+function unifyTvSeriesMetadataByTvdbId(items: readonly ScannedItem[]): readonly ScannedItem[] {
+  const byTvdbId = new Map<TvdbId, ScannedItem[]>();
+  for (const item of items) {
+    const tvdbId = item.mediaKind === 'tv' ? item.selectedMetadata?.tvdbId : undefined;
+    if (!tvdbId) {
+      continue;
+    }
+    const group = byTvdbId.get(tvdbId) ?? [];
+    group.push(item);
+    byTvdbId.set(tvdbId, group);
+  }
+
+  const canonicalByTvdbId = new Map<
+    TvdbId,
+    {
+      readonly selected: MetadataCandidate;
+      readonly candidates: readonly MetadataCandidate[];
+    }
+  >();
+  for (const [tvdbId, group] of byTvdbId.entries()) {
+    if (group.length < 2) {
+      continue;
+    }
+    const allCandidates = mergeDeduplicatedCandidates(
+      ...group.map((g) => g.candidates),
+      group.map((g) => g.selectedMetadata).filter((c): c is MetadataCandidate => c !== undefined)
+    );
+    const preferred =
+      group.find((g) => g.selectedMetadata?.source === 'tvdb')?.selectedMetadata ??
+      allCandidates.find((c) => c.source === 'tvdb') ??
+      group[0]?.selectedMetadata;
+    if (!preferred) {
+      continue;
+    }
+    canonicalByTvdbId.set(tvdbId, {
+      selected: preferred,
+      candidates: allCandidates
+    });
+  }
+
+  if (canonicalByTvdbId.size === 0) {
+    return items;
+  }
+  return items.map((item) => {
+    const tvdbId = item.mediaKind === 'tv' ? item.selectedMetadata?.tvdbId : undefined;
+    const unified = tvdbId ? canonicalByTvdbId.get(tvdbId) : undefined;
+    if (!unified) {
+      return item;
+    }
+    return {
+      ...item,
+      selectedMetadata: unified.selected,
+      candidates: unified.candidates,
+      category: resolveCategoryFromMetadata(item.mediaKind, unified.selected, item.category)
+    };
+  });
+}
+
 export async function searchMetadataCatalog(
   config: AppConfig,
   preferredLanguages: readonly MetadataLanguageCode[],
@@ -264,27 +342,69 @@ export async function searchMetadataCatalog(
     (params.tvdbId ? parseProviderReference(params.tvdbId).tvmazeId : undefined) ??
     queryRef.tvmazeId;
 
-  if (imdbRef) {
+  if (imdbRef && (params.kind === 'movie' || !params.query.trim())) {
     const found = await lookupMovieByImdbId(imdbRef, config.omdbApiKey, fetch, lookupOptions);
-    return found ? [found] : [];
+    if (found) {
+      return [found];
+    }
+    const titleQuery = params.query.trim();
+    if (!titleQuery || params.kind !== 'movie') {
+      return [];
+    }
+    const byTitle = await searchMovies(titleQuery, params.year, config.omdbApiKey, fetch, {
+      ...lookupOptions,
+      throwOnFailure: false
+    });
+    return sortCandidatesByMediaKind(byTitle, 'movie');
   }
   if (tvmazeRef) {
     const found = await lookupSeriesByTvmazeId(tvmazeRef, fetch, lookupOptions);
     return found ? [found] : [];
   }
   if (tvdbRef && /^\d+$/.test(tvdbRef)) {
-    const found = await lookupSeriesByTvdbId(
-      asTvdbId(tvdbRef),
-      config.tvdbApiKey,
+    const typedTvdbId = asTvdbId(tvdbRef);
+    const [primaryFound, tvmazeFound, byTitle] = await Promise.all([
+      lookupSeriesByTvdbId(typedTvdbId, config.tvdbApiKey, fetch, lookupOptions),
+      config.tvdbApiKey
+        ? lookupSeriesByTvdbId(typedTvdbId, undefined, fetch, {
+            ...lookupOptions,
+            throwOnFailure: false
+          })
+        : Promise.resolve(undefined),
+      params.query.trim() && params.kind === 'tv'
+        ? searchTvShows(params.query.trim(), config.tvdbApiKey, fetch, {
+            ...lookupOptions,
+            throwOnFailure: false
+          })
+        : Promise.resolve([])
+    ]);
+    const merged = mergeDeduplicatedCandidates(
+      primaryFound ? [primaryFound] : [],
+      tvmazeFound ? [tvmazeFound] : [],
+      byTitle
+    );
+    return sortCandidatesByMediaKind(merged, 'tv');
+  }
+  if (params.kind === 'movie') {
+    const movies = await searchMovies(
+      params.query,
+      params.year,
+      config.omdbApiKey,
       fetch,
       lookupOptions
     );
-    return found ? [found] : [];
+    return sortCandidatesByMediaKind(movies, 'movie');
   }
-  if (params.kind === 'movie') {
-    return searchMovies(params.query, params.year, config.omdbApiKey, fetch, lookupOptions);
-  }
-  return searchTvShows(params.query, config.tvdbApiKey, fetch, lookupOptions);
+  const [tvPrimary, tvSecondary] = await Promise.all([
+    searchTvShows(params.query, config.tvdbApiKey, fetch, lookupOptions),
+    config.tvdbApiKey
+      ? searchTvShows(params.query, undefined, fetch, {
+          ...lookupOptions,
+          throwOnFailure: false
+        })
+      : Promise.resolve([])
+  ]);
+  return sortCandidatesByMediaKind(mergeDeduplicatedCandidates(tvPrimary, tvSecondary), 'tv');
 }
 
 export interface ExecuteScanWorkflowOptions {
@@ -304,6 +424,7 @@ export interface ExecuteScanWorkflowOptions {
   readonly onCancelledItems: (items: readonly ScannedItem[]) => void;
   readonly onCompleted: (items: readonly ScannedItem[]) => Promise<void>;
   readonly onError: (message: string) => void;
+  readonly etaPredictor?: EtaPredictor;
 }
 
 async function resolveSingleItemMetadata(
@@ -470,10 +591,12 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
       {
         configDir: options.config.configDir,
         audioPreferredLanguages: options.audioPreferredLanguages,
+        etaPredictor: options.etaPredictor,
         onProgress: (completed, total): void => {
           if (options.isCancelled()) {
             return;
           }
+          const etaEstimate = options.etaPredictor?.getEstimate();
           options.onProgress({
             jobId: scanJobId,
             activeTasks: [],
@@ -482,7 +605,9 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
             percent:
               total > 0 ? Math.min(PERCENT_MAX, Math.round((completed / total) * PERCENT_MAX)) : 0,
             stage: 'scanning',
-            stageLabel: `Probing media (${String(completed)}/${String(total)})`
+            stageLabel: `Probing media (${String(completed)}/${String(total)})`,
+            etaSeconds: etaEstimate?.etaSeconds,
+            etaState: etaEstimate?.etaState
           });
         }
       }
@@ -490,6 +615,9 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
     if (options.isCancelled()) {
       options.onCancelledItems(rawScanned);
       return;
+    }
+    if (options.etaPredictor) {
+      options.onLog('info', options.etaPredictor.formatBaselineSummaryLog());
     }
 
     const scanStartedAtMs = performance.now();
@@ -529,12 +657,10 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
         const etaFraction = activeFraction ?? effectiveFraction;
         const percent = Math.min(PERCENT_MAX, Math.round(effectiveFraction * PERCENT_MAX));
         const elapsedSec = (performance.now() - scanStartedAtMs) / MS_PER_SECOND;
-        const etaSeconds =
-          etaFraction > MIN_ETA_FRACTION &&
-          completed < total &&
-          elapsedSec >= MIN_ETA_ELAPSED_SECONDS
-            ? Math.max(0, Math.round((elapsedSec * (1 - etaFraction)) / etaFraction))
-            : undefined;
+        const etaEstimate = options.etaPredictor?.getEstimate();
+        const etaSeconds = options.etaPredictor
+          ? etaEstimate?.etaSeconds
+          : computeLinearFallbackEta(etaFraction, completed, total, elapsedSec);
         options.onProgress({
           jobId: scanJobId,
           activeTasks,
@@ -543,7 +669,8 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
           percent,
           stage: 'scanning',
           stageLabel: `Analyzing audio (${String(completed)}/${String(total)})`,
-          etaSeconds
+          etaSeconds,
+          etaState: etaEstimate?.etaState
         });
       },
       options.isCancelled,
@@ -554,7 +681,8 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
           `Audio scan cache: ${String(stats.cacheHits)} cached, ${String(stats.analyzed)} analyzed${prunedSuffix}.`
         );
       },
-      options.isItemSkipped
+      options.isItemSkipped,
+      options.etaPredictor
     );
     if (options.isCancelled()) {
       options.onCancelledItems(scanned);
@@ -617,9 +745,10 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
       return;
     }
 
+    const unifiedEnriched = unifyTvSeriesMetadataByTvdbId(enriched);
     const withSubtitles = options.autoDownloadSubtitles
-      ? await autoDownloadMissingSpanishSubtitles(scanJobId, enriched, options)
-      : [...enriched];
+      ? await autoDownloadMissingSpanishSubtitles(scanJobId, unifiedEnriched, options)
+      : unifiedEnriched;
 
     if (options.isCancelled()) {
       options.onCancelledItems(withSubtitles);

@@ -87,63 +87,40 @@ function resolveIsoCode(rawLang?: string): Iso639_2Code {
 }
 
 /** Runs `ffprobe` without a shell and maps streams to `MediaProbeSummary`. */
-export async function probeMedia(filePath: string): Promise<MediaProbeSummary> {
-  const stdout = await new Promise<string>((resolve, reject): void => {
-    const ffprobeBin = process.env['FFPROBE_BIN'] ?? 'ffprobe';
-    const child = spawn(
-      ffprobeBin,
-      ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk));
-    child.on('error', reject);
-    child.on('close', (code): void => {
-      if (code === 0) {
-        resolve(Buffer.concat(chunks).toString('utf8'));
-      } else {
-        reject(
-          new Error(
-            `ffprobe exited with code ${String(code)}: ${Buffer.concat(errChunks).toString('utf8')}`
-          )
-        );
-      }
-    });
-  });
+function mapVideoStream(stream: NonNullable<FfprobeRawOutput['streams']>[number]): VideoStreamInfo {
+  const bitDepth = stream.bits_per_raw_sample ? Number(stream.bits_per_raw_sample) : undefined;
+  const sideDataTypes = (stream.side_data_list ?? []).map((sd) =>
+    (sd.side_data_type ?? '').toLowerCase()
+  );
+  const hasDolbyVision = sideDataTypes.some(
+    (type) => type.includes('dovi') || type.includes('dolby vision')
+  );
+  const hasHdr10Plus = sideDataTypes.some(
+    (type) => type.includes('2094') || type.includes('hdr10+') || type.includes('hdr dynamic')
+  );
+  return {
+    index: stream.index ?? 0,
+    codecName: stream.codec_name ?? 'unknown',
+    profile: stream.profile,
+    width: stream.width ?? 0,
+    height: stream.height ?? 0,
+    bitDepth: bitDepth && Number.isInteger(bitDepth) ? bitDepth : undefined,
+    colorTransfer: stream.color_transfer,
+    hasDolbyVision: hasDolbyVision || undefined,
+    hasHdr10Plus: hasHdr10Plus || undefined
+  };
+}
 
-  const parsed = JSON.parse(stdout) as FfprobeRawOutput;
+function buildMediaProbeSummary(parsed: FfprobeRawOutput): MediaProbeSummary {
   const videoStreams: VideoStreamInfo[] = [];
   const audioStreams: AudioStreamInfo[] = [];
   const subtitleStreams: SubtitleStreamInfo[] = [];
-
   let audioOrder = 0;
   let subOrder = 0;
 
   for (const stream of parsed.streams ?? []) {
     if (stream.codec_type === 'video' && stream.disposition?.attached_pic !== 1) {
-      const bitDepth = stream.bits_per_raw_sample ? Number(stream.bits_per_raw_sample) : undefined;
-      const sideDataTypes = (stream.side_data_list ?? []).map((sd) =>
-        (sd.side_data_type ?? '').toLowerCase()
-      );
-      const hasDolbyVision = sideDataTypes.some(
-        (type) => type.includes('dovi') || type.includes('dolby vision')
-      );
-      const hasHdr10Plus = sideDataTypes.some(
-        (type) => type.includes('2094') || type.includes('hdr10+') || type.includes('hdr dynamic')
-      );
-      videoStreams.push({
-        index: stream.index ?? 0,
-        codecName: stream.codec_name ?? 'unknown',
-        profile: stream.profile,
-        width: stream.width ?? 0,
-        height: stream.height ?? 0,
-        bitDepth: bitDepth && Number.isInteger(bitDepth) ? bitDepth : undefined,
-        colorTransfer: stream.color_transfer,
-        hasDolbyVision: hasDolbyVision || undefined,
-        hasHdr10Plus: hasHdr10Plus || undefined
-      });
+      videoStreams.push(mapVideoStream(stream));
     } else if (stream.codec_type === 'audio') {
       audioStreams.push({
         index: stream.index ?? 0,
@@ -179,6 +156,35 @@ export async function probeMedia(filePath: string): Promise<MediaProbeSummary> {
     audioStreams,
     subtitleStreams
   };
+}
+
+export async function probeMedia(filePath: string): Promise<MediaProbeSummary> {
+  const stdout = await new Promise<string>((resolve, reject): void => {
+    const ffprobeBin = process.env['FFPROBE_BIN'] ?? 'ffprobe';
+    const child = spawn(
+      ffprobeBin,
+      ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk));
+    child.on('error', reject);
+    child.on('close', (code): void => {
+      if (code === 0) {
+        resolve(Buffer.concat(chunks).toString('utf8'));
+      } else {
+        reject(
+          new Error(
+            `ffprobe exited with code ${String(code)}: ${Buffer.concat(errChunks).toString('utf8')}`
+          )
+        );
+      }
+    });
+  });
+
+  return buildMediaProbeSummary(JSON.parse(stdout) as FfprobeRawOutput);
 }
 
 /** Normalizes non-UTF-8 text subtitles to UTF-8 in a temporary file for safe `ffmpeg` muxing. */
@@ -299,6 +305,7 @@ export interface FfmpegProgressUpdate {
   readonly percent: number;
   readonly etaSeconds?: number;
   readonly speed?: number;
+  readonly outTimeSec?: number;
 }
 
 const PROGRESS_THROTTLE_MS = 1000;
@@ -414,7 +421,7 @@ function runFfmpegProcess(
             lastSpeed,
             (nowMs - startedAtMs) / MS_PER_SECOND
           );
-          onProgress({ percent, etaSeconds, speed: lastSpeed });
+          onProgress({ percent, etaSeconds, speed: lastSpeed, outTimeSec });
         }
       }
     });
@@ -712,13 +719,13 @@ export function buildFfmpegRemuxArgs(
 export async function runFfmpegRemux(
   args: readonly string[],
   durationSeconds: number,
-  onProgress: (percent: number, etaSeconds?: number) => void,
+  onProgress: (percent: number, etaSeconds?: number, update?: FfmpegProgressUpdate) => void,
   registerChild?: (child: ChildProcess | null) => void
 ): Promise<void> {
   await runFfmpegProcess(
     args,
     durationSeconds,
-    (update) => onProgress(update.percent, update.etaSeconds),
+    (update) => onProgress(update.percent, update.etaSeconds, update),
     registerChild
   );
 }

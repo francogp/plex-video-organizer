@@ -22,6 +22,7 @@ import {
   isVideoExtension,
   type LanguageAlias
 } from '../../domain/constants.ts';
+import { resolveChannelProfile } from '../../domain/eta.ts';
 import { extractSplitPart } from '../../domain/plexFormatter.ts';
 import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
 import { buildFilteredAudioTracks } from '../../domain/trackSelection.ts';
@@ -36,6 +37,7 @@ import {
   type ActiveParallelTask,
   type AudioTrackAnalysis,
   type EpisodeInfo,
+  type EtaChannelProfile,
   type ExternalSubtitleFile,
   type ImdbId,
   type Iso639_2Code,
@@ -49,7 +51,9 @@ import {
   type TrackSelection,
   type TvdbId
 } from '../../domain/types.ts';
+import type { EtaInventoryEntry, EtaPredictor } from './etaPredictor.ts';
 import { hasIgnoredAncestorSegment } from './fileMover.ts';
+import type { FfmpegProgressUpdate } from './media/ffmpegRunner.ts';
 import {
   buildFileStatCacheEntry,
   openScanCacheDb,
@@ -819,6 +823,7 @@ export interface ScanInputOptions {
   readonly configDir?: string;
   readonly audioPreferredLanguages?: readonly AudioLanguageCode[];
   readonly onProgress?: (completed: number, total: number) => void;
+  readonly etaPredictor?: EtaPredictor;
 }
 
 function isCandidateVideoEntry(
@@ -851,17 +856,39 @@ export async function scanInputDirectory(
   }
 
   const probeDb = options?.configDir ? await openScanCacheDb(options.configDir) : null;
+  const cacheHitPaths = new Set<string>();
   const cachedProbeFile: ProbeFn = (filePath) =>
     probeVideoWithCache(
       probeDb,
       filePath,
       path.relative(inputDir, filePath).split(path.sep).join('/'),
-      probeFile
+      probeFile,
+      '',
+      (hit) => {
+        if (hit) {
+          cacheHitPaths.add(filePath);
+        }
+      }
     );
 
   const results = Array.from<ScannedItem | null>({ length: candidateEntries.length }).fill(null);
   const completedIndices = new Set<number>();
   const workerCount = Math.min(AUDIO_SCAN_CONCURRENCY, candidateEntries.length);
+  if (options?.etaPredictor) {
+    options.etaPredictor.markStagePending('volumedetect');
+    options.etaPredictor.initStageInventory(
+      'scan_probe',
+      [
+        {
+          profile: 'default',
+          units: candidateEntries.length,
+          taskCount: candidateEntries.length
+        }
+      ],
+      workerCount
+    );
+    options.etaPredictor.setActiveStage('scan_probe');
+  }
   let nextIndex = 0;
   let completed = 0;
 
@@ -873,6 +900,8 @@ export async function scanInputDirectory(
       const currentIdx = nextIndex;
       nextIndex += 1;
       const entry = candidateEntries[currentIdx]!;
+      const probeTaskId = `scan_probe:${String(currentIdx)}`;
+      options?.etaPredictor?.startTask(probeTaskId, 'scan_probe', 'default', 1);
       const item = await buildScannedItemFromEntry(
         entry,
         inputDir,
@@ -882,6 +911,11 @@ export async function scanInputDirectory(
         options?.audioPreferredLanguages
       );
       if (!shouldCancel?.()) {
+        if (!item || cacheHitPaths.has(item.sourcePath)) {
+          options?.etaPredictor?.skipTask(probeTaskId, 'scan_probe', 'default', 1);
+        } else {
+          options?.etaPredictor?.completeTask(probeTaskId);
+        }
         results[currentIdx] = item;
         completedIndices.add(currentIdx);
         completed += 1;
@@ -893,6 +927,7 @@ export async function scanInputDirectory(
   try {
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
   } finally {
+    options?.etaPredictor?.flush();
     probeDb?.close();
   }
 
@@ -913,52 +948,110 @@ export type AudioAnalysisFn = (
   filePath: string,
   streamOrder: number,
   durationSeconds?: number,
-  onProgress?: (update: { readonly percent: number; readonly etaSeconds?: number }) => void,
+  onProgress?: (update: FfmpegProgressUpdate) => void,
   itemId?: ItemId
 ) => Promise<AudioTrackAnalysis | null>;
+
+function resolveVolumedetectTaskMeta(item: ScannedItem): {
+  readonly streamOrder: number;
+  readonly profile: EtaChannelProfile;
+  readonly totalUnits: number;
+} | null {
+  const includedTracks = item.trackSelection.audioTracks.filter((t) => t.include);
+  const targetTrack = includedTracks.find((t) => t.isDefault) ?? includedTracks[0];
+  if (!targetTrack) {
+    return null;
+  }
+  const channels = item.probe.audioStreams.find(
+    (s) => s.streamOrder === targetTrack.streamOrder
+  )?.channels;
+  return {
+    streamOrder: targetTrack.streamOrder,
+    profile: resolveChannelProfile(channels),
+    totalUnits: Math.max(1, item.probe.durationSeconds ?? 1)
+  };
+}
+
+function buildVolumedetectInventory(items: readonly ScannedItem[]): readonly EtaInventoryEntry[] {
+  const unitsByProfile = new Map<EtaChannelProfile, { units: number; count: number }>();
+  for (const item of items) {
+    const meta = resolveVolumedetectTaskMeta(item);
+    if (!meta) {
+      continue;
+    }
+    const current = unitsByProfile.get(meta.profile) ?? { units: 0, count: 0 };
+    current.units += meta.totalUnits;
+    current.count += 1;
+    unitsByProfile.set(meta.profile, current);
+  }
+  return Array.from(unitsByProfile, ([profile, data]) => ({
+    profile,
+    units: data.units,
+    taskCount: data.count
+  }));
+}
 
 async function analyzeItemAudio(
   item: ScannedItem,
   db: ScanCacheDb,
   analyzeAudio: AudioAnalysisFn,
   onItemProgress?: (fraction: number) => void,
-  shouldSkipItem?: (itemId: ItemId) => boolean
+  shouldSkipItem?: (itemId: ItemId) => boolean,
+  etaPredictor?: EtaPredictor
 ): Promise<{
   readonly item: ScannedItem;
   readonly cacheHit: boolean;
   readonly skipped: boolean;
 }> {
+  const meta = resolveVolumedetectTaskMeta(item);
+  const taskId = `volumedetect:${item.id}`;
+
   if (shouldSkipItem?.(item.id)) {
+    if (meta) {
+      etaPredictor?.skipTask(taskId, 'volumedetect', meta.profile, meta.totalUnits);
+    }
     return { item, cacheHit: false, skipped: true };
   }
-  const includedTracks = item.trackSelection.audioTracks.filter((t) => t.include);
-  const targetTrack = includedTracks.find((t) => t.isDefault) ?? includedTracks[0];
-  if (!targetTrack) {
+  if (!meta) {
     return { item, cacheHit: false, skipped: false };
   }
 
+  const { streamOrder, profile, totalUnits } = meta;
   const relPosix = item.relativePath.split(path.sep).join('/');
   const statEntry = await buildFileStatCacheEntry(item.sourcePath, relPosix);
 
   const cached = statEntry ? db.getAudio(statEntry.key) : undefined;
   const analyses: AudioTrackAnalysis[] = cached ? [...cached] : [];
 
-  if (!cached) {
+  if (cached) {
+    etaPredictor?.skipTask(taskId, 'volumedetect', profile, totalUnits);
+  } else {
     if (shouldSkipItem?.(item.id)) {
+      etaPredictor?.skipTask(taskId, 'volumedetect', profile, totalUnits);
       return { item, cacheHit: false, skipped: true };
     }
+    etaPredictor?.startTask(taskId, 'volumedetect', profile, totalUnits, {
+      mediaDurationSec: totalUnits
+    });
     try {
       const res = await analyzeAudio(
         item.sourcePath,
-        targetTrack.streamOrder,
+        streamOrder,
         item.probe.durationSeconds,
         (update) => {
           const trackFraction = Math.max(0, Math.min(1, update.percent / 100));
           onItemProgress?.(trackFraction);
+          etaPredictor?.recordTaskProgress(
+            taskId,
+            trackFraction * totalUnits,
+            update.speed,
+            update.outTimeSec
+          );
         },
         item.id
       );
       if (shouldSkipItem?.(item.id)) {
+        etaPredictor?.skipTask(taskId, 'volumedetect', profile, totalUnits);
         return { item, cacheHit: false, skipped: true };
       }
       if (res) {
@@ -966,10 +1059,12 @@ async function analyzeItemAudio(
       }
     } catch {
       if (shouldSkipItem?.(item.id)) {
+        etaPredictor?.skipTask(taskId, 'volumedetect', profile, totalUnits);
         return { item, cacheHit: false, skipped: true };
       }
       // Non-fatal: item remains usable without volumedetect metrics.
     }
+    etaPredictor?.completeTask(taskId);
     if (statEntry && analyses.length > 0) {
       db.setAudio(statEntry.key, statEntry.meta, analyses);
     }
@@ -1017,7 +1112,8 @@ export async function enrichItemsWithAudioAnalysis(
   onProgress?: AudioScanProgressCallback,
   shouldCancel?: () => boolean,
   onStats?: (stats: AudioScanStats) => void,
-  shouldSkipItem?: (itemId: ItemId) => boolean
+  shouldSkipItem?: (itemId: ItemId) => boolean,
+  etaPredictor?: EtaPredictor
 ): Promise<readonly ScannedItem[]> {
   if (items.length === 0) {
     return items;
@@ -1064,6 +1160,10 @@ export async function enrichItemsWithAudioAnalysis(
 
   const workerCount = Math.min(AUDIO_SCAN_CONCURRENCY, items.length);
   const activeBySlot = Array.from<ActiveParallelTask | undefined>({ length: workerCount });
+  if (etaPredictor) {
+    etaPredictor.initStageInventory('volumedetect', buildVolumedetectInventory(items), workerCount);
+    etaPredictor.setActiveStage('volumedetect');
+  }
 
   try {
     await runSlotWorkerPool(
@@ -1105,7 +1205,8 @@ export async function enrichItemsWithAudioAnalysis(
               );
             }
           },
-          shouldSkipItem
+          shouldSkipItem,
+          etaPredictor
         );
         activeBySlot[slot] = undefined;
         if (shouldCancel?.()) {
@@ -1143,6 +1244,7 @@ export async function enrichItemsWithAudioAnalysis(
       });
     }
   } finally {
+    etaPredictor?.flush();
     db.close();
   }
 

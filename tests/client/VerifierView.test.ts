@@ -274,6 +274,7 @@ describe('VerifierView', () => {
     });
 
     expect(wrapper.find('.vo-progress__meta').text()).toContain('Scanning · 12/100 (12%)');
+    expect(wrapper.find('.vo-progress__meta').text()).toContain('ETA 45s');
     expect(wrapper.find('.vo-progress__meta').text()).toContain('movies');
     const rows = wrapper.findAll('.vo-progress__files .vo-progress__file');
     expect(rows).toHaveLength(2);
@@ -284,6 +285,21 @@ describe('VerifierView', () => {
     expect(rows[1]?.find('.vo-progress__file-name').text()).toBe('Dune (2021) {imdb-tt1160419}');
     expect(rows[1]?.find('.vo-progress__file-pct').exists()).toBe(false);
     expect(wrapper.find('progress.vo-progress__bar').attributes('value')).toBe('12');
+
+    const calibratingWrapper = mount(VerifierView, {
+      props: {
+        state: {
+          ...state,
+          progress: {
+            ...state.progress!,
+            etaSeconds: undefined,
+            etaState: 'calibrating'
+          }
+        },
+        disabled: false
+      }
+    });
+    expect(calibratingWrapper.find('.vo-progress__meta').text()).toContain('Calibrating...');
   });
 
   it('renders Destination exists badge, allows selection, and emits resolve-conflict on DESTINATION_COLLISION entries', async () => {

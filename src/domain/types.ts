@@ -8,6 +8,10 @@ import {
   CONFLICT_MODAL_MODES,
   CONNECTION_STATUSES,
   EPISODE_ORDER_MODES,
+  ETA_CHANNEL_PROFILES,
+  ETA_STATES,
+  ETA_WORK_TYPES,
+  ETA_WORK_UNIT_KINDS,
   ISO_639_2_PRESETS,
   JOB_PHASES,
   JOB_STAGE_KINDS,
@@ -243,6 +247,7 @@ export interface ItemPatch {
   readonly edition?: string;
   readonly include?: boolean;
   readonly selectedMetadata?: MetadataCandidate;
+  readonly candidates?: readonly MetadataCandidate[];
   readonly episodeOrder?: EpisodeOrderMode;
   readonly trackSelection?: TrackSelection;
   readonly audioNormalization?: AudioNormalizationConfig;
@@ -344,6 +349,8 @@ export interface ActiveJobProgress {
   readonly stage?: JobStageKind;
   readonly stageLabel?: string;
   readonly etaSeconds?: number;
+  readonly etaState?: EtaState;
+  readonly drainRequested?: boolean;
 }
 
 export interface BulkItemPatchRequest {
@@ -406,6 +413,7 @@ export interface VerifierProgress {
   readonly stageLabel: string;
   readonly activeTasks: readonly ActiveParallelTask[];
   readonly etaSeconds?: number;
+  readonly etaState?: EtaState;
 }
 
 export interface VerifierState {
@@ -452,7 +460,21 @@ export interface SseProgressEvent {
   readonly stage?: JobStageKind;
   readonly stageLabel?: string;
   readonly etaSeconds?: number;
+  readonly etaState?: EtaState;
+  readonly drainRequested?: boolean;
 }
+
+const EtaWorkTypeSchema = v.picklist(ETA_WORK_TYPES);
+export type EtaWorkType = v.InferOutput<typeof EtaWorkTypeSchema>;
+
+const EtaChannelProfileSchema = v.picklist(ETA_CHANNEL_PROFILES);
+export type EtaChannelProfile = v.InferOutput<typeof EtaChannelProfileSchema>;
+
+const EtaWorkUnitKindSchema = v.picklist(ETA_WORK_UNIT_KINDS);
+export type EtaWorkUnitKind = v.InferOutput<typeof EtaWorkUnitKindSchema>;
+
+const EtaStateSchema = v.picklist(ETA_STATES);
+export type EtaState = v.InferOutput<typeof EtaStateSchema>;
 
 export interface SseLogEvent {
   readonly level: LogLevel;

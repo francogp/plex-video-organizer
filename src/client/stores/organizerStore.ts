@@ -380,7 +380,9 @@ export const useOrganizerStore = defineStore('organizer', () => {
             currentPercent: prog.percent,
             stage: prog.stage ?? activeJob.value.stage,
             stageLabel: prog.stageLabel ?? activeJob.value.stageLabel,
-            etaSeconds: prog.etaSeconds
+            etaSeconds: prog.etaSeconds,
+            etaState: prog.etaState,
+            drainRequested: prog.drainRequested ?? activeJob.value.drainRequested
           };
         }
       },
@@ -651,6 +653,13 @@ export const useOrganizerStore = defineStore('organizer', () => {
     applyServerState(next);
   }
 
+  async function drainJob(): Promise<void> {
+    const next = await requestJson<OrganizerStatePayload>('/api/jobs/drain', {
+      method: 'POST'
+    });
+    applyServerState(next);
+  }
+
   return {
     clientId,
     theme,
@@ -699,6 +708,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     clearConflictResolutions,
     startJob,
     unlock,
+    drainJob,
     clearLogs,
     clearError,
     clearVerifierErrors

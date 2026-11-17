@@ -3,7 +3,11 @@ import { computed } from 'vue';
 
 import { formatTitleWithYear } from '../../domain/plexFormatter.ts';
 import type { ScannedItem } from '../../domain/types.ts';
-import { extractExternalIdLinks, type ExternalIdLink } from '../utils/formatters.ts';
+import {
+  extractCandidateLinks,
+  formatMetadataIds,
+  type ExternalIdLink
+} from '../utils/formatters.ts';
 import ProviderLinks from './ProviderLinks.vue';
 
 const props = defineProps<{
@@ -22,25 +26,11 @@ function formatCandidateLabel(cand: ScannedItem['candidates'][number]): string {
   return `${titleWithYear}${idPart}`;
 }
 
-function formatMetadataIds(cand: NonNullable<ScannedItem['selectedMetadata']>): string {
-  const ids: string[] = [];
-  if (cand.imdbId) {
-    ids.push(`{imdb-${cand.imdbId}}`);
-  }
-  if (cand.tvdbId) {
-    ids.push(`{tvdb-${cand.tvdbId}}`);
-  }
-  if (cand.tmdbId) {
-    ids.push(`{tmdb-${cand.tmdbId}}`);
-  }
-  return ids.join(' ');
-}
-
 function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
   if (!row.selectedMetadata) {
     return [];
   }
-  return extractExternalIdLinks(formatMetadataIds(row.selectedMetadata), row.mediaKind);
+  return extractCandidateLinks(row.selectedMetadata, row.mediaKind);
 }
 
 const selectedCandidateIndex = computed((): number => {

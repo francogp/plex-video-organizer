@@ -11,6 +11,7 @@ import {
   asTvdbId,
   type EpisodeInfo,
   type ImdbId,
+  type MetadataCandidate,
   type TmdbId,
   type TvdbId
 } from './types.ts';
@@ -193,4 +194,27 @@ export function parseProviderReference(raw: string): ParsedProviderReference {
     return { tvdbId: asTvdbId(tvdbDigits) };
   }
   return {};
+}
+
+/** Deduplicates metadata candidates across providers while preserving priority order. */
+export function mergeDeduplicatedCandidates(
+  ...lists: readonly (readonly MetadataCandidate[])[]
+): MetadataCandidate[] {
+  const seen = new Set<string>();
+  const merged: MetadataCandidate[] = [];
+  for (const list of lists) {
+    for (const cand of list) {
+      const idPart = cand.tvdbId
+        ? `tvdb:${cand.tvdbId}`
+        : cand.imdbId
+          ? `imdb:${cand.imdbId}`
+          : 'id:none';
+      const key = `${cand.source}|${idPart}|${cand.title.toLowerCase()}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(cand);
+      }
+    }
+  }
+  return merged;
 }

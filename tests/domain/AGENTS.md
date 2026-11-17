@@ -12,6 +12,7 @@ QA Engineering Agents.
 
 ## Key Files
 
+- [eta.test.ts](eta.test.ts): Pure stage-aware ETA math, trimmed median, EMA blending, and concurrency scaling tests.
 - [libraryVerifier.test.ts](libraryVerifier.test.ts): Library Plex compliance and folder naming verification tests.
 - [plexFormatter.test.ts](plexFormatter.test.ts): Plex movie/TV naming, editions, tags, and path containment tests.
 - [trackSelection.test.ts](trackSelection.test.ts): Audio track language filtering, Spanish variant preference, and fallback tests.

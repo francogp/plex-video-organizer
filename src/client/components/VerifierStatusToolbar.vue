@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from 'vue';
+
 import { OUTPUT_CATEGORIES } from '../../domain/constants.ts';
 import type { OutputCategory, VerifierState } from '../../domain/types.ts';
 import { formatEta } from '../utils/formatters.ts';
@@ -30,6 +32,12 @@ const emit = defineEmits<{
   'dismiss-error': [];
   'reset-columns': [];
 }>();
+
+const etaLabel = computed((): string =>
+  props.state.progress
+    ? formatEta(props.state.progress.etaSeconds, props.state.progress.etaState)
+    : ''
+);
 </script>
 
 <template>
@@ -49,10 +57,7 @@ const emit = defineEmits<{
               {{ props.state.fixing ? 'Fixing' : 'Scanning' }} ·
               {{ props.state.progress.completed }}/{{ props.state.progress.total }} ({{
                 props.state.progress.percent
-              }}%){{
-                props.state.progress.etaSeconds !== undefined
-                  ? ` · ${formatEta(props.state.progress.etaSeconds)}`
-                  : ''
+              }}%){{ etaLabel ? ` · ${etaLabel}` : ''
               }}{{ props.state.progress.stageLabel ? ` · ${props.state.progress.stageLabel}` : '' }}
             </template>
             <template v-else>

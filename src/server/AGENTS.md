@@ -20,7 +20,7 @@ Backend Maintainers.
 
 ## Key Files
 
-- [config.ts](config.ts): Valibot `.env` validation and container mount path mapping.
+- [config.ts](config.ts): Valibot `.env` validation (including optional `SERVER_ID` for ETA host partitioning) and container mount path mapping.
 - [routes.ts](routes.ts): Native `node:http` router for `/api/*`, SSE `/api/events`, and static `dist/`.
 - [index.ts](index.ts): Server entrypoint.
 

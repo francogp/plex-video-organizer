@@ -273,6 +273,13 @@ async function handleWorkflowAndVerifierRoutes(
     return true;
   }
 
+  if (pathname === '/api/jobs/drain') {
+    const clientId = requireClientId(req);
+    const state = runner.requestDrain(clientId);
+    sendJson(res, HTTP_OK, state);
+    return true;
+  }
+
   if (pathname === '/api/logs/clear') {
     const state = runner.clearLogs();
     sendJson(res, HTTP_OK, state);

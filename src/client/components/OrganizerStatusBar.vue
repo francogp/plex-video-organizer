@@ -10,6 +10,7 @@ const props = defineProps<{
   readonly errorMessage: string | null;
   readonly isLockedByOther: boolean;
   readonly isCancellingJob: boolean;
+  readonly isDrainingJob?: boolean;
   readonly canSkipTasks?: boolean;
   readonly itemCount: number;
   readonly summaryText: string;
@@ -18,6 +19,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   cancel: [];
+  drain: [];
   'dismiss-error': [];
   'skip-task': [itemId: ItemId];
 }>();
@@ -46,6 +48,22 @@ const busy = computed(() => props.isBusy || Boolean(props.activeJob));
         >
           <span aria-hidden="true">🛑</span>
           {{ props.isCancellingJob ? ' Cancelling...' : ' Cancel Job' }}
+        </button>
+        <button
+          v-if="!props.isLockedByOther && props.phase === 'PROCESSING'"
+          type="button"
+          class="vo-btn vo-btn--warn vo-progress__cancel"
+          :disabled="
+            props.isCancellingJob || props.isDrainingJob || Boolean(props.activeJob?.drainRequested)
+          "
+          @click="emit('drain')"
+        >
+          <span aria-hidden="true">⏸️</span>
+          {{
+            props.isDrainingJob || props.activeJob?.drainRequested
+              ? ' Stopping After Current...'
+              : ' Stop After Current'
+          }}
         </button>
         <div class="vo-progress__meta vo-mono">{{ props.summaryText }}</div>
       </div>

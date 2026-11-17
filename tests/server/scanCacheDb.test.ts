@@ -50,7 +50,7 @@ describe('scanCacheDb (node:sqlite)', () => {
   it('initializes versioned STRICT tables in-memory, supports upsert/touch, and prunes expired rows', async () => {
     const db = await openScanCacheDb('', ':memory:');
     try {
-      expect(db.getDbVersion()).toBe('20261114152000_add_queue_and_metadata_tables');
+      expect(db.getDbVersion()).toBe('20261116195000_add_eta_samples_table');
 
       const t0 = 1_700_000_000_000;
       db.setProbe(

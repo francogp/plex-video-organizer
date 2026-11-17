@@ -18,6 +18,7 @@ Domain Layer Maintainers.
 
 - [constants.ts](constants.ts): Typed constants, extension sets, language maps, and Plex thresholds.
 - [concurrency.ts](concurrency.ts): Pure slot-indexed concurrent worker pool helper.
+- [eta.ts](eta.ts): Pure stage-aware ETA math kernel, channel profile mapping, trimmed median, EMA blending, and concurrency scaling.
 - [types.ts](types.ts): Branded IDs, Valibot schemas, and domain DTO interfaces.
 - [plexFormatter.ts](plexFormatter.ts): Deterministic Plex sanitization, `formatTitleWithYear`, split-part, edition, and movie/TV path formatting.
 - [plexAudioTagExtractor.ts](plexAudioTagExtractor.ts): Primary audio codec/channel tag and Spanish audio detection helpers.

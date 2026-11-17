@@ -326,6 +326,7 @@ describe('organizerStore', () => {
           ],
           percent: 45,
           etaSeconds: 12,
+          etaState: 'estimated',
           stage: 'moving',
           stageLabel: 'Moving',
           completedItems: 1,
@@ -334,6 +335,8 @@ describe('organizerStore', () => {
       })
     );
     expect(store.activeJob?.currentPercent).toBe(45);
+    expect(store.activeJob?.etaSeconds).toBe(12);
+    expect(store.activeJob?.etaState).toBe('estimated');
     expect(store.activeJob?.stage).toBe('moving');
     expect(store.activeJob?.stageLabel).toBe('Moving');
     expect(store.activeJob?.completedItems).toBe(1);
@@ -349,6 +352,19 @@ describe('organizerStore', () => {
       })
     );
     expect(store.activeJob?.currentPercent).toBe(45);
+
+    listeners.get('progress')?.(
+      new MessageEvent('progress', {
+        data: JSON.stringify({
+          jobId: 'j1',
+          activeTasks: [],
+          percent: 50,
+          etaState: 'calibrating'
+        })
+      })
+    );
+    expect(store.activeJob?.etaSeconds).toBeUndefined();
+    expect(store.activeJob?.etaState).toBe('calibrating');
 
     listeners.get('log')?.(
       new MessageEvent('log', {
@@ -618,9 +634,12 @@ describe('organizerStore', () => {
   it('formats ETA seconds into compact human-readable strings', async () => {
     const { formatEta } = await import('../../src/client/utils/formatters.ts');
     expect(formatEta(undefined)).toBe('');
+    expect(formatEta(undefined, 'calibrating')).toBe('Calibrating...');
     expect(formatEta(-5)).toBe('');
     expect(formatEta(42)).toBe('ETA 42s');
     expect(formatEta(125)).toBe('ETA 2m 5s');
+    expect(formatEta(125, 'calibrating')).toBe('~2m 5s (stage)');
+    expect(formatEta(125, 'estimated')).toBe('ETA 2m 5s');
     expect(formatEta(3725)).toBe('ETA 1h 2m');
   });
 

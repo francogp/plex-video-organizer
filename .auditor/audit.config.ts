@@ -2,7 +2,7 @@ import { defineAuditConfig } from '@francogp/auditor';
 
 export default defineAuditConfig({
   name: 'Project',
-  auditorVersion: '10.12.6-build.20261114-164434',
+  auditorVersion: '10.12.8-build.20261116-223518',
   paths: {
     enabled: true,
     srcRoots: ['src'],
@@ -10,7 +10,25 @@ export default defineAuditConfig({
     scriptsRoots: ['scripts'],
     codeRoots: ['src', 'scripts'],
     toolingFiles: ['vite.plugins.ts'],
-    includeTestsInCodeAudit: false
+    includeTestsInCodeAudit: false,
+    e2eRoots: [],
+    integrationRoots: [],
+    cliRoots: [],
+    dataRoots: [],
+    demoRoots: [],
+    componentsRoots: [],
+    viewsRoots: [],
+    storesRoots: [],
+    composablesRoots: [],
+    typesRoots: [],
+    stylesRoots: [],
+    logicRoots: [],
+    loggerFiles: [],
+    exemptFiles: [],
+    ignoreGlobs: [],
+    ignoredDirs: [],
+    unignoreDirs: [],
+    ignoredPatterns: []
   },
   accessibility: {
     enabled: true
@@ -47,7 +65,15 @@ export default defineAuditConfig({
   styles: {
     enabled: true,
     enforceScss: true,
-    zLayersEnabled: true
+    zLayersEnabled: true,
+    lineHeightOverlapCheck: true,
+    stylelint: {
+      enabled: true,
+      order: {
+        enabled: true,
+        enforceHasBlockPartitioning: true
+      }
+    }
   },
   environment: {
     enabled: true
@@ -105,7 +131,20 @@ export default defineAuditConfig({
     },
     security: {
       enabled: true
-    }
+    },
+    minimumVersion: '3.42.0',
+    architecture: {
+      enabled: true,
+      sharedState: false
+    },
+    mutation: {
+      enabled: false,
+      runner: 'auto',
+      mutantsPerLine: 2,
+      functionScope: true,
+      typecheck: true
+    },
+    enforceTemporalCoupling: false
   },
   encoding: {
     enabled: true,
@@ -249,10 +288,19 @@ export default defineAuditConfig({
     }
   },
   domain: {
-    enabled: true
+    enabled: true,
+    timezoneVariable: 'APP_TIMEZONE',
+    allowedNumericConstantPrefixes: ['GEN_', 'ISO_', 'UTF_8', 'BASE_64', 'RGB_', 'RGBA_', 'WASM_', 'HTML_5', 'CSS_3', 'HTTP_', 'D3_'],
+    allowedStoreSetterPrefixes: ['set', 'update', 'clear']
   },
   persistence: {
-    enabled: true
+    enabled: true,
+    engine: 'supabase',
+    schemaQualified: true,
+    dockerContainer: 'supabase-db',
+    allowedDatabaseFiles: ['AGENTS.md'],
+    allowedHosts: ['localhost', '127.0.0.1'],
+    exemptRlsTables: ['_migrations', 'schema_migrations', 'supabase_migrations']
   },
   webPerformance: {
     enabled: true,
@@ -271,5 +319,55 @@ export default defineAuditConfig({
   dox: {
     enabled: true,
     ignoreGlobs: ['.agents/**']
+  },
+  valibot: {
+    enabled: true
+  },
+  security: {
+    enabled: true
+  },
+  animation: {
+    enabled: true
+  },
+  types: {
+    enabled: true
+  },
+  packageDistribution: {
+    enabled: false,
+    level: 'warning'
+  },
+  auditorHygiene: {
+    enabled: true,
+    roots: ['scripts/auditors']
+  },
+  version: {
+    enabled: true,
+    autoSyncPublicVersionJson: true
+  },
+  secretLeaks: {
+    enabled: true,
+    maskSecrets: true
+  },
+  queryPerformance: {
+    enabled: true,
+    excludeMigrationsDir: true
+  },
+  securityHardening: {
+    enabled: true
+  },
+  codeSimplification: {
+    enabled: true,
+    maxNestingDepth: 4,
+    allowMatrixLoops: false
+  },
+  ratchet: {
+    enabled: true,
+    productionRef: 'origin/main',
+    baselineFile: '.auditor/audit-baseline.json'
+  },
+  runner: {
+    enabled: true,
+    timeoutMs: 0,
+    maxStalenessMinutes: 5
   }
 });

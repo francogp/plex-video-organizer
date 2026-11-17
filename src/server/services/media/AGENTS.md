@@ -9,7 +9,7 @@ Backend Maintainers.
 ## Local Contracts
 
 - Invoke `ffprobe` and `ffmpeg` strictly via `node:child_process.spawn` with argument arrays (`shell: false`).
-- All long-running `ffmpeg` tasks (`measureLoudnormPass1`, `runFfmpegRemux`) must pass `-progress pipe:1` to stream real-time percentage and `etaSeconds` via `runFfmpegProcess`; multi-track `loudnorm` Pass 1 runs in parallel across CPU cores because FFmpeg's `loudnorm` filter is single-threaded per stream.
+- All long-running `ffmpeg` tasks (`analyzeAudioVolume`, `measureLoudnormPass1`, `runFfmpegRemux`) must pass `-progress pipe:1` to stream real-time percentage, `outTimeSec`, `speed`, and `etaSeconds` via `runFfmpegProcess`; multi-track `loudnorm` Pass 1 runs in parallel across CPU cores because FFmpeg's `loudnorm` filter is single-threaded per stream.
 
 ## Key Files
 

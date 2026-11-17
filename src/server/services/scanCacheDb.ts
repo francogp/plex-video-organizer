@@ -4,12 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
-import { SCAN_CACHE_RETENTION_MS, isPermissionOrReadOnlyError } from '../../domain/constants.ts';
+import {
+  ETA_MAX_SAMPLES_PER_KEY,
+  ETA_ORPHAN_HOST_TTL_MS,
+  SCAN_CACHE_RETENTION_MS,
+  isPermissionOrReadOnlyError
+} from '../../domain/constants.ts';
 import {
   sanitizeConflictResolutions,
   type AudioLanguageCode,
   type AudioTrackAnalysis,
   type ConflictDecision,
+  type EtaChannelProfile,
+  type EtaWorkType,
   type ItemId,
   type MediaProbeSummary,
   type MetadataLanguageCode,
@@ -55,6 +62,18 @@ export interface ScanCachePruneResult {
   readonly probeDeleted: number;
   readonly audioDeleted: number;
 }
+
+export interface EtaSampleInput {
+  readonly hostKey: string;
+  readonly workType: EtaWorkType;
+  readonly profile: EtaChannelProfile;
+  readonly throughput: number;
+  readonly workUnits: number;
+  readonly durationMs: number;
+  readonly createdAt?: number;
+}
+
+const MIGRATION_ETA_SAMPLES = '20261116195000_add_eta_samples_table';
 
 interface MigrationSpec {
   readonly id: string;
@@ -107,6 +126,23 @@ const MIGRATIONS: readonly MigrationSpec[] = [
         PRIMARY KEY (bucket, cache_key)
       ) STRICT;
       CREATE INDEX IF NOT EXISTS idx_metadata_cache_expires_at ON metadata_cache(expires_at);
+    `
+  },
+  {
+    id: MIGRATION_ETA_SAMPLES,
+    upSql: `
+      CREATE TABLE IF NOT EXISTS eta_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        host_key TEXT NOT NULL,
+        work_type TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        throughput REAL NOT NULL CHECK (throughput > 0),
+        work_units REAL NOT NULL CHECK (work_units > 0),
+        duration_ms INTEGER NOT NULL CHECK (duration_ms > 0),
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_eta_samples_lookup
+        ON eta_samples(host_key, work_type, profile, id DESC);
     `
   }
 ];
@@ -726,6 +762,105 @@ export class ScanCacheDb {
     }
   }
 
+  public getEtaSamples(
+    hostKey: string,
+    workType: EtaWorkType,
+    profile: EtaChannelProfile,
+    limit = ETA_MAX_SAMPLES_PER_KEY
+  ): readonly number[] {
+    const safeLimit = Math.max(1, Math.min(ETA_MAX_SAMPLES_PER_KEY, Math.floor(limit)));
+    const rows = this.#db
+      .prepare(
+        'SELECT throughput FROM eta_samples WHERE host_key = ? AND work_type = ? AND profile = ? ORDER BY id DESC LIMIT ?'
+      )
+      .all(hostKey, workType, profile, safeLimit) as Array<{ readonly throughput: number }>;
+    return rows.map((row): number => row.throughput);
+  }
+
+  public recordEtaSamplesBatch(
+    samples: readonly EtaSampleInput[],
+    maxPerKey = ETA_MAX_SAMPLES_PER_KEY,
+    orphanTtlMs = ETA_ORPHAN_HOST_TTL_MS,
+    nowMs = nowEpochMs()
+  ): void {
+    const validSamples = samples.filter(
+      (sample): boolean =>
+        Number.isFinite(sample.throughput) &&
+        sample.throughput > 0 &&
+        Number.isFinite(sample.workUnits) &&
+        sample.workUnits > 0 &&
+        Number.isFinite(sample.durationMs) &&
+        sample.durationMs >= 1
+    );
+    if (validSamples.length === 0) {
+      return;
+    }
+    const safeMax = Math.max(1, Math.floor(maxPerKey));
+    const offset = safeMax - 1;
+    const insertStmt = this.#db.prepare(`
+      INSERT INTO eta_samples (
+        host_key, work_type, profile, throughput, work_units, duration_ms, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const pruneStmt = this.#db.prepare(`
+      DELETE FROM eta_samples
+      WHERE host_key = ? AND work_type = ? AND profile = ?
+        AND id < (
+          SELECT id FROM eta_samples
+          WHERE host_key = ? AND work_type = ? AND profile = ?
+          ORDER BY id DESC LIMIT 1 OFFSET ?
+        )
+    `);
+    const dirtyKeys = new Map<
+      string,
+      {
+        readonly hostKey: string;
+        readonly workType: EtaWorkType;
+        readonly profile: EtaChannelProfile;
+      }
+    >();
+    this.#db.exec('BEGIN IMMEDIATE;');
+    try {
+      for (const sample of validSamples) {
+        insertStmt.run(
+          sample.hostKey,
+          sample.workType,
+          sample.profile,
+          sample.throughput,
+          sample.workUnits,
+          Math.max(1, Math.round(sample.durationMs)),
+          sample.createdAt ?? nowMs
+        );
+        const key = `${sample.hostKey}::${sample.workType}::${sample.profile}`;
+        if (!dirtyKeys.has(key)) {
+          dirtyKeys.set(key, {
+            hostKey: sample.hostKey,
+            workType: sample.workType,
+            profile: sample.profile
+          });
+        }
+      }
+      for (const dirty of dirtyKeys.values()) {
+        pruneStmt.run(
+          dirty.hostKey,
+          dirty.workType,
+          dirty.profile,
+          dirty.hostKey,
+          dirty.workType,
+          dirty.profile,
+          offset
+        );
+      }
+      this.#db
+        .prepare('DELETE FROM eta_samples WHERE created_at < ?')
+        .run(nowMs - Math.max(1, orphanTtlMs));
+      this.#db.exec('COMMIT;');
+    } catch (err) {
+      this.#db.exec('ROLLBACK;');
+      throw err;
+    }
+  }
+
   public close(): void {
     if (this.#closed) {
       return;
@@ -743,11 +878,20 @@ function isUnwritableDbError(err: unknown): boolean {
   if (isPermissionOrReadOnlyError(err)) {
     return true;
   }
+  const code =
+    typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string'
+      ? err.code
+      : '';
+  if (code === 'SQLITE_IOERR' || code === 'EIO') {
+    return true;
+  }
   const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
   return (
     msg.includes('readonly') ||
     msg.includes('unable to open database file') ||
-    msg.includes('permission denied')
+    msg.includes('permission denied') ||
+    msg.includes('disk i/o error') ||
+    msg.includes('sqlite_ioerr')
   );
 }
 
@@ -833,7 +977,8 @@ export async function probeVideoWithCache(
   filePath: string,
   relativePosixPath: string,
   probeFile: (targetPath: string) => Promise<MediaProbeSummary>,
-  keyPrefix = ''
+  keyPrefix = '',
+  onCacheResult?: (hit: boolean) => void
 ): Promise<MediaProbeSummary> {
   const statEntry = db
     ? await buildFileStatCacheEntry(filePath, relativePosixPath, keyPrefix)
@@ -841,9 +986,11 @@ export async function probeVideoWithCache(
   if (db && statEntry) {
     const hit = db.getProbe(statEntry.key);
     if (hit) {
+      onCacheResult?.(true);
       return hit;
     }
   }
+  onCacheResult?.(false);
   const fresh = await probeFile(filePath);
   if (db && statEntry) {
     db.setProbe(statEntry.key, statEntry.meta, fresh);

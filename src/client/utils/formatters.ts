@@ -1,6 +1,13 @@
 import { fitTvEpisodeTitleToBudget, sanitizePlexSegment } from '../../domain/constants.ts';
 import { formatTitleWithYear } from '../../domain/plexFormatter.ts';
-import type { JobPhase, MediaKind, MediaProbeSummary, ScannedItem } from '../../domain/types.ts';
+import type {
+  EtaState,
+  JobPhase,
+  MediaKind,
+  MediaProbeSummary,
+  MetadataCandidate,
+  ScannedItem
+} from '../../domain/types.ts';
 
 const PHASE_LABELS: ReadonlyMap<JobPhase, string> = new Map([
   ['IDLE', 'Idle'],
@@ -210,23 +217,25 @@ export function formatProbeSpecRows(probe: MediaProbeSummary): readonly ProbeSpe
   ];
 }
 
-/** Formats remaining ETA seconds into a compact human-readable string (`ETA 1m 24s`). */
-export function formatEta(etaSeconds?: number): string {
+/** Formats remaining ETA seconds into a compact human-readable string (`ETA 1m 24s`, `~1m 24s (stage)`, or `Calibrating...`). */
+export function formatEta(etaSeconds?: number, etaState?: EtaState): string {
   if (etaSeconds === undefined || !Number.isFinite(etaSeconds) || etaSeconds < 0) {
-    return '';
+    return etaState === 'calibrating' ? 'Calibrating...' : '';
   }
   const total = Math.round(etaSeconds);
+  let durationText: string;
   if (total < SECONDS_PER_MINUTE) {
-    return `ETA ${String(total)}s`;
-  }
-  if (total < SECONDS_PER_HOUR) {
+    durationText = `${String(total)}s`;
+  } else if (total < SECONDS_PER_HOUR) {
     const mins = Math.floor(total / SECONDS_PER_MINUTE);
     const secs = total % SECONDS_PER_MINUTE;
-    return `ETA ${String(mins)}m ${String(secs)}s`;
+    durationText = `${String(mins)}m ${String(secs)}s`;
+  } else {
+    const hours = Math.floor(total / SECONDS_PER_HOUR);
+    const mins = Math.floor((total % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+    durationText = `${String(hours)}h ${String(mins)}m`;
   }
-  const hours = Math.floor(total / SECONDS_PER_HOUR);
-  const mins = Math.floor((total % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
-  return `ETA ${String(hours)}h ${String(mins)}m`;
+  return etaState === 'calibrating' ? `~${durationText} (stage)` : `ETA ${durationText}`;
 }
 
 export type ExternalProviderKind = 'tvdb' | 'imdb' | 'tmdb';
@@ -285,4 +294,28 @@ export function extractExternalIdLinks(
     }
   }
   return links;
+}
+
+/** Formats candidate external IDs (`{imdb-...} {tvdb-...} {tmdb-...}`). */
+export function formatMetadataIds(candidate: MetadataCandidate): string {
+  const ids: string[] = [];
+  if (candidate.imdbId) {
+    ids.push(`{imdb-${candidate.imdbId}}`);
+  }
+  if (candidate.tvdbId) {
+    ids.push(`{tvdb-${candidate.tvdbId}}`);
+  }
+  if (candidate.tmdbId) {
+    ids.push(`{tmdb-${candidate.tmdbId}}`);
+  }
+  return ids.join(' ');
+}
+
+/** Builds clickable external provider links directly from a `MetadataCandidate`. */
+export function extractCandidateLinks(
+  candidate: MetadataCandidate,
+  mediaKind: MediaKind
+): readonly ExternalIdLink[] {
+  const formatted = formatMetadataIds(candidate);
+  return formatted ? extractExternalIdLinks(formatted, mediaKind) : [];
 }

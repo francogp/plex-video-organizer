@@ -78,7 +78,8 @@ const activeJobSummaryText = computed<string>(() => {
   if (!job || job.totalItems <= 0) {
     return `${label} · Scanning...`;
   }
-  const etaPart = job.etaSeconds !== undefined ? ` · ${formatEta(job.etaSeconds)}` : '';
+  const etaText = formatEta(job.etaSeconds, job.etaState);
+  const etaPart = etaText ? ` · ${etaText}` : '';
   const stagePart = job.stageLabel ? ` · ${job.stageLabel}` : '';
   return `${label} (${job.jobId}) · ${String(job.completedItems)}/${String(job.totalItems)} (${String(job.currentPercent)}%)${etaPart}${stagePart}`;
 });
@@ -158,11 +159,13 @@ const activeJobSummaryText = computed<string>(() => {
       :error-message="store.errorMessage"
       :is-locked-by-other="store.isLockedByOther"
       :is-cancelling-job="wf.isCancellingJob.value"
+      :is-draining-job="wf.isDrainingJob.value"
       :can-skip-tasks="store.activeJob?.jobId === 'scan' && !store.isLockedByOther"
       :item-count="store.items.length"
       :summary-text="activeJobSummaryText"
       :phase="store.phase"
       @cancel="wf.handleCancelJob"
+      @drain="wf.handleDrainJob"
       @dismiss-error="store.clearError()"
       @skip-task="void store.skipScanTask($event).catch(() => undefined)"
     />

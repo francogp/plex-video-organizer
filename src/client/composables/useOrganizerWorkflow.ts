@@ -42,6 +42,7 @@ export interface WorkflowStorePort {
   setConflictResolutions(resolutions: Partial<Record<ItemId, ConflictDecision>>): Promise<void>;
   startJob(resolutions: Partial<Record<ItemId, ConflictDecision>>): Promise<void>;
   unlock(force: boolean): Promise<void>;
+  drainJob(): Promise<void>;
   fixVerifier(
     entryIds: readonly VerifierEntryId[],
     conflictResolutions: Partial<Record<VerifierEntryId, ConflictDecision>>
@@ -69,6 +70,7 @@ export interface OrganizerWorkflow {
   readonly conflictsOpen: Ref<boolean>;
   readonly confirmUnlockOpen: Ref<boolean>;
   readonly isCancellingJob: Ref<boolean>;
+  readonly isDrainingJob: Ref<boolean>;
   readonly organizerModalConflicts: ComputedRef<readonly ConflictComparison[]>;
   readonly isSingleOrganizerConflict: ComputedRef<boolean>;
   readonly includedQueueCount: ComputedRef<number>;
@@ -103,8 +105,13 @@ export interface OrganizerWorkflow {
     itemIds: readonly ItemId[],
     mode: AudioNormalizationConfig['mode']
   ): Promise<void>;
-  handleApplyMetadata(candidate: MetadataCandidate, episodeOrder: EpisodeOrderMode): Promise<void>;
+  handleApplyMetadata(
+    candidate: MetadataCandidate,
+    episodeOrder: EpisodeOrderMode,
+    candidates?: readonly MetadataCandidate[]
+  ): Promise<void>;
   handleCancelJob(): Promise<void>;
+  handleDrainJob(): Promise<void>;
   handleForceUnlock(): Promise<void>;
   handleResolveVerifierConflict(entry: VerifierEntry): void;
   handleFixVerifierSelected(): Promise<void>;
@@ -131,6 +138,7 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
   const conflictsOpen = ref(false);
   const confirmUnlockOpen = ref(false);
   const isCancellingJob = ref(false);
+  const isDrainingJob = ref(false);
   const organizerModalConflictItemId = ref<ItemId | null>(null);
   const verifierConflictResolutions = ref<Partial<Record<VerifierEntryId, ConflictDecision>>>({});
   const verifierConflictsOpen = ref(false);
@@ -393,13 +401,18 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
 
   async function handleApplyMetadata(
     candidate: MetadataCandidate,
-    episodeOrder: EpisodeOrderMode
+    episodeOrder: EpisodeOrderMode,
+    candidates?: readonly MetadataCandidate[]
   ): Promise<void> {
+    const metadataPatch: ItemPatch =
+      candidates && candidates.length > 0
+        ? { selectedMetadata: candidate, candidates, episodeOrder }
+        : { selectedMetadata: candidate, episodeOrder };
     const bulkTargets = bulkSearchingItems.value;
     if (bulkTargets && bulkTargets.length > 0) {
       await store.patchItemsBulk(
         bulkTargets.map((item) => item.id),
-        { selectedMetadata: candidate, episodeOrder }
+        metadataPatch
       );
       bulkSearchingItems.value = null;
       searchingItem.value = null;
@@ -410,7 +423,7 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
     if (!target) {
       return;
     }
-    await store.patchItem(target.id, { selectedMetadata: candidate, episodeOrder });
+    await store.patchItem(target.id, metadataPatch);
     searchingItem.value = null;
     await store.refreshPreflightSafely();
   }
@@ -424,6 +437,18 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
       await store.unlock(false);
     } finally {
       isCancellingJob.value = false;
+    }
+  }
+
+  async function handleDrainJob(): Promise<void> {
+    if (isDrainingJob.value || isCancellingJob.value) {
+      return;
+    }
+    isDrainingJob.value = true;
+    try {
+      await store.drainJob();
+    } finally {
+      isDrainingJob.value = false;
     }
   }
 
@@ -501,6 +526,7 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
     conflictsOpen,
     confirmUnlockOpen,
     isCancellingJob,
+    isDrainingJob,
     organizerModalConflicts,
     isSingleOrganizerConflict,
     includedQueueCount,
@@ -534,6 +560,7 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
     handleBulkAudioNormalization,
     handleApplyMetadata,
     handleCancelJob,
+    handleDrainJob,
     handleForceUnlock,
     handleResolveVerifierConflict,
     handleFixVerifierSelected,

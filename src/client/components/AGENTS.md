@@ -19,6 +19,7 @@ Frontend Maintainers.
 - Parameterize `LanguageOrderBar.vue` with Vue 3 `generic="T extends string"` and propagate `props.disabled` to every chip action button (`Move left`, `Move right`, `Remove`) in addition to the add-language `<select>`.
 - In `SubtitlePreviewModal.vue`, key `<track :key="vttSrc">` on seek to prevent stale cue accumulation in Chromium, explicitly release the `<video>` stream (`pause` + `removeAttribute('src')` + `load()`) on close/unmount/item change, and suppress benign `AbortError` rejections from `play()`.
 - Render Spanish subtitle discovery in `SubtitlePickerModal.vue` sorted by `hashMatch` first and descending `score` rather than truncated inline lists inside `QueueTracksCell.vue`.
+- Reuse `ProviderLinks.vue` (via `extractCandidateLinks` from `src/client/utils/formatters.ts`) inside both `QueueMetadataCell.vue` and `MetadataSearchModal.vue`, persist discovered candidates via `ItemPatch.candidates`, highlight the active selection (`✓ Selected` vs `Select`), and expose `Stop After Current` (`drain`) in `OrganizerStatusBar.vue` during `PROCESSING`.
 
 ## Key Files
 

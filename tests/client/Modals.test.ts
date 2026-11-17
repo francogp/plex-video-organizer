@@ -321,6 +321,11 @@ describe('Client Modals & App', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(searchFn).toHaveBeenCalled();
     expect(wrapper.text()).toContain('Andor');
+    expect(wrapper.find('a.vo-provider-link--tvdb').attributes('href')).toContain('416744');
+    const resultBtn = wrapper.find('.vo-result-item button');
+    expect(resultBtn.text()).toBe('Select');
+    await resultBtn.trigger('click');
+    expect(wrapper.emitted('apply')?.[0]?.[2]).toHaveLength(1);
   });
 
   it('MetadataSearchModal renders bulk selection context when bulkCount > 1', () => {

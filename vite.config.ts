@@ -346,7 +346,7 @@ export default defineConfig({
     ],
     overrides: [
       {
-        files: ['**/tests/**', '**/tests/e2e/**', '**/tests/integration/**'],
+        files: ['**/tests/**'],
         rules: {
           'typescript/explicit-function-return-type': 'off',
           'vitest/prefer-to-be-truthy': 'off',
@@ -402,7 +402,7 @@ export default defineConfig({
         }
       },
       {
-        files: ['**/scripts/**', '**/src/cli/**'],
+        files: ['**/scripts/**'],
         rules: {
           'no-console': 'off',
           'unicorn/prefer-global-this': 'off',
@@ -433,12 +433,6 @@ export default defineConfig({
           'no-console': 'off',
           'unicorn/prefer-global-this': 'off',
           'typescript/no-floating-promises': 'off'
-        }
-      },
-      {
-        files: ['**/tests/integration/**'],
-        rules: {
-          '@francogp/domain-type/no-tautological-integration-mocks': 'error'
         }
       }
     ]

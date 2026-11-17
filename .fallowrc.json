@@ -22,5 +22,6 @@
       "exports": ["computeProjectedDestination"]
     }
   ],
-  "ignoreDependencies": ["@vue/test-utils"]
+  "ignoreDependencies": ["@vue/test-utils"],
+  "minimumVersion": "3.42.0"
 }

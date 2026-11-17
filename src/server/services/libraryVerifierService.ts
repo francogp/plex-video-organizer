@@ -23,6 +23,7 @@ import {
   type ActiveParallelTask,
   type ConflictComparison,
   type ConflictDecision,
+  type EtaWorkType,
   type MediaProbeSummary,
   type MetadataCandidate,
   type MetadataLanguageCode,
@@ -36,6 +37,7 @@ import {
   type VerifierSummary
 } from '../../domain/types.ts';
 import { buildMountPathsMap, type AppConfig } from '../config.ts';
+import type { EtaPredictor } from './etaPredictor.ts';
 import { buildExistingFileConflictComparison } from './libraryCollision.ts';
 import { probeMedia } from './media/ffmpegRunner.ts';
 import { lookupMovieByImdbId, searchMovies } from './metadata/imdbClient.ts';
@@ -376,7 +378,8 @@ export async function scanLibrariesForCompliance(
   metadataDeps: VerifierMetadataDeps = {},
   onProgress?: VerifierProgressCallback,
   preferredLanguages: readonly MetadataLanguageCode[] = DEFAULT_PREFERRED_LANGUAGES,
-  recalculateTags = false
+  recalculateTags = false,
+  etaPredictor?: EtaPredictor
 ): Promise<VerifierScanResult> {
   const deps: Required<VerifierMetadataDeps> = {
     lookupSeriesByTvdbId: metadataDeps.lookupSeriesByTvdbId ?? lookupSeriesByTvdbId,
@@ -387,6 +390,13 @@ export async function scanLibrariesForCompliance(
   };
 
   const mountPaths = buildMountPathsMap(config);
+  const verifierWorkType: EtaWorkType = recalculateTags
+    ? 'verifier_scan_probe'
+    : 'verifier_scan_fs';
+  if (etaPredictor) {
+    etaPredictor.initStageInventory(verifierWorkType, [], VERIFIER_CONCURRENCY);
+    etaPredictor.setActiveStage(verifierWorkType);
+  }
   const discovered: {
     readonly category: OutputCategory;
     readonly libraryRoot: string;
@@ -404,6 +414,13 @@ export async function scanLibrariesForCompliance(
         .sort((a, b) => a.localeCompare(b));
       discovered.push({ category, libraryRoot, rootDirs });
       totalRootFolders += rootDirs.length;
+      if (etaPredictor && rootDirs.length > 0) {
+        etaPredictor.reconcileStage(
+          verifierWorkType,
+          [{ profile: 'default', units: totalRootFolders, taskCount: totalRootFolders }],
+          VERIFIER_CONCURRENCY
+        );
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       onLog?.('warn', `Skipping inaccessible library ${category} (${libraryRoot}): ${msg}`);
@@ -413,13 +430,19 @@ export async function scanLibrariesForCompliance(
   const totalLibraries = discovered.length;
   const totalUnits = totalRootFolders > 0 ? totalRootFolders : Math.max(1, totalLibraries);
   const startedAtMs = performance.now();
+  if (etaPredictor) {
+    onLog?.('info', etaPredictor.formatBaselineSummaryLog());
+  }
+  const initialEta = etaPredictor?.getEstimate();
   let completedUnits = 0;
   onProgress?.({
     completed: 0,
     total: totalUnits,
     percent: 0,
     stageLabel: 'Discovering libraries...',
-    activeTasks: []
+    activeTasks: [],
+    etaSeconds: initialEta?.etaSeconds,
+    etaState: initialEta?.etaState
   });
 
   const allEntries: VerifierEntry[] = [];
@@ -452,13 +475,17 @@ export async function scanLibrariesForCompliance(
         if (totalRootFolders <= 0) {
           return;
         }
+        const etaEstimate = etaPredictor?.getEstimate();
         onProgress?.({
           completed: completedUnits,
           total: totalUnits,
           percent: computePercent(completedUnits, totalUnits),
           stageLabel: category,
           activeTasks: collectActiveTasks(activeBySlot),
-          etaSeconds: computeEtaSeconds(startedAtMs, completedUnits, totalUnits)
+          etaSeconds: etaPredictor
+            ? etaEstimate?.etaSeconds
+            : computeEtaSeconds(startedAtMs, completedUnits, totalUnits),
+          etaState: etaEstimate?.etaState
         });
       };
 
@@ -466,11 +493,14 @@ export async function scanLibrariesForCompliance(
         rootDirs,
         VERIFIER_CONCURRENCY,
         async (rootName, slot): Promise<VerifierEntry | null> => {
+          const taskId = `${verifierWorkType}:${category}:${rootName}`;
+          etaPredictor?.startTask(taskId, verifierWorkType, 'default', 1);
           activeBySlot[slot] = { slot, fileName: rootName };
           emitFolderProgress();
 
           const rootPath = path.join(libraryRoot, rootName);
           if (await isDirectoryEmptyRecursive(rootPath)) {
+            etaPredictor?.completeTask(taskId);
             activeBySlot[slot] = undefined;
             completedUnits += 1;
             emitFolderProgress();
@@ -569,6 +599,7 @@ export async function scanLibrariesForCompliance(
             });
           }
 
+          etaPredictor?.completeTask(taskId);
           activeBySlot[slot] = undefined;
           completedUnits += 1;
           emitFolderProgress();
@@ -600,6 +631,7 @@ export async function scanLibrariesForCompliance(
       }
     }
   } finally {
+    etaPredictor?.flush();
     probeDb?.close();
   }
 

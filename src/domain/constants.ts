@@ -625,3 +625,37 @@ export const VERIFIER_ISSUE_CODES = [
   'SUBTITLE_STEM_MISMATCH',
   'UNRESOLVED_METADATA'
 ] as const;
+
+/** Canonical stage-aware ETA operation types across Process, Scan, and Verifier. */
+export const ETA_WORK_TYPES = [
+  'scan_probe',
+  'volumedetect',
+  'loudnorm_p1',
+  'remux_loudnorm',
+  'remux_peak_gain',
+  'remux_copy',
+  'move_exdev',
+  'verifier_scan_fs',
+  'verifier_scan_probe'
+] as const;
+
+/** Canonical audio channel profile buckets for CPU-bound ETA estimation. */
+export const ETA_CHANNEL_PROFILES = ['mono', 'stereo', 'surround', 'default'] as const;
+
+/** Canonical physical measurement units for ETA work types. */
+export const ETA_WORK_UNIT_KINDS = ['audio_seconds', 'bytes', 'entries'] as const;
+
+/** Canonical ETA calibration and blending states surfaced to UI consumers. */
+export const ETA_STATES = ['calibrating', 'estimated', 'live_blended'] as const;
+
+export const ETA_MAX_SAMPLES_PER_KEY = 1000;
+export const ETA_ORPHAN_HOST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const ETA_WARMUP_OUT_TIME_SEC = 5;
+export const ETA_WARMUP_ELAPSED_SEC = 2;
+export const ETA_MIN_SAMPLE_MS = 200;
+export const ETA_EMA_ALPHA = 0.3;
+export const ETA_LIVE_WEIGHT_MAX = 0.7;
+export const ETA_FLUSH_BATCH_SIZE = 10;
+export const ETA_TRIM_THRESHOLD = 10;
+export const ETA_TRIM_FRACTION = 0.1;
+export const ETA_SPIKE_CLAMP_FACTOR = 3;

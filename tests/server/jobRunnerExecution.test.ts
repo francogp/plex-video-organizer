@@ -94,6 +94,8 @@ vi.mock('../../src/server/services/metadata/tvdbClient.ts', () => ({
   searchTvShows: vi.fn(async () => [
     { title: 'Dark', year: 2017, tvdbId: '334824', source: 'tvdb' }
   ]),
+  lookupSeriesByTvdbId: vi.fn(async () => undefined),
+  lookupSeriesByTvmazeId: vi.fn(async () => undefined),
   fetchEpisodeTitleMap: vi.fn(async () => new Map([['1:1', 'Secrets']]))
 }));
 
@@ -436,6 +438,89 @@ describe('JobRunner execution pipeline', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it('finishes in-flight task and refreshes READY queue with pending items when requestDrain is called', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-job-drain-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(inputDir, 'Arrival.2016.mkv'), 'a');
+    await fs.writeFile(path.join(inputDir, 'Dark.S01E01.mkv'), 'b');
+    await fs.writeFile(path.join(inputDir, 'Dark.S01E02.mkv'), 'c');
+
+    const ffmpegMod = await import('../../src/server/services/media/ffmpegRunner.ts');
+    vi.mocked(ffmpegMod.analyzeAudioVolume).mockResolvedValue({
+      streamOrder: 0,
+      meanVolumeDb: -20,
+      maxVolumeDb: -2,
+      suggestion: 'ok',
+      recommendedGainDb: 0
+    });
+
+    let remuxStarted!: () => void;
+    const remuxStartedPromise = new Promise<void>((resolve) => {
+      remuxStarted = resolve;
+    });
+    let releaseInFlight!: () => void;
+    const inFlightWait = new Promise<void>((resolve) => {
+      releaseInFlight = resolve;
+    });
+    vi.mocked(ffmpegMod.runFfmpegRemux).mockImplementation(async (args, _dur, onProgress) => {
+      remuxStarted();
+      await inFlightWait;
+      await fs.writeFile(args.at(-1)!, 'remuxed');
+      onProgress(100, 0);
+    });
+
+    const { JobRunner } = await import('../../src/server/services/jobRunner.ts');
+    const runner = new JobRunner(
+      loadConfig({
+        CONFIG_DIR: configDir,
+        INPUT_DIR: inputDir,
+        OUTPUT_MOVIES_DIR: outputDir,
+        OUTPUT_DOCUMENTARIES_DIR: outputDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+        OUTPUT_TV_SHOWS_DIR: outputDir,
+        OUTPUT_ANIMATED_SERIES_DIR: outputDir
+      })
+    );
+    await runner.init();
+
+    const clientId = asClientId('c1:drain');
+    try {
+      runner.startScan(clientId);
+      for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(runner.getState().items).toHaveLength(3);
+
+      const preflight = await runner.preflight(clientId, runner.getState().revision);
+      await runner.startJob(clientId, preflight.revision, {});
+
+      await remuxStartedPromise;
+
+      const drainingState = runner.requestDrain(clientId);
+      expect(drainingState.activeJob?.drainRequested).toBe(true);
+
+      releaseInFlight();
+      for (let i = 0; i < 60 && runner.getState().phase === 'PROCESSING'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const finalState = runner.getState();
+      expect(finalState.phase).toBe('READY');
+      expect(finalState.activeJob).toBeNull();
+      expect(finalState.items.length).toBeGreaterThan(0);
+      expect(finalState.items.length).toBeLessThan(3);
+    } finally {
+      releaseInFlight();
+      await runner.unlock(clientId, true).catch(() => undefined);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('auto-classifies animated metadata to animated libraries and reclassifies when normal metadata is selected', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-animated-cat-'));
     const inputDir = path.join(tmpDir, 'input');
@@ -634,6 +719,96 @@ describe('JobRunner execution pipeline', () => {
     }
 
     unsub();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('unifies episodes sharing tvdbId to tvdb title and returns all provider options sorted by media kind', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-unify-tvdb-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(inputDir, 'Title A.2026.s01e05.mkv'), 'a');
+    await fs.writeFile(path.join(inputDir, 'Title B.2026.s01e06.mkv'), 'b');
+
+    const ffmpegMod = await import('../../src/server/services/media/ffmpegRunner.ts');
+    vi.mocked(ffmpegMod.analyzeAudioVolume).mockResolvedValue({
+      streamOrder: 0,
+      meanVolumeDb: -20,
+      maxVolumeDb: -2,
+      suggestion: 'ok',
+      recommendedGainDb: 0
+    });
+
+    const tvdbMod = await import('../../src/server/services/metadata/tvdbClient.ts');
+    vi.mocked(tvdbMod.searchTvShows).mockImplementation(async (query) => {
+      if (query.toLowerCase().includes('title a')) {
+        return [
+          {
+            title: 'Title B',
+            year: 2026,
+            tvdbId: asTvdbId('463051'),
+            source: 'tvmaze',
+            isAnimated: true
+          }
+        ];
+      }
+      return [
+        {
+          title: 'Title A',
+          year: 2026,
+          tvdbId: asTvdbId('463051'),
+          source: 'tvdb'
+        }
+      ];
+    });
+    vi.mocked(tvdbMod.lookupSeriesByTvdbId).mockImplementation(async (_id, key) =>
+      key
+        ? { title: 'Title A', year: 2026, tvdbId: asTvdbId('463051'), source: 'tvdb' }
+        : { title: 'Title B', year: 2026, tvdbId: asTvdbId('463051'), source: 'tvmaze' }
+    );
+
+    const { JobRunner } = await import('../../src/server/services/jobRunner.ts');
+    const cfg = loadConfig({
+      CONFIG_DIR: configDir,
+      INPUT_DIR: inputDir,
+      OUTPUT_MOVIES_DIR: outputDir,
+      OUTPUT_DOCUMENTARIES_DIR: outputDir,
+      OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+      OUTPUT_TV_SHOWS_DIR: outputDir,
+      OUTPUT_ANIMATED_SERIES_DIR: outputDir,
+      TVDB_API_KEY: 'tvdb-key'
+    });
+    const runner = new JobRunner(cfg);
+    await runner.init();
+
+    const clientId = asClientId('c1:unify');
+    runner.startScan(clientId);
+    for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const items = runner.getState().items;
+    expect(items).toHaveLength(2);
+    expect(items[0]?.selectedMetadata?.title).toBe('Title A');
+    expect(items[1]?.selectedMetadata?.title).toBe('Title A');
+    expect(items[0]?.candidates.map((c) => c.title)).toContain('Title B');
+    expect(items[1]?.candidates.map((c) => c.title)).toContain('Title B');
+
+    const { searchMetadataCatalog } =
+      await import('../../src/server/services/scanMetadataService.ts');
+    const catalogResults = await searchMetadataCatalog(cfg, ['eng'], {
+      query: 'Title A',
+      kind: 'tv',
+      tvdbId: '463051'
+    });
+    expect(catalogResults.map((c) => `${c.source}:${c.title}`)).toEqual([
+      'tvdb:Title A',
+      'tvmaze:Title B'
+    ]);
+
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 });

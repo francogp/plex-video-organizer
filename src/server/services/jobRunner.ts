@@ -40,6 +40,7 @@ import {
   type VerifierState
 } from '../../domain/types.ts';
 import { buildMountPathsMap, resolvePortableInputPath, type AppConfig } from '../config.ts';
+import { EtaPredictor } from './etaPredictor.ts';
 import { cleanupOrphanTempFiles } from './fileMover.ts';
 import { executeMoveJob } from './jobExecutionService.ts';
 import { probeMedia } from './media/ffmpegRunner.ts';
@@ -107,11 +108,13 @@ export class JobRunner {
   #items: ScannedItem[] = [];
   #conflictResolutions: Partial<Record<ItemId, ConflictDecision>> = {};
   #activeJob: ActiveJobProgress | null = null;
+  #activeEtaPredictor: EtaPredictor | null = null;
   #lastError: string | null = null;
   readonly #activeChildren = new Set<ChildProcess>();
   readonly #activeScanChildrenByItemId = new Map<ItemId, ChildProcess>();
   readonly #skippedScanItemIds = new Set<ItemId>();
   #cancelledByUnlock = false;
+  #drainingAfterCurrent = false;
   #activeRunPromise: Promise<void> | null = null;
   readonly #recentLogs: SseLogEvent[] = [];
   readonly #subscribers = new Set<SseSubscriber>();
@@ -289,7 +292,9 @@ export class JobRunner {
       currentPercent: evt.percent,
       stage: evt.stage,
       stageLabel: evt.stageLabel,
-      etaSeconds: evt.etaSeconds
+      etaSeconds: evt.etaSeconds,
+      etaState: evt.etaState,
+      drainRequested: evt.drainRequested ?? this.#activeJob?.drainRequested
     };
     this.#emitProgress(evt);
   }
@@ -440,6 +445,7 @@ export class JobRunner {
       return false;
     }
     this.#skippedScanItemIds.add(itemId);
+    this.#activeEtaPredictor?.skipTask(`volumedetect:${itemId}`);
     const activeTask = this.#activeJob?.activeTasks.find((t) => t.itemId === itemId);
     const label = activeTask?.fileName ?? itemId;
     const child = this.#activeScanChildrenByItemId.get(itemId);
@@ -465,6 +471,7 @@ export class JobRunner {
     }
     this.#lockOwnerClientId = clientId;
     this.#cancelledByUnlock = false;
+    this.#drainingAfterCurrent = false;
     this.#skippedScanItemIds.clear();
     this.#activeScanChildrenByItemId.clear();
     this.#phase = 'SCANNING';
@@ -474,7 +481,8 @@ export class JobRunner {
       totalItems: 0,
       completedItems: 0,
       activeTasks: [],
-      currentPercent: 0
+      currentPercent: 0,
+      etaState: 'calibrating'
     };
     this.#revision += 1;
     this.#emitState();
@@ -483,66 +491,95 @@ export class JobRunner {
     return this.#revision;
   }
 
+  async #createEtaPredictorSession(): Promise<{
+    readonly etaPredictor: EtaPredictor;
+    readonly dispose: () => void;
+  }> {
+    const db = await openScanCacheDb(
+      this.#config.configDir,
+      undefined,
+      this.#emitFallbackWarningOnce
+    );
+    const etaPredictor = new EtaPredictor({ db, serverId: this.#config.serverId });
+    return {
+      etaPredictor,
+      dispose: () => {
+        etaPredictor.flush();
+        db.close();
+      }
+    };
+  }
+
   async #executeScan(): Promise<void> {
     const scanJobId = asJobId('scan');
-    await executeScanWorkflow({
-      config: this.#config,
-      preferredLanguages: this.#preferredLanguages,
-      audioPreferredLanguages: this.#audioPreferredLanguages,
-      autoDownloadSubtitles: this.#autoDownloadSubtitles,
-      isCancelled: () => this.#cancelledByUnlock,
-      isItemSkipped: (itemId) => this.#skippedScanItemIds.has(itemId),
-      createChildTracker: () => this.#createChildTracker(),
-      createScanChildTracker: (itemId) => this.#createScanChildTracker(itemId),
-      searchSubtitles: this.#searchSubtitles,
-      downloadSubtitle: this.#downloadSubtitle,
-      onLog: (level, message) => {
-        this.#emitLog(level, message);
-      },
-      onProgress: (progress) => {
-        this.#updateProgress(progress);
-      },
-      onInitMetadataStage: (totalItems) => {
-        this.#activeJob = {
-          jobId: scanJobId,
-          totalItems,
-          completedItems: 0,
-          activeTasks: [],
-          currentPercent: 0,
-          stage: 'scanning',
-          stageLabel: `Fetching metadata (0/${String(totalItems)})`
-        };
-        this.#emitState();
-      },
-      onCancelledItems: (items) => {
-        this.#items = [...items];
-      },
-      onCompleted: async (withSubtitles) => {
-        this.#activeJob = null;
-        this.#lastError = null;
-        this.#items = [...withSubtitles];
-        await this.#pruneConflictResolutionsToCurrentItems();
-        this.#phase = withSubtitles.length > 0 ? 'READY' : 'IDLE';
-        if (withSubtitles.length === 0) {
-          this.#lockOwnerClientId = null;
+    const session = await this.#createEtaPredictorSession();
+    this.#activeEtaPredictor = session.etaPredictor;
+    try {
+      await executeScanWorkflow({
+        config: this.#config,
+        preferredLanguages: this.#preferredLanguages,
+        audioPreferredLanguages: this.#audioPreferredLanguages,
+        autoDownloadSubtitles: this.#autoDownloadSubtitles,
+        etaPredictor: session.etaPredictor,
+        isCancelled: () => this.#cancelledByUnlock,
+        isItemSkipped: (itemId) => this.#skippedScanItemIds.has(itemId),
+        createChildTracker: () => this.#createChildTracker(),
+        createScanChildTracker: (itemId) => this.#createScanChildTracker(itemId),
+        searchSubtitles: this.#searchSubtitles,
+        downloadSubtitle: this.#downloadSubtitle,
+        onLog: (level, message) => {
+          this.#emitLog(level, message);
+        },
+        onProgress: (progress) => {
+          this.#updateProgress(progress);
+        },
+        onInitMetadataStage: (totalItems) => {
+          this.#activeJob = {
+            jobId: scanJobId,
+            totalItems,
+            completedItems: 0,
+            activeTasks: [],
+            currentPercent: 0,
+            stage: 'scanning',
+            stageLabel: `Fetching metadata (0/${String(totalItems)})`
+          };
+          this.#emitState();
+        },
+        onCancelledItems: (items) => {
+          this.#items = [...items];
+        },
+        onCompleted: async (withSubtitles) => {
+          this.#activeJob = null;
+          this.#lastError = null;
+          this.#items = [...withSubtitles];
+          await this.#pruneConflictResolutionsToCurrentItems();
+          this.#phase = withSubtitles.length > 0 ? 'READY' : 'IDLE';
+          if (withSubtitles.length === 0) {
+            this.#lockOwnerClientId = null;
+          }
+          this.#revision += 1;
+          await this.#persistQueue();
+          this.#emitLog(
+            'info',
+            `Scan completed: ${String(withSubtitles.length)} media file(s) found.`
+          );
+          this.#emitState();
+        },
+        onError: (msg) => {
+          this.#activeJob = null;
+          this.#lastError = msg;
+          this.#phase = 'ERROR';
+          this.#revision += 1;
+          this.#emitLog('error', `Scan failed: ${msg}`);
+          this.#emitState();
         }
-        this.#revision += 1;
-        await this.#persistQueue();
-        this.#emitLog(
-          'info',
-          `Scan completed: ${String(withSubtitles.length)} media file(s) found.`
-        );
-        this.#emitState();
-      },
-      onError: (msg) => {
-        this.#activeJob = null;
-        this.#lastError = msg;
-        this.#phase = 'ERROR';
-        this.#revision += 1;
-        this.#emitLog('error', `Scan failed: ${msg}`);
-        this.#emitState();
+      });
+    } finally {
+      if (this.#activeEtaPredictor === session.etaPredictor) {
+        this.#activeEtaPredictor = null;
       }
-    });
+      session.dispose();
+    }
   }
 
   #requireItem(itemId: ItemId): ScannedItem {
@@ -753,6 +790,7 @@ export class JobRunner {
     const jobId = asJobId(crypto.randomUUID().slice(0, 8));
     this.#cancelledByUnlock = false;
     this.#phase = 'PROCESSING';
+    this.#drainingAfterCurrent = false;
     this.#revision += 1;
 
     const toProcess = this.#items.filter(
@@ -763,7 +801,8 @@ export class JobRunner {
       totalItems: toProcess.length,
       completedItems: 0,
       activeTasks: [],
-      currentPercent: 0
+      currentPercent: 0,
+      etaState: 'calibrating'
     };
     this.#emitState();
 
@@ -811,42 +850,80 @@ export class JobRunner {
     conflictResolutions: Readonly<Partial<Record<ItemId, ConflictDecision>>>,
     existingCollisionByItemId: Readonly<Partial<Record<ItemId, string>>>
   ): Promise<void> {
-    await executeMoveJob({
-      config: this.#config,
-      jobId,
-      toProcess,
-      projectedByItemId,
-      conflictResolutions,
-      existingCollisionByItemId,
-      isCancelled: () => this.#cancelledByUnlock,
-      createChildTracker: () => this.#createChildTracker(),
-      onLog: (level, message) => {
-        this.#emitLog(level, message);
-      },
-      onProgress: (progress) => {
-        this.#updateProgress(progress);
-      },
-      onFinalizeMovedItems: async (movedItems) => {
-        await this.#finalizeMovedItems(movedItems);
-      },
-      onComplete: async (movedCount) => {
-        this.#activeJob = null;
-        this.#phase = 'IDLE';
-        this.#lockOwnerClientId = null;
-        this.#revision += 1;
-        await this.#persistQueue();
-        this.#emitLog('info', `Job ${jobId} completed: ${String(movedCount)} file(s) organized.`);
-        this.#emitState();
-      },
-      onError: async (msg) => {
-        this.#phase = 'ERROR';
-        this.#activeJob = null;
-        this.#revision += 1;
-        await cleanupOrphanTempFiles(this.#config.inputDir);
-        this.#emitLog('error', `Job ${jobId} failed: ${msg}`);
-        this.#emitState();
+    const session = await this.#createEtaPredictorSession();
+    this.#activeEtaPredictor = session.etaPredictor;
+    try {
+      await executeMoveJob({
+        config: this.#config,
+        jobId,
+        toProcess,
+        projectedByItemId,
+        conflictResolutions,
+        existingCollisionByItemId,
+        etaPredictor: session.etaPredictor,
+        isCancelled: () => this.#cancelledByUnlock,
+        isDraining: () => this.#drainingAfterCurrent,
+        createChildTracker: () => this.#createChildTracker(),
+        onLog: (level, message) => {
+          this.#emitLog(level, message);
+        },
+        onProgress: (progress) => {
+          this.#updateProgress(progress);
+        },
+        onFinalizeMovedItems: async (movedItems) => {
+          await this.#finalizeMovedItems(movedItems);
+        },
+        onComplete: async (movedCount) => {
+          const wasDraining = this.#drainingAfterCurrent;
+          this.#drainingAfterCurrent = false;
+          this.#activeJob = null;
+          const remaining = this.#items.length;
+          this.#phase = wasDraining && remaining > 0 ? 'READY' : 'IDLE';
+          if (this.#phase === 'IDLE') {
+            this.#lockOwnerClientId = null;
+          }
+          this.#revision += 1;
+          await this.#persistQueue();
+          this.#emitLog(
+            'info',
+            wasDraining
+              ? `Job ${jobId} stopped after current tasks: ${String(movedCount)} file(s) organized, ${String(remaining)} remaining in queue.`
+              : `Job ${jobId} completed: ${String(movedCount)} file(s) organized.`
+          );
+          this.#emitState();
+        },
+        onError: async (msg) => {
+          this.#drainingAfterCurrent = false;
+          this.#phase = 'ERROR';
+          this.#activeJob = null;
+          this.#revision += 1;
+          await cleanupOrphanTempFiles(this.#config.inputDir);
+          this.#emitLog('error', `Job ${jobId} failed: ${msg}`);
+          this.#emitState();
+        }
+      });
+    } finally {
+      this.#drainingAfterCurrent = false;
+      if (this.#activeEtaPredictor === session.etaPredictor) {
+        this.#activeEtaPredictor = null;
       }
-    });
+      session.dispose();
+    }
+  }
+
+  public requestDrain(clientId: ClientId): OrganizerStatePayload {
+    this.#assertInitialized();
+    this.#assertLockOwner(clientId);
+    if (this.#phase !== 'PROCESSING' || !this.#activeJob) {
+      return this.getState();
+    }
+    if (!this.#drainingAfterCurrent) {
+      this.#drainingAfterCurrent = true;
+      this.#activeJob = { ...this.#activeJob, drainRequested: true };
+      this.#emitLog('warn', 'Drain requested: finishing active tasks and stopping job...');
+      this.#emitState();
+    }
+    return this.getState();
   }
 
   public async unlock(clientId: ClientId, force: boolean): Promise<OrganizerStatePayload> {
@@ -855,6 +932,7 @@ export class JobRunner {
     }
     const wasRunning = this.#phase === 'SCANNING' || this.#phase === 'PROCESSING';
     this.#cancelledByUnlock = true;
+    this.#drainingAfterCurrent = false;
     for (const child of this.#activeChildren) {
       child.kill('SIGKILL');
     }
@@ -862,6 +940,7 @@ export class JobRunner {
     if (this.#activeRunPromise) {
       await this.#activeRunPromise;
     }
+    this.#activeEtaPredictor?.flush();
     await cleanupOrphanTempFiles(this.#config.inputDir);
     this.#lockOwnerClientId = null;
     this.#activeJob = null;
@@ -891,7 +970,8 @@ export class JobRunner {
         total: 0,
         percent: 0,
         stageLabel: 'Discovering libraries...',
-        activeTasks: []
+        activeTasks: [],
+        etaState: 'calibrating'
       },
       lastFixResult: null
     };
@@ -907,31 +987,53 @@ export class JobRunner {
     return this.#revision;
   }
 
+  async #withVerifierSession(
+    operation: 'scan' | 'fix',
+    run: (ctx: {
+      readonly etaPredictor: EtaPredictor;
+      readonly onLog: (level: LogLevel, message: string) => void;
+      readonly onProgress: (progress: NonNullable<VerifierState['progress']>) => void;
+      readonly onError: (msg: string) => void;
+    }) => Promise<void>
+  ): Promise<void> {
+    const session = await this.#createEtaPredictorSession();
+    try {
+      await run({
+        etaPredictor: session.etaPredictor,
+        onLog: (level, message): void => {
+          this.#emitLog(level, message);
+        },
+        onProgress: (progress): void => {
+          this.#verifier = { ...this.#verifier, progress };
+          this.#emitState();
+        },
+        onError: (msg): void => {
+          this.#failVerifierOperation(operation, msg);
+        }
+      });
+    } finally {
+      session.dispose();
+    }
+  }
+
   async #runVerifierScan(recalculateTags = false): Promise<void> {
-    await executeVerifierScan({
-      config: this.#config,
-      preferredLanguages: this.#preferredLanguages,
-      recalculateTags,
-      onLog: (level, message): void => {
-        this.#emitLog(level, message);
-      },
-      onProgress: (progress): void => {
-        this.#verifier = { ...this.#verifier, progress };
-        this.#emitState();
-      },
-      onComplete: (nextState, issueCount, roots, files): void => {
-        this.#verifier = nextState;
-        this.#revision += 1;
-        this.#emitLog(
-          'info',
-          `Verifier scan complete: ${String(issueCount)} issue(s) across ${String(roots)} folder(s) and ${String(files)} file(s).`
-        );
-        this.#emitState();
-      },
-      onError: (msg): void => {
-        this.#failVerifierOperation('scan', msg);
-      }
-    });
+    await this.#withVerifierSession('scan', (ctx) =>
+      executeVerifierScan({
+        config: this.#config,
+        preferredLanguages: this.#preferredLanguages,
+        recalculateTags,
+        ...ctx,
+        onComplete: (nextState, issueCount, roots, files): void => {
+          this.#verifier = nextState;
+          this.#revision += 1;
+          this.#emitLog(
+            'info',
+            `Verifier scan complete: ${String(issueCount)} issue(s) across ${String(roots)} folder(s) and ${String(files)} file(s).`
+          );
+          this.#emitState();
+        }
+      })
+    );
   }
 
   public startVerifierFix(
@@ -957,7 +1059,8 @@ export class JobRunner {
         total: selected.length,
         percent: 0,
         stageLabel: 'Applying bottom-up renames...',
-        activeTasks: []
+        activeTasks: [],
+        etaState: 'calibrating'
       },
       lastFixResult: null
     };
@@ -975,27 +1078,20 @@ export class JobRunner {
     selected: readonly VerifierEntry[],
     conflictResolutions?: Readonly<Partial<Record<VerifierEntryId, ConflictDecision>>>
   ): Promise<void> {
-    await executeVerifierFix({
-      config: this.#config,
-      preferredLanguages: this.#preferredLanguages,
-      selected,
-      conflictResolutions,
-      onLog: (level, message): void => {
-        this.#emitLog(level, message);
-      },
-      onProgress: (progress): void => {
-        this.#verifier = { ...this.#verifier, progress };
-        this.#emitState();
-      },
-      onComplete: (nextState): void => {
-        this.#verifier = nextState;
-        this.#revision += 1;
-        this.#emitState();
-      },
-      onError: (msg): void => {
-        this.#failVerifierOperation('fix', msg);
-      }
-    });
+    await this.#withVerifierSession('fix', (ctx) =>
+      executeVerifierFix({
+        config: this.#config,
+        preferredLanguages: this.#preferredLanguages,
+        selected,
+        conflictResolutions,
+        ...ctx,
+        onComplete: (nextState): void => {
+          this.#verifier = nextState;
+          this.#revision += 1;
+          this.#emitState();
+        }
+      })
+    );
   }
 
   #failVerifierOperation(operation: 'scan' | 'fix', err: unknown): void {

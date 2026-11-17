@@ -13,9 +13,12 @@ Project Maintainers and QA Engineering Agents.
 ## Key Files
 
 - [index.test.ts](index.test.ts): Initial baseline test suite.
+- [domain/eta.test.ts](domain/eta.test.ts): Pure ETA domain kernel, trimmed median, EMA, and stage-aware calculation tests.
 - [domain/libraryVerifier.test.ts](domain/libraryVerifier.test.ts): Pure library Plex compliance, naming, and folder verification tests.
 - [domain/plexFormatter.test.ts](domain/plexFormatter.test.ts): Pure Plex naming, edition, multi-version, and tag formatting tests.
 - [server/config.test.ts](server/config.test.ts): Environment configuration and mount path validation tests.
+- [server/etaPredictor.test.ts](server/etaPredictor.test.ts): `EtaPredictor` host partitioning, calibration gating, live EMA, and batch flush tests.
+- [server/scanCacheDb.test.ts](server/scanCacheDb.test.ts): `ScanCacheDb` migrations, cache persistence, and ETA sample retention tests.
 - [server/scanner.test.ts](server/scanner.test.ts): Directory scanning, `.plexignore`, `.plexmatch`, subtitle, and VobSub tests.
 - [server/metadata.test.ts](server/metadata.test.ts): IMDb, OMDb, TVDB v4, and TVmaze metadata client tests.
 - [server/preflight.test.ts](server/preflight.test.ts): Pre-flight destination projection, conflict, and disk space checks.
