@@ -6,7 +6,8 @@ import * as v from 'valibot';
 
 import {
   DEFAULT_AUDIO_PREFERRED_LANGUAGES,
-  DEFAULT_PREFERRED_LANGUAGES
+  DEFAULT_PREFERRED_LANGUAGES,
+  MAX_SERVER_LOG_ENTRIES
 } from '../../domain/constants.ts';
 import { extractPlexTags } from '../../domain/plexTagExtractor.ts';
 import { reapplyAudioFilterToItem } from '../../domain/trackSelection.ts';
@@ -24,6 +25,7 @@ import {
   type ItemId,
   type ItemPatch,
   type JobId,
+  type JobItemError,
   type JobPhase,
   type LockErrorCode,
   type LogLevel,
@@ -47,8 +49,9 @@ import { executeMoveJob } from './jobExecutionService.ts';
 import { detectFfmpegVersion, probeMedia } from './media/ffmpegRunner.ts';
 import { configureMetadataCache } from './metadata/metadataCache.ts';
 import { runPreflightCheck, type PreflightReport } from './preflight.ts';
-import { openScanCacheDb } from './scanCacheDb.ts';
+import { openScanCacheDb, withAppDbPathSync } from './scanCacheDb.ts';
 import {
+  annotateQueueItemsWithMounts,
   applyBulkPatchToItems,
   applyPatchToItem,
   attachDownloadedSubtitle,
@@ -60,8 +63,6 @@ import {
   searchSpanishSubtitlesForItem
 } from './subtitles/subtitleService.ts';
 import { executeVerifierFix, executeVerifierScan } from './verifierJobService.ts';
-
-const MAX_RECENT_LOGS = 100;
 
 export class LockConflictError extends Error {
   public readonly code: LockErrorCode;
@@ -120,6 +121,8 @@ export class JobRunner {
   #activeRunPromise: Promise<void> | null = null;
   readonly #recentLogs: SseLogEvent[] = [];
   readonly #subscribers = new Set<SseSubscriber>();
+  #resolvedDbPath: string | null = null;
+  #lastJobErrors: JobItemError[] = [];
   #queueFallbackWarned = false;
   #verifier: VerifierState = {
     scanning: false,
@@ -167,6 +170,11 @@ export class JobRunner {
       this.#emitFallbackWarningOnce
     );
     try {
+      this.#resolvedDbPath = db.dbPath;
+      const savedLogs = db.loadRecentLogs(MAX_SERVER_LOG_ENTRIES);
+      if (savedLogs.length > 0) {
+        this.#recentLogs.splice(0, this.#recentLogs.length, ...savedLogs);
+      }
       const savedQueue = db.getQueueState();
       if (savedQueue) {
         this.#revision = savedQueue.revision;
@@ -191,6 +199,9 @@ export class JobRunner {
     }
 
     this.#ffmpegVersion = await detectFfmpegVersion();
+    if (this.#items.length > 0) {
+      this.#items = await annotateQueueItemsWithMounts(this.#items, this.#config);
+    }
     this.#initStatus = 'ready';
     this.#emitState();
   }
@@ -214,6 +225,7 @@ export class JobRunner {
       items: this.#items,
       activeJob: this.#activeJob,
       lastError: this.#lastError,
+      lastJobErrors: [...this.#lastJobErrors],
       logs: [...this.#recentLogs],
       verifier: this.#verifier,
       preferredLanguages: [...this.#preferredLanguages],
@@ -270,8 +282,23 @@ export class JobRunner {
   public clearLogs(): OrganizerStatePayload {
     this.#recentLogs.length = 0;
     this.#lastError = null;
+    this.#lastJobErrors = [];
+    this.#withLogDb((db) => {
+      db.clearLogs();
+    });
     this.#emitState();
     return this.getState();
+  }
+
+  #withLogDb(fn: Parameters<typeof withAppDbPathSync>[1]): void {
+    if (!this.#resolvedDbPath) {
+      return;
+    }
+    try {
+      withAppDbPathSync(this.#resolvedDbPath, fn);
+    } catch {
+      // Keep in-memory & SSE log delivery resilient if SQLite write fails
+    }
   }
 
   #emitState(): void {
@@ -306,9 +333,12 @@ export class JobRunner {
   #emitLog(level: LogLevel, message: string): void {
     const evt: SseLogEvent = { level, message, timestamp: Temporal.Now.instant().toString() };
     this.#recentLogs.push(evt);
-    if (this.#recentLogs.length > MAX_RECENT_LOGS) {
+    if (this.#recentLogs.length > MAX_SERVER_LOG_ENTRIES) {
       this.#recentLogs.shift();
     }
+    this.#withLogDb((db) => {
+      db.appendLog(evt, MAX_SERVER_LOG_ENTRIES);
+    });
     for (const sub of this.#subscribers) {
       sub.send('log', evt);
     }
@@ -879,6 +909,8 @@ export class JobRunner {
   ): Promise<void> {
     const session = await this.#createEtaPredictorSession();
     this.#activeEtaPredictor = session.etaPredictor;
+    this.#lastJobErrors = [];
+    this.#lastError = null;
     try {
       await executeMoveJob({
         config: this.#config,
@@ -900,22 +932,34 @@ export class JobRunner {
         onFinalizeMovedItems: async (movedItems) => {
           await this.#finalizeMovedItems(movedItems);
         },
-        onComplete: async (movedCount) => {
+        onComplete: async (movedCount, attemptErrors) => {
           const wasDraining = this.#drainingAfterCurrent;
           this.#drainingAfterCurrent = false;
           this.#activeJob = null;
+          this.#lastJobErrors = [...attemptErrors];
+          const finalFailedCount = attemptErrors.filter((entry) => entry.attempt === 2).length;
           const remaining = this.#items.length;
-          this.#phase = wasDraining && remaining > 0 ? 'READY' : 'IDLE';
+          if (finalFailedCount > 0 && movedCount === 0 && !wasDraining) {
+            this.#phase = 'ERROR';
+            this.#lastError = `${String(finalFailedCount)} item(s) failed after retry. Check Server Logs.`;
+          } else if (finalFailedCount > 0) {
+            this.#phase = 'READY';
+            this.#lastError = `${String(movedCount)} organized, ${String(finalFailedCount)} failed after retry. Check Server Logs.`;
+          } else {
+            this.#phase = wasDraining && remaining > 0 ? 'READY' : 'IDLE';
+          }
           if (this.#phase === 'IDLE') {
             this.#lockOwnerClientId = null;
           }
           this.#revision += 1;
           await this.#persistQueue();
+          const failedSummary =
+            finalFailedCount > 0 ? `, ${String(finalFailedCount)} failed after retry` : '';
           this.#emitLog(
-            'info',
+            finalFailedCount > 0 ? 'warn' : 'info',
             wasDraining
-              ? `Job ${jobId} stopped after current tasks: ${String(movedCount)} file(s) organized, ${String(remaining)} remaining in queue.`
-              : `Job ${jobId} completed: ${String(movedCount)} file(s) organized.`
+              ? `Job ${jobId} stopped after current tasks: ${String(movedCount)} file(s) organized${failedSummary}, ${String(remaining)} remaining in queue.`
+              : `Job ${jobId} completed: ${String(movedCount)} file(s) organized${failedSummary}.`
           );
           this.#emitState();
         },

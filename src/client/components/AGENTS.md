@@ -24,7 +24,9 @@ Frontend Maintainers.
 ## Key Files
 
 - [AppHeader.vue](AppHeader.vue): Top navigation header, workspace tab switcher, mounts drawer, and title/audio language order bars for `App.vue`.
+- [ErrorToast.vue](ErrorToast.vue): Persistent top-right error notification toast (manual dismiss only) with scroll-to-logs trigger for `OrganizerWorkspace.vue`.
 - [LanguageOrderBar.vue](LanguageOrderBar.vue): Reusable ordered language-preference chip bar shared by title and audio language preferences.
+- [MountBadge.vue](MountBadge.vue): Shared disk-presence badge (`💾`) with mount category tooltip for `QueueMetadataCell.vue` and `MetadataSearchModal.vue`.
 - [QueueTable.vue](QueueTable.vue): Dense media queue table.
 - [QueueToolbar.vue](QueueToolbar.vue): Filter toolbar, bulk action bar, and output conflict summary banner for `QueueTable.vue`.
 - [QueueSourceCell.vue](QueueSourceCell.vue): Source/output path chain, edition input, and inline conflict alert cell for `QueueTable.vue`.
@@ -40,6 +42,7 @@ Frontend Maintainers.
 - [OrganizerModals.vue](OrganizerModals.vue): Grouped modal host (`MetadataSearchModal`, `TrackInspectorModal`, `SubtitlePreviewModal`, `SubtitlePickerModal`, `ConflictResolutionModal`) for `App.vue`.
 - [ServerLogsPanel.vue](ServerLogsPanel.vue): Server log viewer panel with clear action for `App.vue`.
 - [MetadataSearchModal.vue](MetadataSearchModal.vue): Interactive provider search and manual IMDb/TVDB ID override modal.
+- [MetadataResultsList.vue](MetadataResultsList.vue): Candidate results list with provider links and mount badges for `MetadataSearchModal.vue`.
 - [TrackInspectorModal.vue](TrackInspectorModal.vue): Audio/subtitle track inspector and series batch apply.
 - [SubtitlePickerModal.vue](SubtitlePickerModal.vue): Searchable Spanish subtitle candidate picker modal sorted by best match.
 - [SubtitlePreviewModal.vue](SubtitlePreviewModal.vue): In-browser HTML5 video + WebVTT subtitle sync preview modal.

@@ -28,8 +28,13 @@ import {
   type SubtitleCandidate,
   type TvdbId
 } from '../../domain/types.ts';
-import type { AppConfig } from '../config.ts';
+import { buildMountPathsMap, type AppConfig } from '../config.ts';
 import type { EtaPredictor } from './etaPredictor.ts';
+import {
+  buildAllMountLibraryLookup,
+  findCandidateInMounts,
+  type MountLibraryLookup
+} from './libraryCollision.ts';
 import { analyzeAudioVolume, probeMedia } from './media/ffmpegRunner.ts';
 import { lookupMovieByImdbId, searchMovies } from './metadata/imdbClient.ts';
 import {
@@ -38,7 +43,7 @@ import {
   lookupSeriesByTvdbId,
   searchTvShows
 } from './metadata/tvdbClient.ts';
-import { enrichItemsWithAudioAnalysis, scanInputDirectory } from './scanner.ts';
+import { cleanTitleFromName, enrichItemsWithAudioAnalysis, scanInputDirectory } from './scanner.ts';
 import {
   downloadSubtitleCandidateForItem,
   hasSpanishSubtitles,
@@ -48,6 +53,107 @@ import {
 const PERCENT_MAX = 100;
 const MS_PER_SECOND = 1000;
 const SUBTITLE_DOWNLOAD_CONCURRENCY = 3;
+
+function tvYearMatchScore(candidateYear: number | undefined, parsedYear: number): number {
+  if (candidateYear === parsedYear) {
+    return 0;
+  }
+  if (candidateYear !== undefined && Math.abs(candidateYear - parsedYear) <= 1) {
+    return 1;
+  }
+  return 2;
+}
+
+function rankTvCandidatesByYear(
+  candidates: readonly MetadataCandidate[],
+  parsedYear?: number
+): readonly MetadataCandidate[] {
+  if (!parsedYear || candidates.length <= 1) {
+    return candidates;
+  }
+  return [...candidates].sort(
+    (a, b) => tvYearMatchScore(a.year, parsedYear) - tvYearMatchScore(b.year, parsedYear)
+  );
+}
+
+function annotateCandidateWithMount(
+  cand: MetadataCandidate,
+  mountLookup: MountLibraryLookup
+): MetadataCandidate {
+  const presentInLibrary = cand.presentInLibrary ?? findCandidateInMounts(cand, mountLookup);
+  return presentInLibrary ? { ...cand, presentInLibrary } : cand;
+}
+
+function annotateAndPrioritizeCandidates(
+  candidates: readonly MetadataCandidate[],
+  mountLookup: MountLibraryLookup,
+  mediaKind: MediaKind,
+  parsedYear?: number
+): MetadataCandidate[] {
+  const annotated = candidates.map((cand) => annotateCandidateWithMount(cand, mountLookup));
+  const yearRanked = mediaKind === 'tv' ? rankTvCandidatesByYear(annotated, parsedYear) : annotated;
+  return [...yearRanked].sort(
+    (a, b) => (a.presentInLibrary ? 0 : 1) - (b.presentInLibrary ? 0 : 1)
+  );
+}
+
+function annotateSelectedMetadata(
+  selected: MetadataCandidate | undefined,
+  mountLookup: MountLibraryLookup
+): MetadataCandidate | undefined {
+  return selected ? annotateCandidateWithMount(selected, mountLookup) : undefined;
+}
+
+/** Annotates persisted queue items' candidates and selectedMetadata with live mount presence. */
+export async function annotateQueueItemsWithMounts(
+  items: readonly ScannedItem[],
+  config: AppConfig
+): Promise<ScannedItem[]> {
+  if (items.length === 0) {
+    return [];
+  }
+  const mountLookup = await buildAllMountLibraryLookup(buildMountPathsMap(config));
+  return items.map((item): ScannedItem => {
+    const candidates = annotateAndPrioritizeCandidates(
+      item.candidates,
+      mountLookup,
+      item.mediaKind,
+      item.parsedYear
+    );
+    const selectedMetadata = annotateSelectedMetadata(item.selectedMetadata, mountLookup);
+    return { ...item, candidates, selectedMetadata };
+  });
+}
+
+function buildFallbackSearchQueries(parsedTitle: string, fileName: string): readonly string[] {
+  const seen = new Set<string>();
+  const queries: string[] = [];
+  const pushQuery = (q: string): void => {
+    const trimmed = q.trim();
+    if (!trimmed || /^\d+$/.test(trimmed)) {
+      return;
+    }
+    const key = trimmed.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      queries.push(trimmed);
+    }
+  };
+
+  pushQuery(parsedTitle);
+  const baseNoExt = path.basename(fileName, path.extname(fileName));
+  const fileTitle = cleanTitleFromName(baseNoExt).title;
+  pushQuery(fileTitle);
+
+  const words = parsedTitle.trim().split(/\s+/).filter(Boolean);
+  for (let len = words.length - 1; len >= 1; len -= 1) {
+    pushQuery(words.slice(0, len).join(' '));
+  }
+  for (let start = 1; start < words.length; start += 1) {
+    pushQuery(words.slice(start).join(' '));
+  }
+  return queries;
+}
 
 function resolveCategoryFromMetadata(
   mediaKind: MediaKind,
@@ -342,10 +448,14 @@ export async function searchMetadataCatalog(
     (params.tvdbId ? parseProviderReference(params.tvdbId).tvmazeId : undefined) ??
     queryRef.tvmazeId;
 
+  const mountLookup = await buildAllMountLibraryLookup(buildMountPathsMap(config));
+  const finalizeSearch = (list: readonly MetadataCandidate[]): readonly MetadataCandidate[] =>
+    annotateAndPrioritizeCandidates(list, mountLookup, params.kind, params.year);
+
   if (imdbRef && (params.kind === 'movie' || !params.query.trim())) {
     const found = await lookupMovieByImdbId(imdbRef, config.omdbApiKey, fetch, lookupOptions);
     if (found) {
-      return [found];
+      return finalizeSearch([found]);
     }
     const titleQuery = params.query.trim();
     if (!titleQuery || params.kind !== 'movie') {
@@ -355,11 +465,11 @@ export async function searchMetadataCatalog(
       ...lookupOptions,
       throwOnFailure: false
     });
-    return sortCandidatesByMediaKind(byTitle, 'movie');
+    return finalizeSearch(sortCandidatesByMediaKind(byTitle, 'movie'));
   }
   if (tvmazeRef) {
     const found = await lookupSeriesByTvmazeId(tvmazeRef, fetch, lookupOptions);
-    return found ? [found] : [];
+    return found ? finalizeSearch([found]) : [];
   }
   if (tvdbRef && /^\d+$/.test(tvdbRef)) {
     const typedTvdbId = asTvdbId(tvdbRef);
@@ -383,7 +493,7 @@ export async function searchMetadataCatalog(
       tvmazeFound ? [tvmazeFound] : [],
       byTitle
     );
-    return sortCandidatesByMediaKind(merged, 'tv');
+    return finalizeSearch(sortCandidatesByMediaKind(merged, 'tv'));
   }
   if (params.kind === 'movie') {
     const movies = await searchMovies(
@@ -393,7 +503,7 @@ export async function searchMetadataCatalog(
       fetch,
       lookupOptions
     );
-    return sortCandidatesByMediaKind(movies, 'movie');
+    return finalizeSearch(sortCandidatesByMediaKind(movies, 'movie'));
   }
   const [tvPrimary, tvSecondary] = await Promise.all([
     searchTvShows(params.query, config.tvdbApiKey, fetch, lookupOptions),
@@ -404,7 +514,9 @@ export async function searchMetadataCatalog(
         })
       : Promise.resolve([])
   ]);
-  return sortCandidatesByMediaKind(mergeDeduplicatedCandidates(tvPrimary, tvSecondary), 'tv');
+  return finalizeSearch(
+    sortCandidatesByMediaKind(mergeDeduplicatedCandidates(tvPrimary, tvSecondary), 'tv')
+  );
 }
 
 export interface ExecuteScanWorkflowOptions {
@@ -432,6 +544,7 @@ async function resolveSingleItemMetadata(
   config: AppConfig,
   preferredLanguages: readonly MetadataLanguageCode[],
   lookupCache: Map<string, readonly MetadataCandidate[]>,
+  mountLookup: MountLibraryLookup,
   reportedDiagnostics: Set<string>,
   onLog: (level: LogLevel, message: string) => void
 ): Promise<ScannedItem> {
@@ -449,26 +562,42 @@ async function resolveSingleItemMetadata(
     }
   };
 
-  const lookupKey = `${item.mediaKind}:${item.parsedTitle.toLowerCase()}:${String(item.parsedYear ?? '')}`;
-  let fetched = lookupCache.get(lookupKey);
-  if (fetched === undefined) {
-    fetched =
-      item.mediaKind === 'movie'
-        ? await searchMovies(
-            item.parsedTitle,
-            item.parsedYear,
-            config.omdbApiKey,
-            fetch,
-            lookupOptions
-          )
-        : await searchTvShows(item.parsedTitle, config.tvdbApiKey, fetch, lookupOptions);
-    if (fetched.length > 0 || itemDiagnostics.length === 0) {
-      lookupCache.set(lookupKey, fetched);
+  const queries = buildFallbackSearchQueries(item.parsedTitle, item.fileName);
+  let fetched: readonly MetadataCandidate[] = [];
+  for (const query of queries) {
+    const lookupKey = `${item.mediaKind}:${query.toLowerCase()}:${String(item.parsedYear ?? '')}`;
+    let result = lookupCache.get(lookupKey);
+    if (result === undefined) {
+      const rawResult =
+        item.mediaKind === 'movie'
+          ? await searchMovies(query, item.parsedYear, config.omdbApiKey, fetch, lookupOptions)
+          : await searchTvShows(query, config.tvdbApiKey, fetch, lookupOptions);
+      result = annotateAndPrioritizeCandidates(
+        rawResult,
+        mountLookup,
+        item.mediaKind,
+        item.parsedYear
+      );
+      if (result.length > 0 || itemDiagnostics.length === 0) {
+        lookupCache.set(lookupKey, result);
+      }
+    }
+    if (result.length > 0) {
+      fetched = result;
+      break;
     }
   }
 
-  const candidates = [...item.candidates, ...fetched];
-  const selectedMetadata = item.selectedMetadata ?? candidates[0];
+  const candidates = annotateAndPrioritizeCandidates(
+    [...item.candidates, ...fetched],
+    mountLookup,
+    item.mediaKind,
+    item.parsedYear
+  );
+  const selectedMetadata = annotateSelectedMetadata(
+    item.selectedMetadata ?? candidates[0],
+    mountLookup
+  );
   let episode = item.episode;
   if (item.mediaKind === 'tv' && selectedMetadata?.tvdbId && episode) {
     episode = await enrichEpisodeTitle(
@@ -690,6 +819,7 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
     }
 
     const enriched: ScannedItem[] = [];
+    const mountLookup = await buildAllMountLibraryLookup(buildMountPathsMap(options.config));
     const reportedDiagnostics = new Set<string>();
     options.onInitMetadataStage(scanned.length);
 
@@ -714,6 +844,7 @@ export async function executeScanWorkflow(options: ExecuteScanWorkflowOptions): 
         options.config,
         options.preferredLanguages,
         lookupCache,
+        mountLookup,
         reportedDiagnostics,
         options.onLog
       );

@@ -437,4 +437,10 @@ describe('plexFormatter', () => {
       })
     ).toBe(path.join('Dune (2021)', 'Dune (2021).mkv'));
   });
+
+  it('sanitizePlexSegment normalizes curly apostrophes and strips curly double quotes', () => {
+    expect(sanitizePlexSegment('The Council’s ‘Decision’ and “Plan”')).toBe(
+      "The Council's 'Decision' and Plan"
+    );
+  });
 });

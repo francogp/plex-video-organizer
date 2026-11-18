@@ -29,9 +29,11 @@ const isPickerLoading = computed<boolean>(
 </script>
 
 <template>
-  <div class="vo-audio-cell vo-tracks-cell">
-    <QueueTracksPanel :summary="props.summary" />
-    <div class="vo-audio-controls">
+  <div class="vo-dual-rail vo-tracks-cell">
+    <div class="vo-dual-rail__top">
+      <QueueTracksPanel :summary="props.summary" />
+    </div>
+    <div class="vo-dual-rail__bottom vo-tracks-actions">
       <button
         type="button"
         class="vo-btn"
@@ -76,5 +78,17 @@ const isPickerLoading = computed<boolean>(
 <style scoped lang="scss">
 .vo-tracks-cell {
   min-inline-size: 0;
+}
+
+.vo-tracks-actions {
+  flex-wrap: nowrap;
+
+  :deep(.vo-btn) {
+    justify-content: center;
+    padding: calc(var(--vo-space-1) / 2) var(--vo-space-1);
+    font-size: var(--vo-text-xs);
+    flex: 1 1 auto;
+    white-space: nowrap;
+  }
 }
 </style>

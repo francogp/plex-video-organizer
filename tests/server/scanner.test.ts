@@ -826,4 +826,66 @@ describe('scanner', () => {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('strips standalone Sxx and COMPLETE markers from season folder titles', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-complete-'));
+    try {
+      const folder = path.join(
+        tmpDir,
+        'Foundation.S03.COMPLETE.2160p.ATVP.WEB-DL.DV.P5.DDP5.1.Atmos.H265.MP4-BEN.THE.MEN'
+      );
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(
+        path.join(folder, 'Foundation.S03E10.2160p.ATVP.WEB-DL.DV.P5[Ben The Men].mp4'),
+        'v'
+      );
+
+      const items = await scanInputDirectory(tmpDir, async () => MOCK_PROBE);
+      expect(items).toHaveLength(1);
+      expect(items[0]?.parsedTitle).toBe('Foundation');
+      expect(items[0]?.episode?.seasonNumber).toBe(3);
+      expect(items[0]?.episode?.episodeStart).toBe(10);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('detects trailing .spa subtitle language instead of release tag FRA in video stem', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-sub-lang-'));
+    try {
+      const folder = path.join(
+        tmpDir,
+        'The.Frame.2014.FRA.1080p.AMZN.WEB-DL.DDP.2.0.H264-DDR[EtHD]'
+      );
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(
+        path.join(folder, 'The.Frame.2014.FRA.1080p.AMZN.WEB-DL.DDP.2.0.H264-DDR[EtHD].mkv'),
+        'v'
+      );
+      await fs.writeFile(
+        path.join(folder, 'The.Frame.2014.FRA.1080p.AMZN.WEB-DL.DDP.2.0.H264-DDR[EtHD].spa.srt'),
+        '1\n00:00:01,000 --> 00:00:02,000\nHola\n'
+      );
+
+      const items = await scanInputDirectory(tmpDir, async () => ({
+        ...MOCK_PROBE,
+        subtitleStreams: [
+          {
+            index: 2,
+            streamOrder: 0,
+            codecName: 'subrip',
+            language: asIso639_2Code('fra'),
+            isForced: false,
+            isHearingImpaired: false
+          }
+        ]
+      }));
+
+      expect(items).toHaveLength(1);
+      expect(items[0]?.externalSubtitles[0]?.language).toBe('spa');
+      expect(items[0]?.trackSelection.needsUserPrompt).toBe(false);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -122,18 +122,9 @@ function formatAudioModeOptionLabel(mode: AudioNormalizationMode): string {
 </script>
 
 <template>
-  <div class="vo-audio-cell">
+  <div class="vo-dual-rail">
     <div
-      class="vo-audio-panel"
-      :class="
-        !props.summary.analysis
-          ? 'vo-audio-panel--pending'
-          : props.summary.analysis.suggestion === 'loudnorm'
-            ? 'vo-audio-panel--loudnorm'
-            : props.summary.analysis.suggestion === 'peak-gain'
-              ? 'vo-audio-panel--peak'
-              : 'vo-audio-panel--ok'
-      "
+      class="vo-dual-rail__top"
       :title="
         props.summary.analysis
           ? formatAudioTooltip(props.summary.analysis)
@@ -160,7 +151,7 @@ function formatAudioModeOptionLabel(mode: AudioNormalizationMode): string {
         <span>Not analyzed · click Scan Input</span>
       </div>
     </div>
-    <div class="vo-audio-controls">
+    <div class="vo-dual-rail__bottom">
       <label :for="`aud-mode-${props.item.id}`" class="vo-sr-only"
         >Audio normalization for {{ props.item.fileName }}</label
       >

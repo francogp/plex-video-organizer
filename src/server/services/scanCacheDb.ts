@@ -7,6 +7,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import {
   ETA_MAX_SAMPLES_PER_KEY,
   ETA_ORPHAN_HOST_TTL_MS,
+  MAX_SERVER_LOG_ENTRIES,
   SCAN_CACHE_RETENTION_MS,
   isPermissionOrReadOnlyError
 } from '../../domain/constants.ts';
@@ -18,9 +19,11 @@ import {
   type EtaChannelProfile,
   type EtaWorkType,
   type ItemId,
+  type LogLevel,
   type MediaProbeSummary,
   type MetadataLanguageCode,
-  type ScannedItem
+  type ScannedItem,
+  type SseLogEvent
 } from '../../domain/types.ts';
 import { isDirUnwritable } from './fileMover.ts';
 
@@ -74,6 +77,7 @@ export interface EtaSampleInput {
 }
 
 const MIGRATION_ETA_SAMPLES = '20261116195000_add_eta_samples_table';
+const MIGRATION_SERVER_LOGS = '20261117201500_add_server_logs_table';
 
 interface MigrationSpec {
   readonly id: string;
@@ -144,6 +148,17 @@ const MIGRATIONS: readonly MigrationSpec[] = [
       CREATE INDEX IF NOT EXISTS idx_eta_samples_lookup
         ON eta_samples(host_key, work_type, profile, id DESC);
     `
+  },
+  {
+    id: MIGRATION_SERVER_LOGS,
+    upSql: `
+      CREATE TABLE IF NOT EXISTS server_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        level TEXT NOT NULL,
+        message TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+      ) STRICT;
+    `
   }
 ];
 
@@ -205,6 +220,10 @@ export class ScanCacheDb {
   readonly #upsertPreferencesStmt: StatementSync;
   readonly #getConflictResolutionsStmt: StatementSync;
   readonly #upsertConflictResolutionsStmt: StatementSync;
+  readonly #insertServerLogStmt: StatementSync;
+  readonly #pruneServerLogsStmt: StatementSync;
+  readonly #loadServerLogsStmt: StatementSync;
+  readonly #clearServerLogsStmt: StatementSync;
   #closed = false;
 
   public constructor(db: DatabaseSync, dbPath = ':memory:') {
@@ -285,6 +304,16 @@ export class ScanCacheDb {
       INSERT INTO system_config (key, value) VALUES ('preferences', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `);
+    this.#insertServerLogStmt = this.#db.prepare(
+      'INSERT INTO server_logs (level, message, timestamp) VALUES (?, ?, ?)'
+    );
+    this.#pruneServerLogsStmt = this.#db.prepare(
+      'DELETE FROM server_logs WHERE id <= (SELECT id FROM server_logs ORDER BY id DESC LIMIT 1 OFFSET ?)'
+    );
+    this.#loadServerLogsStmt = this.#db.prepare(
+      'SELECT level, message, timestamp FROM server_logs ORDER BY id DESC LIMIT ?'
+    );
+    this.#clearServerLogsStmt = this.#db.prepare('DELETE FROM server_logs');
     this.#getConflictResolutionsStmt = this.#db.prepare(
       "SELECT value FROM system_config WHERE key = 'conflict_resolutions'"
     );
@@ -859,6 +888,42 @@ export class ScanCacheDb {
       this.#db.exec('ROLLBACK;');
       throw err;
     }
+  }
+
+  /** Appends a server log entry and prunes older rows beyond `maxEntries`. */
+  public appendLog(entry: SseLogEvent, maxEntries = MAX_SERVER_LOG_ENTRIES): void {
+    if (this.#closed) {
+      return;
+    }
+    const capped = Math.max(1, Math.trunc(maxEntries));
+    this.#insertServerLogStmt.run(entry.level, entry.message, entry.timestamp);
+    this.#pruneServerLogsStmt.run(capped);
+  }
+
+  /** Loads up to `limit` most recent server log entries in chronological order. */
+  public loadRecentLogs(limit = MAX_SERVER_LOG_ENTRIES): SseLogEvent[] {
+    if (this.#closed) {
+      return [];
+    }
+    const capped = Math.max(1, Math.trunc(limit));
+    const rows = this.#loadServerLogsStmt.all(capped) as Array<{
+      readonly level: LogLevel;
+      readonly message: string;
+      readonly timestamp: string;
+    }>;
+    return rows.reverse().map((row) => ({
+      level: row.level,
+      message: row.message,
+      timestamp: row.timestamp
+    }));
+  }
+
+  /** Deletes all persisted server log entries. */
+  public clearLogs(): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#clearServerLogsStmt.run();
   }
 
   public close(): void {

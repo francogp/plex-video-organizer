@@ -164,7 +164,7 @@ export async function probeMedia(filePath: string): Promise<MediaProbeSummary> {
     const ffprobeBin = process.env['FFPROBE_BIN'] ?? 'ffprobe';
     const child = spawn(
       ffprobeBin,
-      ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath],
+      ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filePath],
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
     const chunks: Buffer[] = [];

@@ -14,6 +14,7 @@ import {
   ETA_WORK_UNIT_KINDS,
   ISO_639_2_PRESETS,
   JOB_PHASES,
+  JOB_RETRY_ATTEMPTS,
   JOB_STAGE_KINDS,
   LOCK_ERROR_CODES,
   LOG_LEVELS,
@@ -238,6 +239,7 @@ export interface MetadataCandidate {
   readonly tmdbId?: TmdbId;
   readonly overview?: string;
   readonly isAnimated?: boolean;
+  readonly presentInLibrary?: OutputCategory;
   readonly source: MetadataCandidateSource;
 }
 
@@ -435,6 +437,17 @@ export type ServerInitStatus = v.InferOutput<typeof ServerInitStatusSchema>;
 const ConnectionStatusSchema = v.picklist(CONNECTION_STATUSES);
 export type ConnectionStatus = v.InferOutput<typeof ConnectionStatusSchema>;
 
+const JobRetryAttemptSchema = v.picklist(JOB_RETRY_ATTEMPTS);
+export type JobRetryAttempt = v.InferOutput<typeof JobRetryAttemptSchema>;
+
+export interface JobItemError {
+  readonly itemId: ItemId;
+  readonly fileName: string;
+  readonly attempt: JobRetryAttempt;
+  readonly message: string;
+  readonly timestamp: string;
+}
+
 export interface OrganizerStatePayload {
   readonly phase: JobPhase;
   readonly initStatus?: ServerInitStatus;
@@ -445,6 +458,7 @@ export interface OrganizerStatePayload {
   readonly items: readonly ScannedItem[];
   readonly activeJob: ActiveJobProgress | null;
   readonly lastError?: string | null;
+  readonly lastJobErrors?: readonly JobItemError[];
   readonly logs?: readonly SseLogEvent[];
   readonly verifier?: VerifierState;
   readonly preferredLanguages?: readonly MetadataLanguageCode[];

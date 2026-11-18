@@ -74,6 +74,7 @@ describe('QueueTable', () => {
     await kindSelect.setValue('tv');
     expect(wrapper.emitted('change-media-kind')?.[0]?.[1]).toBe('tv');
 
+    await wrapper.find('.vo-edition-toggle').trigger('click');
     const editionInput = wrapper.find('input#ed-item-1');
     await editionInput.setValue('Extended');
     expect(wrapper.emitted('change-edition')?.[0]?.[1]).toBe('Extended');
@@ -620,20 +621,19 @@ describe('QueueTable', () => {
       props: { items: [noSpaItem], disabled: false }
     });
     expect(noSpaWrapper.text()).toContain('No spa');
-    expect(noSpaWrapper.text()).toContain('No Spanish subtitles (file or embedded)');
-    expect(noSpaWrapper.find('.vo-audio-panel--warning').exists()).toBe(true);
+    expect(noSpaWrapper.find('.vo-audio-option--warning').exists()).toBe(true);
 
     const extSpaWrapper = mount(QueueTable, {
       props: { items: [withExternalSpaItem], disabled: false }
     });
-    expect(extSpaWrapper.text()).not.toContain('No Spanish subtitles (file or embedded)');
-    expect(extSpaWrapper.find('.vo-audio-panel--ok').exists()).toBe(true);
+    expect(extSpaWrapper.text()).not.toContain('No spa');
+    expect(extSpaWrapper.find('.vo-audio-option--warning').exists()).toBe(false);
 
     const intSpaWrapper = mount(QueueTable, {
       props: { items: [withEmbeddedSpaItem], disabled: false }
     });
-    expect(intSpaWrapper.text()).not.toContain('No Spanish subtitles (file or embedded)');
-    expect(intSpaWrapper.find('.vo-audio-panel--warning').exists()).toBe(false);
+    expect(intSpaWrapper.text()).not.toContain('No spa');
+    expect(intSpaWrapper.find('.vo-audio-option--warning').exists()).toBe(false);
   });
 
   it('emits subtitle search, download, close, and preview events declaratively', async () => {
@@ -770,8 +770,10 @@ describe('QueueTable', () => {
     });
     const overview = wrapper.find('.vo-tracks-overview');
     expect(overview.exists()).toBe(true);
-    expect(overview.text()).toContain('Audio: 1/2 (spa)');
-    expect(overview.text()).toContain('Subs: 1 int · 0 ext');
+    expect(overview.text()).toContain('Audio');
+    expect(overview.text()).toContain('1/2 (spa)');
+    expect(overview.text()).toContain('Subs');
+    expect(overview.text()).toContain('1 int · 0 ext');
   });
 
   it('selects the matching candidate in metadata dropdown even when selectedMetadata is a deserialized clone', () => {
@@ -787,7 +789,7 @@ describe('QueueTable', () => {
       title: 'Foundation',
       year: 2021,
       tvdbId: asTvdbId('366972'),
-      score: 95
+      presentInLibrary: 'tv-shows' as const
     };
     const reloadedItem: ScannedItem = {
       ...SAMPLE_ITEM,
@@ -807,5 +809,39 @@ describe('QueueTable', () => {
 
     const selectEl = wrapper.find(`select#meta-${reloadedItem.id}`).element as HTMLSelectElement;
     expect(selectEl.value).toBe('1');
+    expect(selectEl.options[1]?.textContent).toContain('💾 Foundation (2021)');
+    expect(wrapper.find('.vo-mount-badge').text()).toBe('💾 Series');
+  });
+
+  it('applies full-row error/warning/conflict classes and expands + Edition inline', async () => {
+    const errorItem: ScannedItem = {
+      ...SAMPLE_ITEM,
+      id: asItemId('row-err'),
+      warnings: ['Subtitle mismatch']
+    };
+
+    const wrapper = mount(QueueTable, {
+      props: {
+        items: [errorItem],
+        disabled: false,
+        jobErrors: [
+          {
+            itemId: errorItem.id,
+            fileName: errorItem.fileName,
+            attempt: 2,
+            message: 'ffprobe exited with code 1',
+            timestamp: '2026-11-17T20:00:00Z'
+          }
+        ]
+      }
+    });
+
+    const row = wrapper.find('tr.vo-queue-row');
+    expect(row.classes()).toContain('vo-row--has-error');
+    expect(row.classes()).toContain('vo-row--has-warning');
+    expect(wrapper.find(`input#ed-${errorItem.id}`).exists()).toBe(false);
+
+    await wrapper.find('.vo-edition-toggle').trigger('click');
+    expect(wrapper.find(`input#ed-${errorItem.id}`).exists()).toBe(true);
   });
 });

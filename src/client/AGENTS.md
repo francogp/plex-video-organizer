@@ -17,6 +17,7 @@ Frontend Maintainers.
 
 - [main.ts](main.ts): Vue + Pinia bootstrap.
 - [App.vue](App.vue): Main dashboard shell, theme toggle, LAN lock banner, and modal orchestration.
+- [types.ts](types.ts): Client UI presentation state types (`ErrorToastState`).
 
 ## Work Guidance
 

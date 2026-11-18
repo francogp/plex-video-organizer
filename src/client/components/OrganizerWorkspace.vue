@@ -7,6 +7,7 @@ import type {
   AudioNormalizationConfig,
   ClientId,
   ItemId,
+  JobItemError,
   JobPhase,
   MediaKind,
   MetadataLanguageCode,
@@ -21,8 +22,10 @@ import {
   useOrganizerWorkflow,
   type WorkflowStorePort
 } from '../composables/useOrganizerWorkflow.ts';
+import type { ErrorToastState } from '../types.ts';
 import { formatEta, formatPhaseLabel } from '../utils/formatters.ts';
 import AppHeader, { type WorkspaceTab } from './AppHeader.vue';
+import ErrorToast from './ErrorToast.vue';
 import OrganizerModals from './OrganizerModals.vue';
 import OrganizerStatusBar from './OrganizerStatusBar.vue';
 import QueueTable from './QueueTable.vue';
@@ -41,6 +44,8 @@ export interface WorkspaceViewStore extends WorkflowStorePort {
   readonly connectionStatus: 'connecting' | 'connected' | 'disconnected';
   readonly activeJob: ActiveJobProgress | null;
   readonly errorMessage: string | null;
+  readonly lastJobErrors: readonly JobItemError[];
+  readonly errorToast: ErrorToastState;
   readonly isInitializing: boolean;
   readonly isLockedByOther: boolean;
   readonly isBusy: boolean;
@@ -53,6 +58,7 @@ export interface WorkspaceViewStore extends WorkflowStorePort {
   setPreferredLanguages(langs: readonly MetadataLanguageCode[]): Promise<void>;
   setAudioPreferredLanguages(langs: readonly AudioLanguageCode[]): Promise<void>;
   clearError(): void;
+  dismissErrorToast(): void;
   skipScanTask(itemId: ItemId): Promise<void>;
   clearVerifierErrors(): void;
   clearLogs(): Promise<void>;
@@ -64,7 +70,12 @@ const props = defineProps<{
 }>();
 
 const activeTab = ref<WorkspaceTab>('organizer');
+const logsContainerRef = ref<HTMLElement | null>(null);
 const wf = useOrganizerWorkflow(props.store);
+
+function scrollToLogs(): void {
+  logsContainerRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 const initBannerText = computed((): string =>
   props.store.connectionStatus === 'connecting'
@@ -177,6 +188,7 @@ const activeJobSummaryText = computed<string>(() => {
         :disabled="store.isInitializing || store.isLockedByOther || store.isBusy"
         :conflicts="store.preflightConflicts"
         :conflict-resolutions="store.savedConflictResolutions"
+        :job-errors="store.lastJobErrors"
         :subtitle-picker="wf.subtitlePicker.value"
         @search-subtitles="wf.handleSearchSubtitles"
         @preview-subtitle="wf.handleTestSubtitleInPlayer"
@@ -221,7 +233,15 @@ const activeJobSummaryText = computed<string>(() => {
     @resolve-conflict="wf.handleResolveVerifierConflict"
   />
 
-  <ServerLogsPanel :logs="store.logs" @clear="store.clearLogs()" />
+  <div ref="logsContainerRef">
+    <ServerLogsPanel :logs="store.logs" @clear="store.clearLogs()" />
+  </div>
+
+  <ErrorToast
+    :state="store.errorToast"
+    @dismiss="store.dismissErrorToast()"
+    @view-logs="scrollToLogs()"
+  />
 
   <OrganizerModals :store="store" :workflow="wf" />
 </template>

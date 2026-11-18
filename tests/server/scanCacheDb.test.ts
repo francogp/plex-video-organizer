@@ -50,7 +50,7 @@ describe('scanCacheDb (node:sqlite)', () => {
   it('initializes versioned STRICT tables in-memory, supports upsert/touch, and prunes expired rows', async () => {
     const db = await openScanCacheDb('', ':memory:');
     try {
-      expect(db.getDbVersion()).toBe('20261116195000_add_eta_samples_table');
+      expect(db.getDbVersion()).toBe('20261117201500_add_server_logs_table');
 
       const t0 = 1_700_000_000_000;
       db.setProbe(
@@ -255,6 +255,29 @@ describe('scanCacheDb (node:sqlite)', () => {
       }
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists server logs in SQLite, caps at 500 entries, and clears cleanly', async () => {
+    const db = await openScanCacheDb('', ':memory:');
+    try {
+      for (let i = 1; i <= 505; i += 1) {
+        db.appendLog({
+          level: i % 10 === 0 ? 'error' : 'info',
+          message: `log-${String(i)}`,
+          timestamp: `2026-11-17T20:00:${String(i % 60).padStart(2, '0')}Z`
+        });
+      }
+
+      const loaded = db.loadRecentLogs();
+      expect(loaded).toHaveLength(500);
+      expect(loaded[0]?.message).toBe('log-6');
+      expect(loaded[499]?.message).toBe('log-505');
+
+      db.clearLogs();
+      expect(db.loadRecentLogs()).toEqual([]);
+    } finally {
+      db.close();
     }
   });
 });

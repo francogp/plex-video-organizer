@@ -2,6 +2,7 @@ import gsap from 'gsap';
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
+import { MAX_SERVER_LOG_ENTRIES } from '../../domain/constants.ts';
 import type {
   ActiveJobProgress,
   AudioLanguageCode,
@@ -15,6 +16,7 @@ import type {
   ItemId,
   ItemPatch,
   JobId,
+  JobItemError,
   JobPhase,
   MediaKind,
   MetadataCandidate,
@@ -29,6 +31,7 @@ import type {
   VerifierEntryId,
   VerifierState
 } from '../../domain/types.ts';
+import type { ErrorToastState } from '../types.ts';
 import {
   buildMergedTrackSelection,
   createOrganizerSseSource,
@@ -47,7 +50,6 @@ import {
   type ThemeMode
 } from '../utils/storage.ts';
 
-const MAX_LOG_ENTRIES = 100;
 const HTTP_CONFLICT_STATUS = 409;
 const MAX_STALE_REVISION_ATTEMPTS = 2;
 
@@ -79,6 +81,12 @@ export const useOrganizerStore = defineStore('organizer', () => {
     lastFixResult: null
   });
   const errorMessage = ref<string | null>(null);
+  const lastJobErrors = ref<readonly JobItemError[]>([]);
+  const errorToast = ref<ErrorToastState>({
+    visible: false,
+    count: 0,
+    latestMessage: ''
+  });
   let eventSource: OrganizerSseConnection | null = null;
 
   const isLockedByOther = computed(
@@ -153,9 +161,31 @@ export const useOrganizerStore = defineStore('organizer', () => {
     if (state.conflictResolutions) {
       savedConflictResolutions.value = { ...state.conflictResolutions };
     }
+    if (Array.isArray(state.lastJobErrors)) {
+      lastJobErrors.value = [...state.lastJobErrors];
+    }
     if (state.phase === 'ERROR' && state.lastError) {
+      if (errorMessage.value !== state.lastError) {
+        triggerErrorToast(state.lastError);
+      }
       errorMessage.value = state.lastError;
     }
+  }
+
+  function triggerErrorToast(message: string): void {
+    errorToast.value = {
+      visible: true,
+      count: errorToast.value.count + 1,
+      latestMessage: message
+    };
+  }
+
+  function dismissErrorToast(): void {
+    errorToast.value = {
+      visible: false,
+      count: 0,
+      latestMessage: ''
+    };
   }
 
   async function updateLanguagePreference<T extends string>(
@@ -392,7 +422,10 @@ export const useOrganizerStore = defineStore('organizer', () => {
       },
       onLog: (log): void => {
         lastSseActivityAt = performance.now();
-        logs.value = [...logs.value.slice(-(MAX_LOG_ENTRIES - 1)), log];
+        logs.value = [...logs.value.slice(-(MAX_SERVER_LOG_ENTRIES - 1)), log];
+        if (log.level === 'error') {
+          triggerErrorToast(log.message);
+        }
       }
     });
   }
@@ -686,6 +719,8 @@ export const useOrganizerStore = defineStore('organizer', () => {
     verifierState,
     hasUnresolvedConflicts,
     errorMessage,
+    lastJobErrors,
+    errorToast,
     isLockedByOther,
     isBusy,
     canProcessQueue,
@@ -716,6 +751,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     drainJob,
     clearLogs,
     clearError,
+    dismissErrorToast,
     clearVerifierErrors
   };
 });

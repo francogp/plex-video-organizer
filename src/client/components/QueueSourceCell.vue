@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue';
+
 import type { ConflictComparison, ConflictDecision, ScannedItem } from '../../domain/types.ts';
 import { formatPlexOutputSegments, splitRelativePathSegments } from '../utils/formatters.ts';
 import QueueConflictAlert from './QueueConflictAlert.vue';
@@ -14,6 +16,25 @@ const emit = defineEmits<{
   'change-edition': [edition: string];
   'open-conflict-modal': [];
 }>();
+
+interface PathRail {
+  readonly key: 'src' | 'out';
+  readonly segments: ReturnType<typeof splitRelativePathSegments>;
+}
+
+const editionExpanded = ref(false);
+const showEditionInput = computed<boolean>(
+  () => editionExpanded.value || Boolean(props.item.edition?.trim())
+);
+const pathRails = computed<readonly PathRail[]>(() => {
+  const srcSegments = splitRelativePathSegments(props.item.relativePath);
+  const outSegments = formatPlexOutputSegments(props.item);
+  const rails: PathRail[] = [{ key: 'src', segments: srcSegments }];
+  if (outSegments) {
+    rails.push({ key: 'out', segments: outSegments });
+  }
+  return rails;
+});
 </script>
 
 <template>
@@ -34,52 +55,19 @@ const emit = defineEmits<{
       <span v-for="tag in props.item.tags" :key="tag" class="vo-badge vo-mono">
         {{ tag }}
       </span>
+      <button
+        v-if="!showEditionInput"
+        type="button"
+        class="vo-edition-toggle vo-mono"
+        :disabled="props.disabled"
+        title="Add optional Plex {edition-...} tag"
+        @click="editionExpanded = true"
+      >
+        + Edition
+      </button>
     </div>
-    <div class="vo-path-panels vo-mono">
-      <div class="vo-path-panel vo-path-panel--source">
-        <span class="vo-path-label">Source</span>
-        <div class="vo-path-chain">
-          <template
-            v-for="(folder, fIdx) in splitRelativePathSegments(props.item.relativePath).folders"
-            :key="`sf-${String(fIdx)}`"
-          >
-            <span class="vo-path-pill vo-path-pill--folder" title="Source Folder">
-              {{ folder }}
-            </span>
-            <span class="vo-path-sep" aria-hidden="true">›</span>
-          </template>
-          <span class="vo-path-pill vo-path-pill--file" title="Source File">
-            {{ splitRelativePathSegments(props.item.relativePath).fileName }}
-          </span>
-        </div>
-      </div>
 
-      <div v-if="formatPlexOutputSegments(props.item)" class="vo-path-panel vo-path-panel--output">
-        <span class="vo-path-label vo-path-label--output">Output</span>
-        <div class="vo-path-chain">
-          <template
-            v-for="(folder, oIdx) in formatPlexOutputSegments(props.item)!.folders"
-            :key="`of-${String(oIdx)}`"
-          >
-            <span class="vo-path-pill vo-path-pill--out-folder" title="Destination Folder">
-              {{ folder }}
-            </span>
-            <span class="vo-path-sep" aria-hidden="true">›</span>
-          </template>
-          <span class="vo-path-pill vo-path-pill--out-file" title="Destination File">
-            {{ formatPlexOutputSegments(props.item)!.fileName }}
-          </span>
-        </div>
-      </div>
-
-      <div v-else class="vo-path-panel vo-path-panel--unresolved">
-        <span class="vo-path-label vo-path-label--unresolved">Output</span>
-        <span class="vo-file-output--unresolved">
-          Unresolved — select or search a Match Candidate
-        </span>
-      </div>
-    </div>
-    <div class="vo-edition-wrap">
+    <div v-if="showEditionInput" class="vo-edition-wrap">
       <label :for="`ed-${props.item.id}`" class="vo-sr-only"
         >Edition for {{ props.item.fileName }}</label
       >
@@ -99,6 +87,50 @@ const emit = defineEmits<{
         >?</span
       >
     </div>
+
+    <div class="vo-dual-rail vo-mono">
+      <div v-for="rail in pathRails" :key="rail.key" class="vo-dual-rail__line">
+        <span :class="`vo-path-label vo-rail-tag vo-rail-tag--${rail.key}`">{{
+          rail.key.toUpperCase()
+        }}</span>
+        <div class="vo-path-tree">
+          <div
+            v-if="rail.segments.folders.length > 0"
+            class="vo-path-tree__dirs"
+            :title="rail.segments.folders.join(' / ')"
+          >
+            <span aria-hidden="true">📁</span>
+            <template
+              v-for="(folder, fIdx) in rail.segments.folders"
+              :key="`${rail.key}-f-${String(fIdx)}`"
+            >
+              <span
+                v-if="fIdx > 0"
+                :class="`vo-path-sep vo-path-sep--${rail.key}`"
+                aria-hidden="true"
+                >/</span
+              >
+              <span class="vo-path-seg vo-path-seg--muted">{{ folder }}</span>
+            </template>
+          </div>
+          <div
+            :class="`vo-path-tree__file vo-path-seg--${rail.key}`"
+            :title="rail.segments.fileName"
+          >
+            <span :class="`vo-path-arrow vo-path-arrow--${rail.key}`" aria-hidden="true">↳</span>
+            <span>{{ rail.segments.fileName }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="pathRails.length < 2" class="vo-dual-rail__line">
+        <span class="vo-path-label vo-rail-tag vo-rail-tag--err">OUT</span>
+        <span class="vo-file-output--unresolved">
+          Unresolved — select or search a Match Candidate
+        </span>
+      </div>
+    </div>
+
     <QueueConflictAlert
       :conflict="props.conflict"
       :decision="props.decision"
@@ -113,9 +145,109 @@ const emit = defineEmits<{
 
 <style scoped lang="scss">
 .vo-file-cell {
+  display: grid;
+  gap: var(--vo-space-1);
   width: 100%;
   min-width: 0;
   max-width: 100%;
+}
+
+.vo-edition-toggle {
+  padding: calc(var(--vo-space-1) / 4) var(--vo-space-2);
+  border: 1px dashed var(--vo-border);
+  border-radius: var(--vo-radius-sm);
+  background: transparent;
+  color: var(--vo-text-muted);
+  font-size: var(--vo-text-xs);
+  margin-inline-start: auto;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    color: var(--vo-text);
+    border-color: var(--vo-accent);
+  }
+}
+
+.vo-rail-tag {
+  padding: calc(var(--vo-space-1) / 4) var(--vo-space-1);
+  border: 1px solid var(--vo-border);
+  border-radius: var(--vo-radius-sm);
+  flex-shrink: 0;
+}
+
+.vo-rail-tag--src {
+  color: var(--vo-accent);
+  border-color: color-mix(in oklch, var(--vo-accent) 40%, var(--vo-border));
+}
+
+.vo-rail-tag--out {
+  color: var(--vo-success);
+  border-color: color-mix(in oklch, var(--vo-success) 40%, var(--vo-border));
+}
+
+.vo-rail-tag--err {
+  color: var(--vo-danger);
+  border-color: color-mix(in oklch, var(--vo-danger) 40%, var(--vo-border));
+}
+
+.vo-path-tree {
+  display: grid;
+  gap: calc(var(--vo-space-1) / 4);
+  min-width: 0;
+}
+
+.vo-path-tree__dirs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: calc(var(--vo-space-1) / 2) var(--vo-space-1);
+  min-width: 0;
+  color: var(--vo-text-muted);
+  line-height: 1.3;
+}
+
+.vo-path-tree__file {
+  display: flex;
+  align-items: baseline;
+  gap: var(--vo-space-1);
+  min-width: 0;
+  line-height: 1.3;
+  padding-inline-start: var(--vo-space-1);
+  overflow-wrap: anywhere;
+}
+
+.vo-path-arrow {
+  font-weight: var(--vo-weight-bold);
+  flex-shrink: 0;
+}
+
+.vo-path-arrow--src,
+.vo-path-sep--src {
+  color: var(--vo-accent);
+}
+
+.vo-path-arrow--out,
+.vo-path-sep--out {
+  color: var(--vo-success);
+}
+
+.vo-path-seg {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vo-path-seg--muted {
+  color: var(--vo-text-muted);
+}
+
+.vo-path-seg--src {
+  color: var(--vo-text);
+  font-weight: var(--vo-weight-medium);
+}
+
+.vo-path-seg--out {
+  color: var(--vo-success);
+  font-weight: var(--vo-weight-medium);
 }
 
 .vo-file-header {

@@ -2,11 +2,7 @@
 import { computed, ref, watch } from 'vue';
 
 import { EPISODE_ORDER_MODES } from '../../domain/constants.ts';
-import {
-  formatTitleWithYear,
-  mergeDeduplicatedCandidates,
-  parseProviderReference
-} from '../../domain/plexFormatter.ts';
+import { mergeDeduplicatedCandidates, parseProviderReference } from '../../domain/plexFormatter.ts';
 import {
   asImdbId,
   asTvdbId,
@@ -16,8 +12,7 @@ import {
   type ScannedItem
 } from '../../domain/types.ts';
 import { useModalVars } from '../composables/useGsapMotion.ts';
-import { extractCandidateLinks } from '../utils/formatters.ts';
-import ProviderLinks from './ProviderLinks.vue';
+import MetadataResultsList from './MetadataResultsList.vue';
 import UiIcon from './UiIcon.vue';
 
 const props = defineProps<{
@@ -71,6 +66,9 @@ watch(
 );
 
 function isSelectedCandidate(cand: MetadataCandidate): boolean {
+  if ((props.bulkCount ?? 0) > 1) {
+    return false;
+  }
   const selected = props.item?.selectedMetadata;
   if (!selected) {
     return false;
@@ -167,94 +165,68 @@ const filePillLabel = computed<string>(() => {
         </button>
       </header>
 
-      <section class="vo-search-grid">
-        <div class="vo-field vo-field--wide">
-          <label for="meta-query">Title</label>
-          <input id="meta-query" v-model="query" type="text" class="vo-input" />
-        </div>
-        <div class="vo-field">
-          <label for="meta-year">Year</label>
-          <input id="meta-year" v-model="yearInput" type="text" class="vo-input" />
-        </div>
-        <div class="vo-field">
-          <label for="meta-imdb">IMDb ID</label>
-          <input
-            id="meta-imdb"
-            v-model="imdbInput"
-            type="text"
-            placeholder="tt0816692"
-            class="vo-input"
-          />
-        </div>
-        <div class="vo-field">
-          <label for="meta-tvdb">TVDB ID</label>
-          <input
-            id="meta-tvdb"
-            v-model="tvdbInput"
-            type="text"
-            placeholder="416744"
-            class="vo-input"
-          />
-        </div>
-        <div v-if="item.mediaKind === 'tv'" class="vo-field">
-          <label for="meta-order">Episode Order</label>
-          <select id="meta-order" v-model="episodeOrder" class="vo-input">
-            <option v-for="ord in EPISODE_ORDER_MODES" :key="ord" :value="ord">{{ ord }}</option>
-          </select>
-        </div>
-      </section>
+      <div class="vo-dual-rail">
+        <section class="vo-dual-rail__top vo-search-grid">
+          <div class="vo-field vo-field--wide">
+            <label for="meta-query">Title</label>
+            <input id="meta-query" v-model="query" type="text" class="vo-input" />
+          </div>
+          <div class="vo-field">
+            <label for="meta-year">Year</label>
+            <input id="meta-year" v-model="yearInput" type="text" class="vo-input" />
+          </div>
+          <div class="vo-field">
+            <label for="meta-imdb">IMDb ID</label>
+            <input
+              id="meta-imdb"
+              v-model="imdbInput"
+              type="text"
+              placeholder="tt0816692"
+              class="vo-input"
+            />
+          </div>
+          <div class="vo-field">
+            <label for="meta-tvdb">TVDB ID</label>
+            <input
+              id="meta-tvdb"
+              v-model="tvdbInput"
+              type="text"
+              placeholder="416744"
+              class="vo-input"
+            />
+          </div>
+          <div v-if="item.mediaKind === 'tv'" class="vo-field">
+            <label for="meta-order">Episode Order</label>
+            <select id="meta-order" v-model="episodeOrder" class="vo-input">
+              <option v-for="ord in EPISODE_ORDER_MODES" :key="ord" :value="ord">{{ ord }}</option>
+            </select>
+          </div>
+        </section>
 
-      <div class="vo-search-actions">
-        <button
-          type="button"
-          class="vo-btn vo-btn--primary"
-          :disabled="searching"
-          @click="handleSearch"
-        >
-          <UiIcon :name="searching ? 'spinner' : 'search'" />
-          {{ searching ? 'Searching...' : 'Search Providers' }}
-        </button>
-        <button type="button" class="vo-btn" @click="handleApplyManual">
-          <span aria-hidden="true">✏️</span> Apply Manual Values
-        </button>
+        <div class="vo-dual-rail__bottom vo-search-actions">
+          <button
+            type="button"
+            class="vo-btn vo-btn--primary"
+            :disabled="searching"
+            @click="handleSearch"
+          >
+            <UiIcon :name="searching ? 'spinner' : 'search'" />
+            {{ searching ? 'Searching...' : 'Search Providers' }}
+          </button>
+          <button type="button" class="vo-btn" @click="handleApplyManual">
+            <span aria-hidden="true">✏️</span> Apply Manual Values
+          </button>
+        </div>
       </div>
 
       <p v-if="errorText" class="vo-alert">{{ errorText }}</p>
 
-      <div class="vo-results-list">
-        <article
-          v-for="(cand, idx) in results"
-          :key="`${cand.source}-${String(idx)}`"
-          class="vo-result-item"
-          :class="{ 'vo-result-item--selected': isSelectedCandidate(cand) }"
-        >
-          <div class="vo-result-item__meta">
-            <div class="vo-result-item__title-row">
-              <strong>{{ formatTitleWithYear(cand.title, cand.year) }}</strong>
-              <span class="vo-mono vo-muted"> · {{ cand.source }}</span>
-              <ProviderLinks
-                v-if="props.item"
-                :links="extractCandidateLinks(cand, props.item.mediaKind)"
-              />
-            </div>
-            <div class="vo-mono vo-muted">
-              <span v-if="cand.imdbId">{{ cand.imdbId }}</span>
-              <span v-if="cand.imdbId && cand.tvdbId"> · </span>
-              <span v-if="cand.tvdbId">tvdb-{{ cand.tvdbId }}</span>
-            </div>
-          </div>
-          <button
-            type="button"
-            class="vo-btn"
-            :class="{ 'vo-btn--primary': isSelectedCandidate(cand) }"
-            :disabled="isSelectedCandidate(cand)"
-            @click="emit('apply', cand, episodeOrder, results)"
-          >
-            {{ isSelectedCandidate(cand) ? '✓ Selected' : 'Select' }}
-          </button>
-        </article>
-        <p v-if="results.length === 0" class="vo-muted">No metadata candidates yet.</p>
-      </div>
+      <MetadataResultsList
+        :results="results"
+        :media-kind="item.mediaKind"
+        :is-selected="isSelectedCandidate"
+        @select="emit('apply', $event, episodeOrder, results)"
+      />
     </div>
   </div>
 </template>
@@ -262,31 +234,32 @@ const filePillLabel = computed<string>(() => {
 <style scoped lang="scss">
 .vo-meta-modal {
   display: grid;
-  gap: var(--vo-space-4);
+  gap: var(--vo-space-3);
 }
 
 .vo-meta-header {
   align-items: flex-start;
-  padding-bottom: var(--vo-space-3);
+  padding-bottom: var(--vo-space-2);
   border-bottom: 1px solid var(--vo-border);
 }
 
 .vo-meta-title-group {
   display: grid;
-  gap: var(--vo-space-2);
+  gap: var(--vo-space-1);
   min-width: 0;
   flex: 1 1 240px;
 }
 
 .vo-search-grid {
   display: grid;
-  gap: var(--vo-space-3);
-  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: var(--vo-space-2);
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  padding: var(--vo-space-2);
 }
 
 .vo-field {
   display: grid;
-  gap: var(--vo-space-1);
+  gap: calc(var(--vo-space-1) / 2);
   min-width: 0;
   color: var(--vo-text-muted);
   font-size: var(--vo-text-xs);
@@ -304,6 +277,7 @@ const filePillLabel = computed<string>(() => {
   display: flex;
   flex-wrap: wrap;
   gap: var(--vo-space-2);
+  padding: var(--vo-space-2);
 }
 
 .vo-alert {
@@ -313,40 +287,6 @@ const filePillLabel = computed<string>(() => {
   border-radius: var(--vo-radius-sm);
   color: var(--vo-danger);
   font-size: var(--vo-text-xs);
-}
-
-.vo-results-list {
-  display: grid;
-  gap: var(--vo-space-2);
-}
-
-.vo-result-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--vo-space-3);
-  padding: var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-  background-color: var(--vo-surface-elevated);
-
-  &--selected {
-    background-color: color-mix(in sRGB, var(--vo-accent) 10%, var(--vo-surface-elevated));
-    border-color: var(--vo-accent);
-  }
-}
-
-.vo-result-item__meta {
-  display: grid;
-  gap: var(--vo-space-1);
-  min-width: 0;
-}
-
-.vo-result-item__title-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--vo-space-2);
 }
 
 .vo-muted {

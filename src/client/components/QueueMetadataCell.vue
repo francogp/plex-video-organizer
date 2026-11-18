@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
+import { OUTPUT_CATEGORY_LABELS } from '../../domain/constants.ts';
 import { formatTitleWithYear } from '../../domain/plexFormatter.ts';
 import type { ScannedItem } from '../../domain/types.ts';
 import {
@@ -8,6 +9,7 @@ import {
   formatMetadataIds,
   type ExternalIdLink
 } from '../utils/formatters.ts';
+import MountBadge from './MountBadge.vue';
 import ProviderLinks from './ProviderLinks.vue';
 import UiIcon from './UiIcon.vue';
 
@@ -24,7 +26,15 @@ const emit = defineEmits<{
 function formatCandidateLabel(cand: ScannedItem['candidates'][number]): string {
   const titleWithYear = formatTitleWithYear(cand.title, cand.year);
   const idPart = cand.imdbId ? ` {${cand.imdbId}}` : cand.tvdbId ? ` {tvdb-${cand.tvdbId}}` : '';
-  return `${titleWithYear}${idPart}`;
+  const mountPrefix = cand.presentInLibrary ? '💾 ' : '';
+  return `${mountPrefix}${titleWithYear}${idPart}`;
+}
+
+function formatCandidateTooltip(cand: ScannedItem['candidates'][number]): string {
+  const label = formatCandidateLabel(cand);
+  return cand.presentInLibrary
+    ? `Already present in ${OUTPUT_CATEGORY_LABELS[cand.presentInLibrary]} mount on disk — ${label}`
+    : label;
 }
 
 function getMetadataLinks(row: ScannedItem): readonly ExternalIdLink[] {
@@ -52,10 +62,9 @@ const selectedCandidateIndex = computed((): number => {
 </script>
 
 <template>
-  <div class="vo-audio-cell">
+  <div class="vo-dual-rail">
     <div
-      class="vo-audio-panel"
-      :class="props.item.selectedMetadata ? 'vo-audio-panel--ok' : 'vo-audio-panel--bad'"
+      class="vo-dual-rail__top"
       :title="
         props.item.selectedMetadata
           ? formatCandidateLabel(props.item.selectedMetadata)
@@ -63,45 +72,38 @@ const selectedCandidateIndex = computed((): number => {
       "
     >
       <div class="vo-audio-panel-head">
-        <span class="vo-path-label">MATCH</span>
-        <ProviderLinks
-          v-if="getMetadataLinks(props.item).length > 0"
-          :links="getMetadataLinks(props.item)"
-        />
-        <span v-else class="vo-path-pill vo-path-pill--folder vo-mono">{{
-          props.item.selectedMetadata
-            ? props.item.selectedMetadata.source.toUpperCase()
-            : 'Unmatched'
-        }}</span>
-      </div>
-      <div class="vo-audio-lines vo-mono">
-        <template v-if="props.item.selectedMetadata">
-          <div class="vo-audio-option vo-audio-option--good">
-            <span class="vo-audio-option-icon" aria-hidden="true">✓</span>
-            <span class="vo-audio-option-label">{{
-              formatTitleWithYear(
-                props.item.selectedMetadata.title,
-                props.item.selectedMetadata.year
-              )
-            }}</span>
-          </div>
-          <div
-            v-if="formatMetadataIds(props.item.selectedMetadata)"
-            class="vo-audio-option vo-audio-option--neutral"
-          >
-            <span class="vo-audio-option-icon" aria-hidden="true">#</span>
-            <span class="vo-audio-option-label">ID:</span>
-            <span>{{ formatMetadataIds(props.item.selectedMetadata) }}</span>
-          </div>
-        </template>
-        <div v-else class="vo-audio-option vo-audio-option--bad">
-          <span class="vo-audio-option-icon" aria-hidden="true">✗</span>
-          <span class="vo-audio-option-label">No match:</span>
-          <span>Click Search to match</span>
+        <span
+          v-if="props.item.selectedMetadata"
+          class="vo-audio-option vo-audio-option--good vo-mono"
+        >
+          <span aria-hidden="true">✓</span>
+          <span>{{
+            formatTitleWithYear(props.item.selectedMetadata.title, props.item.selectedMetadata.year)
+          }}</span>
+        </span>
+        <span v-else class="vo-audio-option vo-audio-option--bad vo-mono">
+          <span aria-hidden="true">✗</span>
+          <span>Unmatched</span>
+        </span>
+        <div class="vo-meta-badges">
+          <ProviderLinks
+            v-if="getMetadataLinks(props.item).length > 0"
+            :links="getMetadataLinks(props.item)"
+          />
+          <MountBadge
+            v-if="props.item.selectedMetadata?.presentInLibrary"
+            :category="props.item.selectedMetadata.presentInLibrary"
+          />
         </div>
       </div>
+      <div
+        v-if="props.item.selectedMetadata && formatMetadataIds(props.item.selectedMetadata)"
+        class="vo-meta-id vo-mono"
+      >
+        {{ formatMetadataIds(props.item.selectedMetadata) }}
+      </div>
     </div>
-    <div class="vo-meta-controls">
+    <div class="vo-dual-rail__bottom">
       <label :for="`meta-${props.item.id}`" class="vo-sr-only"
         >Match for {{ props.item.fileName }}</label
       >
@@ -123,6 +125,7 @@ const selectedCandidateIndex = computed((): number => {
           :key="`${cand.source}-${String(idx)}`"
           :value="idx"
           :selected="idx === selectedCandidateIndex"
+          :title="formatCandidateTooltip(cand)"
         >
           {{ formatCandidateLabel(cand) }}
         </option>
@@ -131,29 +134,37 @@ const selectedCandidateIndex = computed((): number => {
         type="button"
         class="vo-btn vo-meta-search-btn"
         :disabled="props.disabled"
+        title="Search metadata"
+        aria-label="Search metadata"
         @click="emit('search-metadata')"
       >
-        <UiIcon name="search" /> Search
+        <UiIcon name="search" />
       </button>
     </div>
   </div>
 </template>
 
 <style scoped lang="scss">
-.vo-meta-controls {
-  display: grid;
-  gap: var(--vo-space-2);
-  width: 100%;
-  min-width: 0;
+.vo-meta-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--vo-space-1);
+}
+
+.vo-meta-id {
+  color: var(--vo-text-muted);
+  font-size: var(--vo-text-xs);
+  overflow-wrap: anywhere;
 }
 
 .vo-select--candidate {
-  width: 100%;
   min-width: 0;
   max-width: 100%;
+  flex: 1;
 }
 
 .vo-meta-search-btn {
-  width: 100%;
+  flex-shrink: 0;
 }
 </style>

@@ -12,6 +12,7 @@ import type {
   ConflictComparison,
   ConflictDecision,
   ItemId,
+  JobItemError,
   MediaKind,
   OutputCategory,
   ScannedItem
@@ -49,7 +50,14 @@ const QUEUE_COLUMNS: readonly TableColumnDef<QueueColId>[] = [
     reorderable: false,
     align: 'center'
   },
-  { id: 'include', label: 'Include', defaultWidthPx: 116, minWidthPx: 96, sortable: true },
+  {
+    id: 'include',
+    label: 'Run',
+    defaultWidthPx: 60,
+    minWidthPx: 54,
+    sortable: true,
+    align: 'center'
+  },
   {
     id: 'source',
     label: 'Source -> Plex Output',
@@ -81,6 +89,7 @@ const props = defineProps<{
   readonly disabled: boolean;
   readonly conflicts?: readonly ConflictComparison[];
   readonly conflictResolutions?: Readonly<Partial<Record<ItemId, ConflictDecision>>>;
+  readonly jobErrors?: readonly JobItemError[];
   readonly subtitlePicker?: SubtitlePickerViewState | null;
 }>();
 
@@ -322,6 +331,10 @@ function getQueueRowKey(item: ScannedItem): string {
   return item.id;
 }
 
+const errorItemIds = computed<ReadonlySet<ItemId>>(
+  () => new Set((props.jobErrors ?? []).map((err) => err.itemId))
+);
+
 function getQueueRowClass(item: ScannedItem): readonly string[] {
   const classes: string[] = ['vo-queue-row'];
   if (!item.include) {
@@ -329,6 +342,12 @@ function getQueueRowClass(item: ScannedItem): readonly string[] {
   }
   if (selectedIds.value.has(item.id)) {
     classes.push('vo-row--selected');
+  }
+  if (errorItemIds.value.has(item.id)) {
+    classes.push('vo-row--has-error');
+  }
+  if (item.warnings.length > 0 || item.trackSelection.needsUserPrompt) {
+    classes.push('vo-row--has-warning');
   }
   if (conflictByItemId.value.get(item.id)) {
     classes.push('vo-row--has-conflict');
@@ -543,6 +562,15 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
 
       <template #header-include>
         <div class="vo-include-header">
+          <button
+            type="button"
+            class="vo-sort-btn vo-include-sort"
+            title="Include in processing queue (click to sort)"
+            @click="toggleSort('include')"
+          >
+            Run
+            <span class="vo-sort-indicator" aria-hidden="true" />
+          </button>
           <label for="vo-include-all" class="vo-sr-only">
             {{ selectedIds.size > 0 ? 'Include selected items' : 'Include all visible items' }}
           </label>
@@ -559,10 +587,6 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
             "
             @change="toggleIncludeTarget(($event.target as HTMLInputElement).checked)"
           />
-          <button type="button" class="vo-sort-btn" @click="toggleSort('include')">
-            Include
-            <span class="vo-sort-indicator" aria-hidden="true" />
-          </button>
         </div>
       </template>
 
@@ -610,6 +634,8 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
         <input
           :id="`inc-${row.id}`"
           type="checkbox"
+          role="switch"
+          class="vo-switch"
           :checked="row.include"
           :disabled="disabled"
           @change="emit('toggle-include', row, ($event.target as HTMLInputElement).checked)"
@@ -775,10 +801,58 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
 }
 
 .vo-include-header {
-  display: flex;
-  align-items: center;
-  gap: var(--vo-space-2);
+  display: grid;
+  gap: calc(var(--vo-space-1) / 2);
   width: 100%;
+  justify-items: center;
+}
+
+.vo-include-sort {
+  justify-content: center;
+  font-size: var(--vo-text-2xs);
+}
+
+.vo-switch {
+  position: relative;
+  display: inline-grid;
+  padding: calc(var(--vo-space-1) / 2);
+  border: 1px solid var(--vo-border);
+  border-radius: var(--vo-radius-pill);
+  background-color: var(--vo-surface-elevated);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+  place-items: center start;
+  inline-size: calc(var(--vo-space-4) * 1.75);
+  block-size: var(--vo-space-4);
+  appearance: none;
+  cursor: pointer;
+
+  &:checked {
+    background-color: var(--vo-accent);
+    border-color: var(--vo-accent);
+
+    &::before {
+      background-color: var(--vo-surface);
+      transform: translateX(calc(var(--vo-space-4) * 0.75));
+    }
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &::before {
+    border-radius: 50%;
+    background-color: var(--vo-text-muted);
+    transition:
+      transform 120ms ease,
+      background-color 120ms ease;
+    content: '';
+    inline-size: calc(var(--vo-space-4) - var(--vo-space-1) - 2px);
+    block-size: calc(var(--vo-space-4) - var(--vo-space-1) - 2px);
+  }
 }
 
 .vo-sort-indicator::after {

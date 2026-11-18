@@ -260,7 +260,11 @@ describe('organizerStore', () => {
     await store.patchItem(asItemId('ep-1'), { include: true });
     expect(store.items).toHaveLength(2);
 
-    await store.applyTracksToSeries(store.items[0]!);
+    const firstItem = store.items[0];
+    expect(firstItem).toBeDefined();
+    if (firstItem) {
+      await store.applyTracksToSeries(firstItem);
+    }
     const candidates = await store.searchMetadata({ query: 'Fallout', kind: 'tv' });
     expect(candidates).toHaveLength(1);
 
@@ -315,6 +319,20 @@ describe('organizerStore', () => {
       })
     );
     expect(store.isBusy).toBe(true);
+
+    listeners.get('log')?.(
+      new MessageEvent('log', {
+        data: JSON.stringify({
+          level: 'error',
+          message: '[Attempt 1/2] Movie.mkv failed: ffprobe exited with code 1',
+          timestamp: '2026-11-17T20:00:00Z'
+        })
+      })
+    );
+    expect(store.errorToast.visible).toBe(true);
+    expect(store.errorToast.count).toBe(1);
+    store.dismissErrorToast();
+    expect(store.errorToast.visible).toBe(false);
 
     listeners.get('progress')?.(
       new MessageEvent('progress', {
@@ -375,7 +393,7 @@ describe('organizerStore', () => {
         })
       })
     );
-    expect(store.logs).toHaveLength(1);
+    expect(store.logs).toHaveLength(2);
 
     vi.stubGlobal(
       'fetch',

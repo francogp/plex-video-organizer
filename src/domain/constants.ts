@@ -22,6 +22,7 @@ export const JOB_PHASES = [
 /** Server startup initialization readiness states. */
 export const SERVER_INIT_STATUSES = ['initializing', 'ready'] as const;
 export const CONNECTION_STATUSES = ['connecting', 'ready'] as const;
+export const JOB_RETRY_ATTEMPTS = [1, 2] as const;
 
 /** Pre-flight conflict resolution decisions. */
 export const CONFLICT_DECISIONS = ['overwrite', 'ignore'] as const;
@@ -65,18 +66,22 @@ const PLEX_MAX_RELATIVE_PATH_LENGTH = 180;
 const MIN_READABLE_EPISODE_TITLE_LENGTH = 12;
 
 const WINDOWS_RESERVED_NAME_REGEX = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const CURLY_APOSTROPHE_REGEX = /[\u2018\u2019\u201A\u201B\u2032\u02BC]/gu;
+const CURLY_DOUBLE_QUOTE_REGEX = /[\u201C\u201D\u201E\u201F]/gu;
 const FORBIDDEN_FS_CHARS_REGEX = /[\\/:*?"<>|]/g;
 const MIN_PRINTABLE_CODE_POINT = 0x20;
 
 /**
  * Sanitizes a Plex folder or filename segment for cross-filesystem compatibility
- * (Linux, macOS, Windows, SMB/NAS) by stripping forbidden symbols, repeated dots, and trailing dots.
+ * (Linux, macOS, Windows, SMB/NAS) by normalizing curly apostrophes and stripping forbidden symbols.
  */
 export function sanitizePlexSegment(raw: string): string {
   const printable = Array.from(raw)
     .filter((ch): boolean => (ch.codePointAt(0) ?? 0) >= MIN_PRINTABLE_CODE_POINT)
     .join('');
   const cleaned = printable
+    .replaceAll(CURLY_APOSTROPHE_REGEX, "'")
+    .replaceAll(CURLY_DOUBLE_QUOTE_REGEX, '')
     .replaceAll('&', 'and')
     .replaceAll(FORBIDDEN_FS_CHARS_REGEX, '')
     .replaceAll(/\.{2,}/g, ' ')
@@ -658,3 +663,15 @@ export const ETA_FLUSH_BATCH_SIZE = 10;
 export const ETA_TRIM_THRESHOLD = 10;
 export const ETA_TRIM_FRACTION = 0.1;
 export const ETA_SPIKE_CLAMP_FACTOR = 3;
+
+/** Maximum number of server log entries retained in SQLite and UI state. */
+export const MAX_SERVER_LOG_ENTRIES = 500;
+
+/** Canonical human-readable labels for each output library mount category. */
+export const OUTPUT_CATEGORY_LABELS: Readonly<Record<(typeof OUTPUT_CATEGORIES)[number], string>> =
+  {
+    movies: 'Movies',
+    'animated-movies': 'Animated Movies',
+    'tv-shows': 'Series',
+    'animated-series': 'Animated Series'
+  };

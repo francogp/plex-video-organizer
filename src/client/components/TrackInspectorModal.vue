@@ -29,6 +29,13 @@ const draft = ref<TrackSelection | null>(null);
 const applyToSeries = ref(false);
 const modalVars = useModalVars(1);
 const isBulkMode = computed<boolean>(() => (props.bulkCount ?? 0) > 1);
+const externalSubByPath = computed(() => {
+  const map = new Map<string, ScannedItem['externalSubtitles'][number]>();
+  for (const sub of props.item?.externalSubtitles ?? []) {
+    map.set(sub.path, sub);
+  }
+  return map;
+});
 
 watch(
   () => props.item,
@@ -292,6 +299,44 @@ function handleSave(): void {
           </div>
         </div>
 
+        <div v-if="item.trackSelection.needsUserPrompt" class="vo-sub-conflict-banner">
+          <div class="vo-sub-conflict-banner__text">
+            <strong>⚠ Subtitle Conflict</strong>
+            <span>{{
+              item.trackSelection.promptReason ||
+              'External and embedded subtitles share the same language and flags.'
+            }}</span>
+          </div>
+          <div class="vo-sub-conflict-banner__actions">
+            <button
+              type="button"
+              class="vo-btn"
+              :class="{ 'vo-sub-conflict-btn--active': draft.subtitleMergeMode === 'keep-and-add' }"
+              @click="setMergeMode('keep-and-add')"
+            >
+              Keep both
+            </button>
+            <button
+              type="button"
+              class="vo-btn"
+              :class="{ 'vo-sub-conflict-btn--active': draft.subtitleMergeMode === 'replace' }"
+              @click="setMergeMode('replace')"
+            >
+              Replace embedded
+            </button>
+            <button
+              type="button"
+              class="vo-btn"
+              :class="{
+                'vo-sub-conflict-btn--active': draft.subtitleMergeMode === 'selected-only'
+              }"
+              @click="setMergeMode('selected-only')"
+            >
+              Pick manually
+            </button>
+          </div>
+        </div>
+
         <div class="vo-track-card">
           <div class="vo-merge-row">
             <label for="sub-merge-mode" class="vo-control-label">Merge Mode</label>
@@ -345,7 +390,13 @@ function handleSave(): void {
               :key="extPath"
               class="vo-ext-row"
             >
-              <span class="vo-mono vo-ext-path">{{ idx + 1 }}. {{ extPath }}</span>
+              <span class="vo-mono vo-ext-path">
+                {{ idx + 1 }}.
+                <span v-if="externalSubByPath.get(extPath)" class="vo-badge vo-mono">{{
+                  externalSubByPath.get(extPath)!.language
+                }}</span>
+                {{ extPath }}
+              </span>
               <div class="vo-actions">
                 <button
                   type="button"
@@ -432,6 +483,38 @@ function handleSave(): void {
 .vo-track-list {
   display: grid;
   gap: var(--vo-space-2);
+}
+
+.vo-sub-conflict-banner {
+  display: grid;
+  gap: var(--vo-space-2);
+  padding: var(--vo-space-2) var(--vo-space-3);
+  border: 1px solid color-mix(in oklch, var(--vo-danger) 48%, var(--vo-border));
+  border-radius: var(--vo-radius-md);
+  background-color: color-mix(in oklch, var(--vo-danger) 10%, var(--vo-surface-elevated));
+}
+
+.vo-sub-conflict-banner__text {
+  display: grid;
+  gap: calc(var(--vo-space-1) / 2);
+  color: var(--vo-text);
+  font-size: var(--vo-text-xs);
+
+  strong {
+    color: var(--vo-danger);
+  }
+}
+
+.vo-sub-conflict-banner__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--vo-space-1);
+}
+
+.vo-sub-conflict-btn--active {
+  background-color: color-mix(in oklch, var(--vo-accent) 16%, transparent);
+  color: var(--vo-text);
+  border-color: var(--vo-accent);
 }
 
 .vo-track-card {

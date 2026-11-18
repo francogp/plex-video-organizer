@@ -24,6 +24,8 @@ Backend Maintainers.
 - `unifyTvSeriesMetadataByTvdbId` unifies multi-episode TV scans sharing the same `tvdbId` (preferring `tvdb`), and `searchMetadataCatalog` returns deduplicated multi-provider candidates prioritized by `mediaKind` (`tvdb` first for `tv`, `imdb` first for `movie`).
 - Per-item sequential finalization during `executeMoveJob` (`jobExecutionService.ts`): as soon as each item finishes moving to output (`completedItem`), `enqueueItemFinalization` serially runs `backupAndCleanupAfterJob([completedItem], ...)` and `onFinalizeMovedItems([completedItem])` (removing it from `#items`, persisting SQLite queue state, and emitting SSE state immediately) so cancelling (`unlock` or `requestDrain`) never leaves completed items in the queue or orphaned sources in `INPUT_DIR`.
 - Rescan audio option preservation (`jobRunner.ts` `#preserveAudioNormalizationOnRescan`): re-scanning `INPUT_DIR` preserves prior `trackSelection.audioNormalization` settings and recalculates `[tags]` for unchanged files matching `sourcePath` and `probe.sizeBytes`.
+- Server log persistence & startup mount annotation (`scanCacheDb.ts` `server_logs` table, `jobRunner.ts`): server logs up to `MAX_SERVER_LOG_ENTRIES` are persisted via `#withLogDb` (`appendLog`, `loadRecentLogs`, `clearLogs`), rehydrated on `JobRunner.init()`, and persisted queue items are re-annotated against live output mounts (`annotateQueueItemsWithMounts`).
+- Item retry & failure reporting (`jobExecutionService.ts`): failed queue items record structured `JobItemError` entries with `JobRetryAttempt` (`1 | 2`) while cleaning temporary remux artifacts.
 
 ## Key Files
 

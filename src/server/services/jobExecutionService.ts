@@ -19,6 +19,8 @@ import {
   type EtaWorkType,
   type ItemId,
   type JobId,
+  type JobItemError,
+  type JobRetryAttempt,
   type JobStageKind,
   type LogLevel,
   type ScannedItem,
@@ -65,7 +67,10 @@ export interface ExecuteMoveJobOptions {
   readonly onLog: (level: LogLevel, message: string) => void;
   readonly onProgress: (progress: SseProgressEvent) => void;
   readonly onFinalizeMovedItems: (movedItems: readonly ScannedItem[]) => Promise<void>;
-  readonly onComplete: (movedCount: number) => Promise<void>;
+  readonly onComplete: (
+    movedCount: number,
+    attemptErrors: readonly JobItemError[]
+  ) => Promise<void>;
   readonly onError: (message: string) => Promise<void>;
 }
 
@@ -471,78 +476,94 @@ async function processSingleJobItem(options: {
 
   const remuxStageLabel = hasLoudnorm ? 'Loudnorm Pass 2/2 (Remuxing)' : 'Remuxing';
   const args = buildFfmpegRemuxArgs(resolvedItem, tempMkvPath, subInputs, loudnormByStreamOrder);
-  await runFfmpegRemux(
-    args,
-    resolvedItem.probe.durationSeconds,
-    (percent, _eta, update): void => {
-      const completedUnits =
-        remuxSpec.workType === 'remux_copy'
-          ? (percent / PERCENT_MAX) * sizeBytes
-          : (update?.outTimeSec ?? (percent / PERCENT_MAX) * durationSec) * remuxSpec.trackCount;
-      etaPredictor?.recordTaskProgress(
-        remuxTaskId,
-        completedUnits,
-        update?.speed,
-        update?.outTimeSec
-      );
+  try {
+    await runFfmpegRemux(
+      args,
+      resolvedItem.probe.durationSeconds,
+      (percent, _eta, update): void => {
+        const completedUnits =
+          remuxSpec.workType === 'remux_copy'
+            ? (percent / PERCENT_MAX) * sizeBytes
+            : (update?.outTimeSec ?? (percent / PERCENT_MAX) * durationSec) * remuxSpec.trackCount;
+        etaPredictor?.recordTaskProgress(
+          remuxTaskId,
+          completedUnits,
+          update?.speed,
+          update?.outTimeSec
+        );
+        onProgress(
+          {
+            slot,
+            itemId: resolvedItem.id,
+            fileName: hasLoudnorm ? `${resolvedItem.fileName} · Pass 2/2` : resolvedItem.fileName,
+            percent
+          },
+          remuxOffset + (percent / PERCENT_MAX) * remuxWeight,
+          'remuxing',
+          remuxStageLabel
+        );
+      },
+      createChildTracker()
+    );
+
+    if (isCancelled()) {
+      etaPredictor?.skipTask(remuxTaskId);
+      return null;
+    }
+    etaPredictor?.completeTask(remuxTaskId);
+
+    const destFileName = path.basename(destPath);
+    onProgress(
+      { slot, itemId: resolvedItem.id, fileName: `${destFileName} · Verifying` },
+      VERIFY_STAGE_FRACTION,
+      'verifying',
+      'Verifying'
+    );
+    onLog('info', `Verifying ${destFileName}...`);
+    await probeMedia(tempMkvPath);
+
+    onProgress(
+      { slot, itemId: resolvedItem.id, fileName: `${destFileName} · Moving`, percent: 0 },
+      VERIFY_STAGE_FRACTION,
+      'moving',
+      'Moving'
+    );
+    onLog('info', `Moving ${destFileName} to ${resolvedItem.category}`);
+
+    const moveTaskId = `move:${resolvedItem.id}`;
+    if (isExdev) {
+      etaPredictor?.startTask(moveTaskId, 'move_exdev', 'default', sizeBytes, {
+        itemSizeBytes: sizeBytes
+      });
+    }
+
+    await moveTempOutputFile(tempMkvPath, destPath, allowOverwrite, (movePercent): void => {
+      if (isExdev) {
+        etaPredictor?.recordTaskProgress(moveTaskId, (movePercent / PERCENT_MAX) * sizeBytes);
+      }
       onProgress(
         {
           slot,
           itemId: resolvedItem.id,
-          fileName: hasLoudnorm ? `${resolvedItem.fileName} · Pass 2/2` : resolvedItem.fileName,
-          percent
+          fileName: `${destFileName} · Moving`,
+          percent: movePercent
         },
-        remuxOffset + (percent / PERCENT_MAX) * remuxWeight,
-        'remuxing',
-        remuxStageLabel
+        VERIFY_STAGE_FRACTION + (movePercent / PERCENT_MAX) * MOVE_STAGE_WEIGHT,
+        'moving',
+        'Moving'
       );
-    },
-    createChildTracker()
-  );
-
-  if (isCancelled()) {
-    etaPredictor?.skipTask(remuxTaskId);
-    return null;
-  }
-  etaPredictor?.completeTask(remuxTaskId);
-
-  const destFileName = path.basename(destPath);
-  onProgress(
-    { slot, itemId: resolvedItem.id, fileName: `${destFileName} · Verifying` },
-    VERIFY_STAGE_FRACTION,
-    'verifying',
-    'Verifying'
-  );
-  await probeMedia(tempMkvPath);
-
-  onProgress(
-    { slot, itemId: resolvedItem.id, fileName: `${destFileName} · Moving`, percent: 0 },
-    VERIFY_STAGE_FRACTION,
-    'moving',
-    'Moving'
-  );
-  onLog('info', `Moving ${destFileName} to ${resolvedItem.category}`);
-
-  const moveTaskId = `move:${resolvedItem.id}`;
-  if (isExdev) {
-    etaPredictor?.startTask(moveTaskId, 'move_exdev', 'default', sizeBytes, {
-      itemSizeBytes: sizeBytes
     });
-  }
-
-  await moveTempOutputFile(tempMkvPath, destPath, allowOverwrite, (movePercent): void => {
     if (isExdev) {
-      etaPredictor?.recordTaskProgress(moveTaskId, (movePercent / PERCENT_MAX) * sizeBytes);
+      etaPredictor?.completeTask(moveTaskId);
     }
-    onProgress(
-      { slot, itemId: resolvedItem.id, fileName: `${destFileName} · Moving`, percent: movePercent },
-      VERIFY_STAGE_FRACTION + (movePercent / PERCENT_MAX) * MOVE_STAGE_WEIGHT,
-      'moving',
-      'Moving'
-    );
-  });
-  if (isExdev) {
-    etaPredictor?.completeTask(moveTaskId);
+  } catch (err) {
+    try {
+      await fs.rm(tempMkvPath, { force: true });
+    } catch (cleanupErr) {
+      const cleanupMsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+      onLog('warn', `Failed to remove temp file ${path.basename(tempMkvPath)}: ${cleanupMsg}`);
+    }
+    throw err;
   }
 
   if (allowOverwrite && oldExistingPath && !isSameResolvedPath(oldExistingPath, destPath)) {
@@ -676,10 +697,17 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
       });
     };
 
-    await runSlotWorkerPool(
-      toProcess,
-      workerCount,
-      async (item, idx, slot): Promise<void> => {
+    const attemptErrors: JobItemError[] = [];
+    const retryItems: ScannedItem[] = [];
+    const itemIndexById = new Map<ItemId, number>(toProcess.map((it, index) => [it.id, index]));
+
+    const runItemAttempt = async (
+      item: ScannedItem,
+      idx: number,
+      slot: number,
+      attempt: JobRetryAttempt
+    ): Promise<void> => {
+      try {
         const destPath = projectedByItemId[item.id];
         if (!destPath) {
           throw new Error(`Missing projected destination for ${item.id}`);
@@ -716,16 +744,53 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
           return;
         }
         emitJobProgress('moving', 'Moved');
-      },
+      } catch (err) {
+        slotStates[slot] = { tasks: [] };
+        if (isCancelled()) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        attemptErrors.push({
+          itemId: item.id,
+          fileName: item.fileName,
+          attempt,
+          message,
+          timestamp: Temporal.Now.instant().toString()
+        });
+        if (attempt === 1) {
+          retryItems.push(item);
+          itemFractions[idx] = 0;
+          onLog('error', `[Attempt 1/2] ${item.fileName} failed: ${message} — deferred for retry.`);
+        } else {
+          itemFractions[idx] = 1;
+          onLog('error', `[Attempt 2/2] ${item.fileName} failed: ${message}`);
+        }
+      }
+    };
+
+    await runSlotWorkerPool(
+      toProcess,
+      workerCount,
+      (item, idx, slot) => runItemAttempt(item, idx, slot, 1),
       (): boolean => isCancelled() || Boolean(isDraining?.())
     );
+
+    if (!isCancelled() && !isDraining?.() && retryItems.length > 0) {
+      onLog('info', `Retrying ${String(retryItems.length)} failed item(s) (attempt 2/2)...`);
+      await runSlotWorkerPool(
+        retryItems,
+        workerCount,
+        (item, _idx, slot) => runItemAttempt(item, itemIndexById.get(item.id) ?? 0, slot, 2),
+        (): boolean => isCancelled() || Boolean(isDraining?.())
+      );
+    }
 
     await finalizeChain;
     if (isCancelled()) {
       return;
     }
 
-    await onComplete(movedItems.length);
+    await onComplete(movedItems.length, attemptErrors);
   } catch (err) {
     await finalizeChain;
     if (isCancelled()) {

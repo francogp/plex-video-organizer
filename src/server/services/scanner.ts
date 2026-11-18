@@ -62,13 +62,14 @@ import {
 } from './scanCacheDb.ts';
 
 const SEASON_FOLDER_REGEX = /\b(?:season|temporada|specials)\s*(\d{0,2})\b/i;
+const STANDALONE_SEASON_REGEX = /(?:^|[\s._-])s\d{1,2}(?=$|[\s._-])/i;
 const SXXEXX_REGEX = /\bs(\d{1,2})e(\d{1,3})(?:-?e(\d{1,3}))?\b/i;
 const NXNN_REGEX = /(?:^|[\s._-])(\d{1,2})x(\d{2,3})(?=$|[\s._-])/i;
 const DATE_YMD_REGEX = /(?:^|[\s._-])(\d{4})[-.\s](\d{2})[-.\s](\d{2})(?=$|[\s._-])/;
 const DATE_DMY_REGEX = /(?:^|[\s._-])(\d{2})[-.\s](\d{2})[-.\s](\d{4})(?=$|[\s._-])/;
 const YEAR_REGEX = /\b(19\d{2}|20\d{2})\b/;
 const RELEASE_MARKER_REGEX =
-  /(?:^|[\s._-])(?:2160p|1080p|720p|480p|4k|uhd|hdr\d*|bluray|bdrip|brrip|web-?dl|webrip|hdtv|dvdrip|remux|uncensored|x264|x265|h\.?264|h\.?265|hevc|av1|aac\d*(?:\.\d)?|ac3|eac3|dts|flac|dual|multi|esub|subbed|proper|repack)(?=$|[\s._-])/i;
+  /(?:^|[\s._-])(?:2160p|1080p|720p|480p|4k|uhd|hdr\d*|bluray|bdrip|brrip|web-?dl|webrip|hdtv|dvdrip|remux|uncensored|x264|x265|h\.?264|h\.?265|hevc|av1|aac\d*(?:\.\d)?|ac3|eac3|dts|flac|dual|multi|esub|subbed|proper|repack|complete)(?=$|[\s._-])/i;
 const INLINE_EXTRA_REGEX = new RegExp(`-(?:${PLEX_INLINE_EXTRA_SUFFIXES.join('|')})\\d*$`, 'i');
 const MICRODVD_TEXT_REGEX = /^\{\d+\}\{\d+\}/;
 const SAMPLE_SNIFF_BYTES = 128;
@@ -360,8 +361,9 @@ function detectSubtitleLanguageAndFlags(tokens: readonly string[]): {
   const isForced = tokens.includes('forced');
   const isHearingImpaired = tokens.includes('sdh') || tokens.includes('cc');
   let detectedLang: Iso639_2Code | undefined;
-  for (const tok of tokens) {
-    if (tok === 'forced' || tok === 'sdh' || tok === 'cc') {
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    const tok = tokens[i];
+    if (!tok || tok === 'forced' || tok === 'sdh' || tok === 'cc') {
       continue;
     }
     detectedLang = normalizeIsoLanguage(tok);
@@ -398,9 +400,12 @@ async function resolveExternalSubtitleEntry(
     return null;
   }
 
-  const { isForced, isHearingImpaired, detectedLang } = detectSubtitleLanguageAndFlags(
-    lowerBase.split('.').slice(1)
-  );
+  const subtitleTokens =
+    lowerBase.startsWith(videoStem) && lowerBase.length > videoStem.length
+      ? lowerBase.slice(videoStem.length).split('.').filter(Boolean)
+      : lowerBase.split('.').slice(1);
+  const { isForced, isHearingImpaired, detectedLang } =
+    detectSubtitleLanguageAndFlags(subtitleTokens);
 
   let idxPairPath: string | undefined;
   let missingIdxWarning: string | undefined;
@@ -552,7 +557,10 @@ function parseEpisodeInfo(
   return undefined;
 }
 
-function cleanTitleFromName(rawName: string): { readonly title: string; readonly year?: number } {
+export function cleanTitleFromName(rawName: string): {
+  readonly title: string;
+  readonly year?: number;
+} {
   const yearMatch = YEAR_REGEX.exec(rawName);
   const year = yearMatch?.[1] ? Number(yearMatch[1]) : undefined;
 
@@ -562,6 +570,7 @@ function cleanTitleFromName(rawName: string): { readonly title: string; readonly
     DATE_YMD_REGEX.exec(rawName)?.index,
     DATE_DMY_REGEX.exec(rawName)?.index,
     SEASON_FOLDER_REGEX.exec(rawName)?.index,
+    STANDALONE_SEASON_REGEX.exec(rawName)?.index,
     RELEASE_MARKER_REGEX.exec(rawName)?.index,
     yearMatch?.index
   ].filter((idx): idx is number => typeof idx === 'number' && idx > 0);
@@ -775,7 +784,11 @@ async function buildScannedItemFromEntry(
   const nameHintSource = mediaKind === 'tv' && dirSegments[0] ? dirSegments[0] : baseNoExt;
   const parsedFromPath = cleanTitleFromName(nameHintSource);
   const parsedTitle = dirHints?.title ?? parsedFromPath.title;
-  const parsedYear = dirHints?.year ?? parsedFromPath.year;
+  const fallbackFileYear =
+    parsedFromPath.year === undefined && nameHintSource !== baseNoExt
+      ? cleanTitleFromName(baseNoExt).year
+      : undefined;
+  const parsedYear = dirHints?.year ?? parsedFromPath.year ?? fallbackFileYear;
 
   const candidates: MetadataCandidate[] = [];
   if (dirHints?.imdbId || dirHints?.tvdbId || dirHints?.tmdbId) {

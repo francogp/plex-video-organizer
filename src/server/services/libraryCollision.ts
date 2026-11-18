@@ -2,7 +2,11 @@ import type { Dirent } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { isHiddenOrTempEntryName, isVideoExtension } from '../../domain/constants.ts';
+import {
+  OUTPUT_CATEGORIES,
+  isHiddenOrTempEntryName,
+  isVideoExtension
+} from '../../domain/constants.ts';
 import {
   IMDB_TAG_REGEX,
   SEASON_DIR_REGEX,
@@ -17,6 +21,9 @@ import {
   type ConflictComparison,
   type ImdbId,
   type MediaProbeSummary,
+  type MetadataCandidate,
+  type MountPathsMap,
+  type OutputCategory,
   type ScannedItem,
   type TmdbId,
   type TvdbId
@@ -274,4 +281,84 @@ export function buildExistingFileConflictComparison<TId extends string>(
     incoming: options.incoming,
     existing: options.existing
   };
+}
+
+export interface MountLibraryLookup {
+  readonly byTvdbId: ReadonlyMap<TvdbId, OutputCategory>;
+  readonly byImdbId: ReadonlyMap<ImdbId, OutputCategory>;
+  readonly byTmdbId: ReadonlyMap<TmdbId, OutputCategory>;
+  readonly byNormalizedTitle: ReadonlyMap<
+    string,
+    readonly { readonly category: OutputCategory; readonly year?: number }[]
+  >;
+}
+
+/** Builds an O(1) lookup index of existing titles and provider IDs across all output mount libraries. */
+export async function buildAllMountLibraryLookup(
+  mountPaths: MountPathsMap
+): Promise<MountLibraryLookup> {
+  const byTvdbId = new Map<TvdbId, OutputCategory>();
+  const byImdbId = new Map<ImdbId, OutputCategory>();
+  const byTmdbId = new Map<TmdbId, OutputCategory>();
+  const byNormalizedTitle = new Map<
+    string,
+    Array<{ readonly category: OutputCategory; readonly year?: number }>
+  >();
+
+  const perCategory = await Promise.all(
+    OUTPUT_CATEGORIES.map(async (category) => ({
+      category,
+      roots: await buildLibraryRootIndex(mountPaths[category])
+    }))
+  );
+
+  for (const { category, roots } of perCategory) {
+    for (const root of roots) {
+      if (root.tvdbId && !byTvdbId.has(root.tvdbId)) {
+        byTvdbId.set(root.tvdbId, category);
+      }
+      if (root.imdbId && !byImdbId.has(root.imdbId)) {
+        byImdbId.set(root.imdbId, category);
+      }
+      if (root.tmdbId && !byTmdbId.has(root.tmdbId)) {
+        byTmdbId.set(root.tmdbId, category);
+      }
+      if (root.normalizedTitle) {
+        const list = byNormalizedTitle.get(root.normalizedTitle) ?? [];
+        list.push({ category, year: root.year });
+        byNormalizedTitle.set(root.normalizedTitle, list);
+      }
+    }
+  }
+
+  return { byTvdbId, byImdbId, byTmdbId, byNormalizedTitle };
+}
+
+/** Returns the output library category if `candidate` already exists in any indexed mount. */
+export function findCandidateInMounts(
+  candidate: MetadataCandidate,
+  lookup: MountLibraryLookup
+): OutputCategory | undefined {
+  const idLookups: readonly [string | undefined, ReadonlyMap<string, OutputCategory>][] = [
+    [candidate.tvdbId, lookup.byTvdbId],
+    [candidate.imdbId, lookup.byImdbId],
+    [candidate.tmdbId, lookup.byTmdbId]
+  ];
+  for (const [id, map] of idLookups) {
+    const hit = id ? map.get(id) : undefined;
+    if (hit) {
+      return hit;
+    }
+  }
+  const normalized = normalizeTitleForCollision(candidate.title);
+  const titleHits = normalized ? lookup.byNormalizedTitle.get(normalized) : undefined;
+  if (!titleHits) {
+    return undefined;
+  }
+  for (const hit of titleHits) {
+    if (yearsAreCompatible(hit.year, candidate.year)) {
+      return hit.category;
+    }
+  }
+  return undefined;
 }

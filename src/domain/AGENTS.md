@@ -13,6 +13,7 @@ Domain Layer Maintainers.
 - All generated output paths must pass `resolveContainedOutputPath` containment checks.
 - Leading bracketed title tokens (e.g., `[REC]`) belong to the title and must never be stripped as metadata tags; only tokens appearing after the title begins (`index > 0`) are parsed as year, provider IDs, or bracket tags, and trailing video extensions on root directory names must be stripped before title extraction.
 - `extractSplitPart` must only match split-part suffixes (`cd`, `disc`, `disk`, `dvd`, `pt`, or delimiter-separated `part`) at the end of a stem, never title words such as `Part 1` / `Part 2` preceding `(YYYY)`.
+- `sanitizePlexSegment` (`constants.ts`) normalizes curly apostrophes to ASCII `'` and strips curly double quotes (`CURLY_DOUBLE_QUOTE_REGEX`) for deterministic Plex naming and Verifier round-trips; `JOB_RETRY_ATTEMPTS` maintains `as const` + `JobRetryAttemptSchema` Valibot parity.
 
 ## Key Files
 

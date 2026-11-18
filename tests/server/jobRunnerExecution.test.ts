@@ -279,9 +279,11 @@ describe('JobRunner execution pipeline', () => {
       'Unresolved conflict'
     );
 
-    // Make ffmpeg fail on next run to exercise ERROR catch path
+    // Make ffmpeg fail on both attempt 1 and deferred retry attempt 2 to exercise ERROR path
     const ffmpegMod = await import('../../src/server/services/media/ffmpegRunner.ts');
-    vi.mocked(ffmpegMod.runFfmpegRemux).mockRejectedValueOnce(new Error('ffmpeg crashed'));
+    vi.mocked(ffmpegMod.runFfmpegRemux)
+      .mockRejectedValueOnce(new Error('ffmpeg crashed'))
+      .mockRejectedValueOnce(new Error('ffmpeg crashed again'));
 
     const resolutions: Record<string, 'overwrite' | 'ignore'> = {};
     for (const c of report.conflicts) {
@@ -497,7 +499,11 @@ describe('JobRunner execution pipeline', () => {
       expect(runner.getState().items).toHaveLength(3);
 
       const preflight = await runner.preflight(clientId, runner.getState().revision);
-      await runner.startJob(clientId, preflight.revision, {});
+      const resolutions: Record<string, 'overwrite'> = {};
+      for (const conflict of preflight.conflicts) {
+        resolutions[conflict.itemId] = 'overwrite';
+      }
+      await runner.startJob(clientId, preflight.revision, resolutions);
 
       await remuxStartedPromise;
 
@@ -860,5 +866,203 @@ describe('JobRunner execution pipeline', () => {
     });
 
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('ranks TV candidates by parsedYear and falls back to file title and word trimming', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-meta-fallback-'));
+    try {
+      const inputDir = path.join(tmpDir, 'input');
+      const configDir = path.join(tmpDir, 'config');
+      const outputDir = path.join(tmpDir, 'output');
+      await fs.mkdir(path.join(inputDir, 'Foundation.2021.S02'), { recursive: true });
+      await fs.mkdir(path.join(inputDir, 'Weird.Pack.Noise'), { recursive: true });
+      await fs.mkdir(path.join(inputDir, 'Alpha.Beta.Extra'), { recursive: true });
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.mkdir(outputDir, { recursive: true });
+      await fs.writeFile(
+        path.join(inputDir, 'Foundation.2021.S02', 'Foundation.2021.S02E08.mkv'),
+        'v'
+      );
+      await fs.writeFile(path.join(inputDir, 'Weird.Pack.Noise', 'Weird.S01E01.mkv'), 'v');
+      await fs.writeFile(
+        path.join(inputDir, 'Alpha.Beta.Extra', 'Alpha.Beta.Extra.S01E01.mkv'),
+        'v'
+      );
+
+      const tvdbMod = await import('../../src/server/services/metadata/tvdbClient.ts');
+      vi.mocked(tvdbMod.searchTvShows).mockImplementation(async (query) => {
+        if (query === 'Foundation') {
+          return [
+            { title: 'Foundation', year: 2011, tvdbId: asTvdbId('248041'), source: 'tvdb' },
+            { title: 'Foundation', year: 2021, tvdbId: asTvdbId('366972'), source: 'tvdb' }
+          ];
+        }
+        if (query === 'Weird') {
+          return [{ title: 'Weird', year: 2024, tvdbId: asTvdbId('999001'), source: 'tvdb' }];
+        }
+        if (query === 'Alpha Beta') {
+          return [{ title: 'Alpha Beta', year: 2025, tvdbId: asTvdbId('999002'), source: 'tvdb' }];
+        }
+        return [];
+      });
+
+      const { JobRunner } = await import('../../src/server/services/jobRunner.ts');
+      const cfg = loadConfig({
+        CONFIG_DIR: configDir,
+        INPUT_DIR: inputDir,
+        OUTPUT_MOVIES_DIR: outputDir,
+        OUTPUT_DOCUMENTARIES_DIR: outputDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+        OUTPUT_TV_SHOWS_DIR: outputDir,
+        OUTPUT_ANIMATED_SERIES_DIR: outputDir,
+        TVDB_API_KEY: 'tvdb-key'
+      });
+      const runner = new JobRunner(cfg);
+      await runner.init();
+
+      const clientId = asClientId('c1:fallback');
+      runner.startScan(clientId);
+      for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const items = runner.getState().items;
+      const foundationItem = items.find((item) => item.fileName.includes('Foundation'));
+      const weirdItem = items.find((item) => item.fileName.includes('Weird'));
+      const alphaItem = items.find((item) => item.fileName.includes('Alpha'));
+      expect(foundationItem?.selectedMetadata?.tvdbId).toBe(asTvdbId('366972'));
+      expect(foundationItem?.selectedMetadata?.year).toBe(2021);
+      expect(weirdItem?.selectedMetadata?.tvdbId).toBe(asTvdbId('999001'));
+      expect(alphaItem?.selectedMetadata?.tvdbId).toBe(asTvdbId('999002'));
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('continues processing remaining items on error, retries failed item on pass 2, and records attempt 1 error', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-retry-exec-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    const configDir = path.join(tmpDir, 'config');
+    try {
+      await fs.mkdir(inputDir, { recursive: true });
+      await fs.mkdir(outputDir, { recursive: true });
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(path.join(inputDir, 'Alpha.2020.mkv'), 'video-a');
+      await fs.writeFile(path.join(inputDir, 'Beta.2021.mkv'), 'video-b');
+
+      const ffmpegMod = await import('../../src/server/services/media/ffmpegRunner.ts');
+      let alphaCalls = 0;
+      vi.mocked(ffmpegMod.runFfmpegRemux).mockImplementation(async (args, _dur, onProgress) => {
+        const destArg = args.at(-1) ?? '';
+        if (destArg.includes('Alpha') && alphaCalls === 0) {
+          alphaCalls += 1;
+          throw new Error('transient remux failure');
+        }
+        if (destArg.includes('Alpha')) {
+          alphaCalls += 1;
+        }
+        onProgress?.(100);
+        await fs.writeFile(destArg, 'remuxed-mkv');
+      });
+
+      const { JobRunner } = await import('../../src/server/services/jobRunner.ts');
+      const cfg = loadConfig({
+        INPUT_DIR: inputDir,
+        CONFIG_DIR: configDir,
+        OUTPUT_MOVIES_DIR: outputDir,
+        OUTPUT_DOCUMENTARIES_DIR: outputDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+        OUTPUT_TV_SHOWS_DIR: outputDir,
+        OUTPUT_ANIMATED_SERIES_DIR: outputDir
+      });
+      const runner = new JobRunner(cfg);
+      await runner.init();
+
+      const clientId = asClientId('c1:retry');
+      runner.startScan(clientId);
+      for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const preflight = await runner.preflight(clientId, runner.getState().revision);
+      const resolutions: Record<string, 'overwrite'> = {};
+      for (const conflict of preflight.conflicts) {
+        resolutions[conflict.itemId] = 'overwrite';
+      }
+      await runner.startJob(clientId, preflight.revision, resolutions);
+      for (let i = 0; i < 60 && runner.getState().phase === 'PROCESSING'; i += 1) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+
+      const finalState = runner.getState();
+      expect(finalState.phase).toBe('IDLE');
+      expect(finalState.items).toHaveLength(0);
+      expect(finalState.lastJobErrors).toHaveLength(1);
+      expect(finalState.lastJobErrors?.[0]?.attempt).toBe(1);
+      expect(finalState.lastJobErrors?.[0]?.fileName).toBe('Alpha.2020.mkv');
+      expect(
+        finalState.logs?.some(
+          (entry) => entry.level === 'error' && entry.message.includes('[Attempt 1/2]')
+        )
+      ).toBe(true);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('annotates presentInLibrary and prioritizes mount-existing candidates during scan and search', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-mount-prio-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const tvOutDir = path.join(tmpDir, 'tv-out');
+    const movieOutDir = path.join(tmpDir, 'movie-out');
+    const configDir = path.join(tmpDir, 'config');
+    try {
+      await fs.mkdir(path.join(inputDir, 'Foundation.S03'), { recursive: true });
+      await fs.mkdir(path.join(tvOutDir, 'Foundation (2021) {tvdb-366972}'), { recursive: true });
+      await fs.mkdir(movieOutDir, { recursive: true });
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(path.join(inputDir, 'Foundation.S03', 'Foundation.S03E01.mkv'), 'v');
+
+      const tvdbMod = await import('../../src/server/services/metadata/tvdbClient.ts');
+      vi.mocked(tvdbMod.searchTvShows).mockResolvedValue([
+        { title: 'Foundation', year: 2011, tvdbId: asTvdbId('248041'), source: 'tvdb' },
+        { title: 'Foundation', year: 2021, tvdbId: asTvdbId('366972'), source: 'tvdb' }
+      ]);
+
+      const cfg = loadConfig({
+        CONFIG_DIR: configDir,
+        INPUT_DIR: inputDir,
+        OUTPUT_MOVIES_DIR: movieOutDir,
+        OUTPUT_DOCUMENTARIES_DIR: movieOutDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: movieOutDir,
+        OUTPUT_TV_SHOWS_DIR: tvOutDir,
+        OUTPUT_ANIMATED_SERIES_DIR: tvOutDir,
+        TVDB_API_KEY: 'tvdb-key'
+      });
+      const runner = new JobRunner(cfg);
+      await runner.init();
+
+      const clientId = asClientId('c1:mount-prio');
+      runner.startScan(clientId);
+      for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const scannedItem = runner.getState().items[0];
+      expect(scannedItem?.selectedMetadata?.tvdbId).toBe(asTvdbId('366972'));
+      expect(scannedItem?.selectedMetadata?.presentInLibrary).toBe('tv-shows');
+      expect(scannedItem?.candidates[0]?.tvdbId).toBe(asTvdbId('366972'));
+      expect(scannedItem?.candidates[0]?.presentInLibrary).toBe('tv-shows');
+
+      const searched = await runner.searchMetadata(clientId, {
+        query: 'Foundation',
+        kind: 'tv'
+      });
+      expect(searched[0]?.tvdbId).toBe(asTvdbId('366972'));
+      expect(searched[0]?.presentInLibrary).toBe('tv-shows');
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });

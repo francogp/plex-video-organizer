@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import type { ActiveParallelTask, ItemId } from '../../domain/types.ts';
 
@@ -13,21 +13,51 @@ const emit = defineEmits<{
 }>();
 
 const skippingIds = ref<ReadonlySet<ItemId>>(new Set());
+const listRef = ref<HTMLUListElement | null>(null);
+const minHeightPx = ref(0);
+let resizeObserver: ResizeObserver | null = null;
+
+function updateMinHeight(): void {
+  const el = listRef.value;
+  if (!el) {
+    return;
+  }
+  const nextHeight = Math.ceil(el.getBoundingClientRect().height);
+  if (nextHeight > minHeightPx.value) {
+    minHeightPx.value = nextHeight;
+  }
+}
+
+onMounted((): void => {
+  updateMinHeight();
+  if (typeof ResizeObserver !== 'undefined' && listRef.value) {
+    resizeObserver = new ResizeObserver((): void => {
+      updateMinHeight();
+    });
+    resizeObserver.observe(listRef.value);
+  }
+});
+
+onBeforeUnmount((): void => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+});
 
 watch(
   () => props.tasks,
-  (tasks) => {
+  async (tasks) => {
     const activeIds = new Set(tasks.map((t) => t.itemId).filter((id): id is ItemId => Boolean(id)));
-    if (skippingIds.value.size === 0) {
-      return;
-    }
-    const next = new Set<ItemId>();
-    for (const id of skippingIds.value) {
-      if (activeIds.has(id)) {
-        next.add(id);
+    if (skippingIds.value.size > 0) {
+      const next = new Set<ItemId>();
+      for (const id of skippingIds.value) {
+        if (activeIds.has(id)) {
+          next.add(id);
+        }
       }
+      skippingIds.value = next;
     }
-    skippingIds.value = next;
+    await nextTick();
+    updateMinHeight();
   }
 );
 
@@ -40,7 +70,12 @@ function handleSkip(itemId: ItemId): void {
 </script>
 
 <template>
-  <ul v-if="props.tasks.length > 0" class="vo-progress__files vo-mono">
+  <ul
+    v-if="props.tasks.length > 0 || minHeightPx > 0"
+    ref="listRef"
+    class="vo-progress__files vo-mono"
+    :style="minHeightPx > 0 ? { minBlockSize: `${String(minHeightPx)}px` } : undefined"
+  >
     <li
       v-for="task in props.tasks"
       :key="task.slot"
@@ -50,7 +85,7 @@ function handleSkip(itemId: ItemId): void {
       <span v-if="task.percent !== undefined" class="vo-progress__file-pct">
         {{ String(task.percent) }}%
       </span>
-      <span class="vo-progress__file-name">{{ task.fileName }}</span>
+      <span class="vo-progress__file-name" :title="task.fileName">{{ task.fileName }}</span>
       <button
         v-if="props.canSkip && task.itemId"
         type="button"
@@ -92,8 +127,10 @@ function handleSkip(itemId: ItemId): void {
 
 .vo-progress__file-name {
   grid-column: 2;
+  overflow: hidden;
   min-inline-size: 0;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .vo-progress__file-pct {

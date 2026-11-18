@@ -14,6 +14,7 @@ import { useGsapMotion } from '../../src/client/composables/useGsapMotion.ts';
 import {
   asIso639_2Code,
   asItemId,
+  asTvdbId,
   type ConflictComparison,
   type ScannedItem
 } from '../../src/domain/types.ts';
@@ -322,6 +323,7 @@ describe('Client Modals & App', () => {
     expect(searchFn).toHaveBeenCalled();
     expect(wrapper.text()).toContain('Andor');
     expect(wrapper.find('a.vo-provider-link--tvdb').attributes('href')).toContain('416744');
+    expect(wrapper.find('.vo-result-item__title-row').text()).not.toContain('· tvdb');
     const resultBtn = wrapper.find('.vo-result-item button');
     expect(resultBtn.text()).toBe('Select');
     await resultBtn.trigger('click');
@@ -369,6 +371,70 @@ describe('Client Modals & App', () => {
 
     expect(wrapper.text()).toContain('3 selected');
     expect(wrapper.text()).toContain('Applying match to 3 selected items');
+  });
+
+  it('MetadataSearchModal allows clicking Select on any candidate when bulkCount > 1 instead of locking seed match as Selected', async () => {
+    const cand2021 = {
+      source: 'tvdb' as const,
+      title: 'Foundation',
+      year: 2021,
+      tvdbId: asTvdbId('366972')
+    };
+    const cand2011 = {
+      source: 'tvdb' as const,
+      title: 'Foundation',
+      year: 2011,
+      tvdbId: asTvdbId('248041')
+    };
+    const wrapper = mount(MetadataSearchModal, {
+      props: {
+        item: {
+          id: asItemId('seed-1'),
+          sourcePath: '/input/Foundation.S01E01.mkv',
+          relativePath: 'Foundation/Foundation.S01E01.mkv',
+          fileName: 'Foundation.S01E01.mkv',
+          mediaKind: 'tv',
+          category: 'tv-shows',
+          parsedTitle: 'Foundation',
+          parsedYear: 2021,
+          tags: ['4k'],
+          warnings: [],
+          include: true,
+          episodeOrder: 'aired',
+          candidates: [cand2021, cand2011],
+          selectedMetadata: cand2021,
+          externalSubtitles: [],
+          probe: {
+            formatName: 'matroska',
+            durationSeconds: 3000,
+            sizeBytes: 1_000_000,
+            bitrateBps: 5_000_000,
+            videoStreams: [],
+            audioStreams: [],
+            subtitleStreams: []
+          },
+          trackSelection: {
+            audioTracks: [],
+            subtitleMergeMode: 'keep-and-add',
+            includedInternalSubtitles: [],
+            externalSubtitleOrder: [],
+            needsUserPrompt: false
+          }
+        },
+        bulkCount: 30,
+        searchFn: async () => []
+      }
+    });
+
+    const buttons = wrapper.findAll('.vo-result-item button');
+    expect(buttons).toHaveLength(2);
+    const firstButton = buttons[0];
+    expect(firstButton?.text()).toBe('Select');
+    if (firstButton) {
+      expect((firstButton.element as HTMLButtonElement).disabled).toBe(false);
+      await firstButton.trigger('click');
+    }
+    expect(wrapper.emitted('apply')?.[0]?.[0]).toEqual(cand2021);
   });
 
   it('SubtitlePreviewModal renders video and track URLs and emits close', async () => {

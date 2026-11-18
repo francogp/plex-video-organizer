@@ -5,6 +5,7 @@ import {
   buildTvVerificationEntry,
   parseLibraryRootName
 } from '../../src/domain/libraryVerifier.ts';
+import { formatMovieRelativePath, formatTvRelativePath } from '../../src/domain/plexFormatter.ts';
 import { asImdbId, asTvdbId } from '../../src/domain/types.ts';
 
 describe('libraryVerifier domain', () => {
@@ -239,5 +240,59 @@ describe('libraryVerifier domain', () => {
         toRelative: 'Foundation (2021) {tvdb-366972}'
       }
     ]);
+  });
+
+  it('normalizes curly apostrophes identically across Organizer and Verifier (zero round-trip drift)', () => {
+    const formatted = formatTvRelativePath({
+      showTitle: 'Even the Student Council Has Its Holes!',
+      year: 2026,
+      tvdbId: asTvdbId('463051'),
+      episode: {
+        seasonNumber: 1,
+        episodeStart: 5,
+        episodeTitle: 'The Student Council’s Bonding Retreat!!'
+      }
+    });
+    const normalized = formatted.replaceAll('\\', '/');
+    expect(normalized).toBe(
+      "Even the Student Council Has Its Holes! (2026) {tvdb-463051}/Season 01/Even the Student Council Has Its Holes! (2026) - s01e05 - The Student Council's Bonding Retreat!!.mkv"
+    );
+
+    const [rootDir, seasonDir, fileName] = normalized.split('/');
+    const entry = buildTvVerificationEntry({
+      category: 'animated-series',
+      currentRootName: rootDir!,
+      unresolvedMetadata: false,
+      resolvedTitle: 'Even the Student Council Has Its Holes!',
+      resolvedYear: 2026,
+      tvdbId: asTvdbId('463051'),
+      seasonDirs: [{ dirName: seasonDir!, files: [fileName!] }],
+      episodeTitles: new Map([['1:5', 'The Student Council’s Bonding Retreat!!']])
+    });
+    expect(entry).toBeNull();
+  });
+
+  it('treats formatted movie filenames with curly quotes in title as compliant', () => {
+    const formatted = formatMovieRelativePath({
+      title: 'Schindler’s “List”',
+      year: 1993,
+      imdbId: asImdbId('tt0108052')
+    });
+    const normalized = formatted.replaceAll('\\', '/');
+    expect(normalized).toBe(
+      "Schindler's List (1993) {imdb-tt0108052}/Schindler's List (1993) {imdb-tt0108052}.mkv"
+    );
+
+    const [folderName, fileName] = normalized.split('/');
+    const entry = buildMovieVerificationEntry({
+      category: 'movies',
+      currentRootName: folderName!,
+      files: [fileName!],
+      unresolvedMetadata: false,
+      resolvedTitle: 'Schindler’s “List”',
+      resolvedYear: 1993,
+      imdbId: asImdbId('tt0108052')
+    });
+    expect(entry).toBeNull();
   });
 });

@@ -18,88 +18,123 @@ defineProps<{
 </script>
 
 <template>
-  <div class="vo-tracks-overview vo-mono">
-    <span class="vo-tracks-overview__item">
-      <strong>Audio:</strong> {{ summary.audioSummaryText }}
-    </span>
-    <span class="vo-tracks-overview__item">
-      <strong>Subs:</strong> {{ summary.subsSummaryText }}
-    </span>
-  </div>
-  <div
-    v-if="summary.hasConflict || summary.addedCount > 0 || summary.missingSpanishSubs"
-    class="vo-audio-panel"
-    :class="
-      summary.hasConflict
-        ? 'vo-audio-panel--bad'
-        : summary.missingSpanishSubs
-          ? 'vo-audio-panel--warning'
-          : 'vo-audio-panel--ok'
-    "
-    :title="
-      summary.hasConflict
-        ? summary.conflictText
-        : summary.missingSpanishSubs
-          ? 'No Spanish (spa) subtitles in external files or embedded streams'
-          : `Adding external subtitles: ${summary.addedText}`
-    "
-  >
-    <div class="vo-audio-panel-head">
-      <span class="vo-path-label">SUBS</span>
-      <span class="vo-path-pill vo-path-pill--folder vo-mono">{{
-        summary.hasConflict
-          ? 'Conflict'
-          : summary.addedCount > 0
-            ? `+${String(summary.addedCount)} new`
-            : 'No spa'
-      }}</span>
+  <div class="vo-tracks-compact vo-mono">
+    <div class="vo-tracks-overview">
+      <div class="vo-tracks-row">
+        <span class="vo-tracks-key">Audio</span>
+        <span class="vo-tracks-val">{{ summary.audioSummaryText }}</span>
+      </div>
+      <div class="vo-tracks-row">
+        <span class="vo-tracks-key">Subs</span>
+        <span class="vo-tracks-val">{{ summary.subsSummaryText }}</span>
+        <span
+          v-if="!summary.hasConflict && summary.addedCount > 0"
+          class="vo-tracks-badge vo-tracks-badge--ok"
+        >
+          +{{ String(summary.addedCount) }} new
+        </span>
+      </div>
     </div>
-    <div class="vo-audio-lines vo-mono">
-      <div v-if="summary.hasConflict" class="vo-audio-option vo-audio-option--bad">
-        <span class="vo-audio-option-icon" aria-hidden="true">✗</span>
-        <span class="vo-audio-option-label">Conflict:</span>
+    <div
+      v-if="summary.hasConflict || summary.addedCount > 0 || summary.missingSpanishSubs"
+      class="vo-tracks-inline-status"
+      :title="
+        summary.hasConflict
+          ? summary.conflictText
+          : summary.missingSpanishSubs
+            ? 'No Spanish (spa) subtitles in external files or embedded streams'
+            : `Adding external subtitles: ${summary.addedText}`
+      "
+    >
+      <span v-if="summary.hasConflict" class="vo-audio-option vo-audio-option--bad">
+        <span aria-hidden="true">✗</span>
         <span>{{ summary.conflictText }}</span>
-      </div>
+      </span>
       <template v-else-if="summary.addedCount > 0">
-        <div class="vo-audio-option vo-audio-option--good">
-          <span class="vo-audio-option-icon" aria-hidden="true">+</span>
-          <span class="vo-audio-option-label">Add:</span>
-          <span>{{ summary.addedText }}</span>
-        </div>
-        <div v-if="summary.keptCount > 0" class="vo-audio-option vo-audio-option--neutral">
-          <span class="vo-audio-option-icon" aria-hidden="true">✓</span>
-          <span class="vo-audio-option-label">Keep:</span>
-          <span>{{ summary.keptText }}</span>
-        </div>
-        <div v-else-if="summary.isReplace" class="vo-audio-option vo-audio-option--neutral">
-          <span class="vo-audio-option-icon" aria-hidden="true">↺</span>
-          <span class="vo-audio-option-label">Mode:</span>
-          <span>Replace existing</span>
-        </div>
+        <span class="vo-audio-option vo-audio-option--good">
+          <span aria-hidden="true">+</span>
+          <span>Add: {{ summary.addedText }}</span>
+        </span>
+        <span v-if="summary.keptCount > 0" class="vo-audio-option vo-audio-option--neutral">
+          <span aria-hidden="true">✓</span>
+          <span>Keep: {{ summary.keptText }}</span>
+        </span>
+        <span v-else-if="summary.isReplace" class="vo-audio-option vo-audio-option--neutral">
+          <span aria-hidden="true">↺</span>
+          <span>Replace</span>
+        </span>
       </template>
-      <div v-if="summary.missingSpanishSubs" class="vo-audio-option vo-audio-option--warning">
-        <span class="vo-audio-option-icon" aria-hidden="true">⚠</span>
-        <span class="vo-audio-option-label">No spa:</span>
-        <span>No Spanish subtitles (file or embedded)</span>
-      </div>
+      <span v-if="summary.missingSpanishSubs" class="vo-audio-option vo-audio-option--warning">
+        <span aria-hidden="true">⚠</span>
+        <span>No spa</span>
+      </span>
     </div>
   </div>
 </template>
 
 <style scoped lang="scss">
+.vo-tracks-compact {
+  display: grid;
+  gap: var(--vo-space-1);
+  font-size: var(--vo-text-xs);
+}
+
 .vo-tracks-overview {
+  display: grid;
+  gap: calc(var(--vo-space-1) / 2);
+}
+
+.vo-tracks-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--vo-space-1) var(--vo-space-3);
-  padding: var(--vo-space-1) var(--vo-space-2);
+  align-items: center;
+  gap: var(--vo-space-2);
+  min-width: 0;
+}
+
+.vo-tracks-key {
+  min-width: 2.75rem;
+  color: var(--vo-text-muted);
+  font-size: var(--vo-text-2xs);
+  font-weight: var(--vo-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vo-tracks-val {
+  color: var(--vo-text);
+  white-space: nowrap;
+}
+
+.vo-tracks-badge {
+  padding: calc(var(--vo-space-1) / 4) var(--vo-space-1);
   border: 1px solid var(--vo-border);
   border-radius: var(--vo-radius-sm);
-  background: var(--vo-surface-elevated);
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
+  flex-shrink: 0;
+  margin-inline-start: auto;
+  white-space: nowrap;
+}
 
-  strong {
-    color: var(--vo-text);
-  }
+.vo-tracks-badge--bad {
+  background-color: color-mix(in oklch, var(--vo-danger) 12%, transparent);
+  color: var(--vo-danger);
+  border-color: color-mix(in oklch, var(--vo-danger) 48%, var(--vo-border));
+}
+
+.vo-tracks-badge--ok {
+  background-color: color-mix(in oklch, var(--vo-accent) 10%, transparent);
+  color: var(--vo-accent);
+  border-color: color-mix(in oklch, var(--vo-accent) 45%, var(--vo-border));
+}
+
+.vo-tracks-badge--warn {
+  background-color: color-mix(in oklch, var(--vo-warning) 10%, transparent);
+  color: var(--vo-warning);
+  border-color: color-mix(in oklch, var(--vo-warning) 48%, var(--vo-border));
+}
+
+.vo-tracks-inline-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--vo-space-1) var(--vo-space-2);
 }
 </style>
