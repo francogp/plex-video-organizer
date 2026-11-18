@@ -11,7 +11,7 @@ import {
   type MetadataCandidate,
   type ScannedItem
 } from '../../domain/types.ts';
-import { useModalVars } from '../composables/useGsapMotion.ts';
+import BaseModalShell from './BaseModalShell.vue';
 import MetadataResultsList from './MetadataResultsList.vue';
 import UiIcon from './UiIcon.vue';
 
@@ -38,7 +38,6 @@ const emit = defineEmits<{
   ): void;
 }>();
 
-const modalVars = useModalVars(1);
 const query = ref('');
 const yearInput = ref('');
 const imdbInput = ref('');
@@ -149,25 +148,22 @@ const filePillLabel = computed<string>(() => {
 </script>
 
 <template>
-  <div v-if="item" class="vo-modal-backdrop" :style="modalVars" role="dialog" aria-modal="true">
-    <div class="vo-modal-card vo-meta-modal">
-      <header class="vo-modal-header vo-meta-header">
-        <div class="vo-meta-title-group">
-          <div class="vo-meta-eyebrow">
-            <h2>Metadata Lookup</h2>
-            <span class="vo-badge">{{ item.mediaKind === 'tv' ? 'Series' : 'Movie' }}</span>
-            <span v-if="(bulkCount ?? 0) > 1" class="vo-badge">{{ bulkCount }} selected</span>
-          </div>
-          <p class="vo-file-pill vo-mono">{{ filePillLabel }}</p>
-        </div>
-        <button type="button" class="vo-btn" @click="emit('close')">
-          <span aria-hidden="true">✖️</span> Close
-        </button>
-      </header>
+  <BaseModalShell
+    :open="Boolean(item)"
+    title="Metadata Lookup"
+    :badge="item?.mediaKind === 'tv' ? 'Series' : 'Movie'"
+    :subtitle="filePillLabel"
+    :z-offset="1"
+    @close="emit('close')"
+  >
+    <template v-if="(bulkCount ?? 0) > 1" #header-meta>
+      <span class="vo-badge">{{ bulkCount }} selected</span>
+    </template>
 
-      <div class="vo-dual-rail">
-        <section class="vo-dual-rail__top vo-search-grid">
-          <div class="vo-field vo-field--wide">
+    <template v-if="item">
+      <div class="vo-search-panel">
+        <section class="vo-search-grid">
+          <div class="vo-field vo-field--title">
             <label for="meta-query">Title</label>
             <input id="meta-query" v-model="query" type="text" class="vo-input" />
           </div>
@@ -203,7 +199,7 @@ const filePillLabel = computed<string>(() => {
           </div>
         </section>
 
-        <div class="vo-dual-rail__bottom vo-search-actions">
+        <div class="vo-search-actions">
           <button
             type="button"
             class="vo-btn vo-btn--primary"
@@ -227,34 +223,24 @@ const filePillLabel = computed<string>(() => {
         :is-selected="isSelectedCandidate"
         @select="emit('apply', $event, episodeOrder, results)"
       />
-    </div>
-  </div>
+    </template>
+  </BaseModalShell>
 </template>
 
 <style scoped lang="scss">
-.vo-meta-modal {
+.vo-search-panel {
   display: grid;
-  gap: var(--vo-space-3);
-}
-
-.vo-meta-header {
-  align-items: flex-start;
-  padding-bottom: var(--vo-space-2);
-  border-bottom: 1px solid var(--vo-border);
-}
-
-.vo-meta-title-group {
-  display: grid;
-  gap: var(--vo-space-1);
-  min-width: 0;
-  flex: 1 1 240px;
+  gap: var(--vo-space-2);
 }
 
 .vo-search-grid {
   display: grid;
   gap: var(--vo-space-2);
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  padding: var(--vo-space-2);
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+
+  @media (width <= 600px) {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  }
 }
 
 .vo-field {
@@ -263,21 +249,26 @@ const filePillLabel = computed<string>(() => {
   min-width: 0;
   color: var(--vo-text-muted);
   font-size: var(--vo-text-xs);
+  grid-column: span 2;
+
+  &--title {
+    grid-column: span 4;
+  }
+
+  @media (width <= 600px) {
+    grid-column: auto;
+  }
 
   .vo-input {
     width: 100%;
+    font-variant-numeric: tabular-nums;
   }
-}
-
-.vo-field--wide {
-  grid-column: 1 / -1;
 }
 
 .vo-search-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--vo-space-2);
-  padding: var(--vo-space-2);
 }
 
 .vo-alert {

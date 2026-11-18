@@ -9,8 +9,8 @@ import type {
   ItemId,
   VerifierEntryId
 } from '../../domain/types.ts';
-import { useModalVars } from '../composables/useGsapMotion.ts';
 import { formatBytesHuman, formatProbeSpecRows, formatSizeDeltaMb } from '../utils/formatters.ts';
+import BaseModalShell from './BaseModalShell.vue';
 import UiIcon from './UiIcon.vue';
 
 const props = withDefaults(
@@ -37,7 +37,6 @@ const emit = defineEmits<{
 const decisions = ref<Partial<Record<TId, ConflictDecision>>>({}) as {
   value: Partial<Record<TId, ConflictDecision>>;
 };
-const modalVars = useModalVars(1);
 
 watch(
   [() => props.conflicts, () => props.open],
@@ -150,184 +149,171 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
 </script>
 
 <template>
-  <div v-if="open" class="vo-modal-backdrop" :style="modalVars" role="dialog" aria-modal="true">
-    <div class="vo-modal-card vo-conflict-modal">
-      <header class="vo-modal-header">
-        <div class="vo-modal-title-group">
-          <h2>
-            {{ title }}
-            <span class="vo-badge vo-badge--warn vo-badge--compact">{{ conflicts.length }}</span>
-          </h2>
-          <span class="vo-conflict-progress vo-mono">
-            {{ resolvedCount }}/{{ conflicts.length }} resolved
+  <BaseModalShell
+    :open="open"
+    :title="title"
+    :badge="String(conflicts.length)"
+    :z-offset="1"
+    @close="emit('close')"
+  >
+    <template #header-meta>
+      <span class="vo-conflict-progress vo-mono">
+        {{ resolvedCount }}/{{ conflicts.length }} resolved
+      </span>
+    </template>
+
+    <div v-if="diskSpaceRows.length > 0" class="vo-disk-list vo-operator-list">
+      <div
+        v-for="{ disk, usagePercent } in diskSpaceRows"
+        :key="disk.category"
+        class="vo-disk-item vo-operator-row"
+        :class="{ 'vo-disk-item--low': !disk.sufficient }"
+      >
+        <div class="vo-disk-item__head vo-mono">
+          <span class="vo-disk-item__category">{{ disk.category }}</span>
+          <span class="vo-disk-item__metrics">
+            {{ formatBytesHuman(disk.requiredBytes) }} required /
+            {{ formatBytesHuman(disk.availableBytes) }} free ({{ usagePercent }}%)
           </span>
         </div>
-        <button type="button" class="vo-btn" @click="emit('close')">
-          <span aria-hidden="true">✖️</span> Cancel
-        </button>
-      </header>
-
-      <div v-if="diskSpaceRows.length > 0" class="vo-disk-list">
         <div
-          v-for="{ disk, usagePercent } in diskSpaceRows"
-          :key="disk.category"
-          class="vo-disk-item"
-          :class="{ 'vo-disk-item--low': !disk.sufficient }"
+          class="vo-disk-bar"
+          role="progressbar"
+          :aria-valuenow="usagePercent"
+          aria-valuemin="0"
+          aria-valuemax="100"
         >
-          <div class="vo-disk-item__head vo-mono">
-            <span class="vo-disk-item__category">{{ disk.category }}</span>
-            <span class="vo-disk-item__metrics">
-              {{ formatBytesHuman(disk.requiredBytes) }} required /
-              {{ formatBytesHuman(disk.availableBytes) }} free ({{ usagePercent }}%)
-            </span>
+          <div
+            class="vo-disk-bar__fill"
+            :class="{ 'vo-disk-bar__fill--low': !disk.sufficient }"
+            :style="{ width: `${usagePercent}%` }"
+          />
+        </div>
+      </div>
+    </div>
+
+    <div v-if="conflicts.length > 1" class="vo-conflict-bulk-actions">
+      <span class="vo-bulk-label">Apply to all:</span>
+      <button type="button" class="vo-btn" @click="applyToAll('overwrite')">
+        <span aria-hidden="true">✅</span> Overwrite All
+      </button>
+      <button type="button" class="vo-btn" @click="applyToAll('ignore')">
+        <span aria-hidden="true">⏭️</span> Ignore All
+      </button>
+    </div>
+
+    <div class="vo-conflict-list">
+      <article
+        v-for="conflict in conflicts"
+        :key="conflict.itemId"
+        class="vo-operator-list vo-conflict-item"
+      >
+        <div class="vo-operator-row vo-path-panel">
+          <div v-if="conflict.sourceFileName" class="vo-path-row">
+            <span class="vo-path-tag vo-path-tag--incoming">Source</span>
+            <span class="vo-path-value vo-mono">{{ conflict.sourceFileName }}</span>
+          </div>
+          <div class="vo-path-row">
+            <span class="vo-path-tag vo-path-tag--target">Target</span>
+            <span class="vo-path-value vo-mono">{{ conflict.destinationPath }}</span>
           </div>
           <div
-            class="vo-disk-bar"
-            role="progressbar"
-            :aria-valuenow="usagePercent"
-            aria-valuemin="0"
-            aria-valuemax="100"
+            v-if="conflict.existingPath && conflict.existingPath !== conflict.destinationPath"
+            class="vo-path-row"
           >
-            <div
-              class="vo-disk-bar__fill"
-              :class="{ 'vo-disk-bar__fill--low': !disk.sufficient }"
-              :style="{ width: `${usagePercent}%` }"
-            />
+            <span class="vo-path-tag vo-path-tag--warn">Existing</span>
+            <span class="vo-path-value vo-mono">{{ conflict.existingPath }}</span>
           </div>
         </div>
-      </div>
 
-      <div v-if="conflicts.length > 1" class="vo-conflict-bulk-actions">
-        <span class="vo-bulk-label">Apply to all:</span>
-        <button type="button" class="vo-btn" @click="applyToAll('overwrite')">
-          <span aria-hidden="true">✅</span> Overwrite All
-        </button>
-        <button type="button" class="vo-btn" @click="applyToAll('ignore')">
-          <span aria-hidden="true">⏭️</span> Ignore All
-        </button>
-      </div>
-
-      <div class="vo-conflict-list">
-        <article v-for="conflict in conflicts" :key="conflict.itemId" class="vo-conflict-item">
-          <div class="vo-path-panel">
-            <div v-if="conflict.sourceFileName" class="vo-path-row">
-              <span class="vo-path-tag vo-path-tag--incoming">Source</span>
-              <span class="vo-path-value vo-mono">{{ conflict.sourceFileName }}</span>
-            </div>
-            <div class="vo-path-row">
-              <span class="vo-path-tag vo-path-tag--target">Target</span>
-              <span class="vo-path-value vo-mono">{{ conflict.destinationPath }}</span>
-            </div>
-            <div
-              v-if="conflict.existingPath && conflict.existingPath !== conflict.destinationPath"
-              class="vo-path-row"
-            >
-              <span class="vo-path-tag vo-path-tag--warn">Existing</span>
-              <span class="vo-path-value vo-mono">{{ conflict.existingPath }}</span>
-            </div>
-          </div>
-
-          <div class="vo-compare-grid">
-            <section
-              v-for="side in getComparisonSides(conflict)"
-              :key="side.key"
-              class="vo-spec-card"
-              :class="side.cardClass"
-            >
-              <header class="vo-spec-card-header">
-                <span class="vo-spec-title">{{ side.title }}</span>
-                <span v-if="side.badgeText" :class="side.badgeClass">{{ side.badgeText }}</span>
-                <span v-else-if="side.subtitle" class="vo-existing-tag">{{ side.subtitle }}</span>
-              </header>
-              <dl class="vo-spec-dl">
-                <div v-for="row in side.rows" :key="row.label" class="vo-spec-row">
-                  <dt class="vo-spec-dt">{{ row.label }}</dt>
-                  <dd class="vo-spec-dd" :class="{ 'vo-mono': row.mono }">{{ row.value }}</dd>
-                </div>
-              </dl>
-            </section>
-
-            <section v-if="!conflict.existing" class="vo-spec-card vo-spec-card--existing">
-              <header class="vo-spec-card-header">
-                <span class="vo-spec-title">Intra-batch collision</span>
-              </header>
-              <p class="vo-batch-note">Multiple queue items map to the same destination.</p>
-            </section>
-          </div>
-
-          <div class="vo-decision-bar">
-            <span class="vo-decision-label">Resolution</span>
-            <div class="vo-decision-group" role="group" aria-label="Conflict resolution decision">
-              <button
-                type="button"
-                class="vo-decision-btn vo-decision-btn--overwrite"
-                :class="{ 'is-active': decisions[conflict.itemId] === 'overwrite' }"
-                :aria-pressed="decisions[conflict.itemId] === 'overwrite'"
-                data-decision="overwrite"
-                @click="setDecision(conflict.itemId, 'overwrite')"
-              >
-                Overwrite destination
-              </button>
-              <button
-                type="button"
-                class="vo-decision-btn vo-decision-btn--ignore"
-                :class="{ 'is-active': decisions[conflict.itemId] === 'ignore' }"
-                :aria-pressed="decisions[conflict.itemId] === 'ignore'"
-                data-decision="ignore"
-                @click="setDecision(conflict.itemId, 'ignore')"
-              >
-                Ignore (keep existing)
-              </button>
-            </div>
-          </div>
-        </article>
-      </div>
-
-      <footer class="vo-modal-footer">
-        <button type="button" class="vo-btn" @click="emit('close')">
-          <span aria-hidden="true">⬅️</span> Back
-        </button>
-        <div class="vo-modal-footer-actions">
-          <button
-            v-if="mode !== 'confirm'"
-            type="button"
-            class="vo-btn"
-            :class="{ 'vo-btn--primary': mode === 'save-only' }"
-            :disabled="!allResolved"
-            @click="emit('save', decisions)"
+        <div class="vo-compare-grid">
+          <section
+            v-for="side in getComparisonSides(conflict)"
+            :key="side.key"
+            class="vo-spec-card"
+            :class="side.cardClass"
           >
-            <span aria-hidden="true">💾</span>
-            {{ conflicts.length === 1 ? 'Save Decision' : 'Save Decisions' }}
-          </button>
-          <button
-            v-if="mode !== 'save-only'"
-            type="button"
-            class="vo-btn vo-btn--primary"
-            :disabled="!allResolved"
-            @click="emit('confirm', decisions)"
-          >
-            <UiIcon name="bolt" />
-            {{ mode === 'save-and-confirm' ? 'Confirm & Apply' : 'Confirm & Process' }}
-          </button>
+            <header class="vo-spec-card-header">
+              <span class="vo-spec-title">{{ side.title }}</span>
+              <span v-if="side.badgeText" :class="side.badgeClass">{{ side.badgeText }}</span>
+              <span v-else-if="side.subtitle" class="vo-existing-tag">{{ side.subtitle }}</span>
+            </header>
+            <dl class="vo-spec-dl">
+              <div v-for="row in side.rows" :key="row.label" class="vo-spec-row">
+                <dt class="vo-spec-dt">{{ row.label }}</dt>
+                <dd class="vo-spec-dd" :class="{ 'vo-mono': row.mono }">{{ row.value }}</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section v-if="!conflict.existing" class="vo-spec-card vo-spec-card--existing">
+            <header class="vo-spec-card-header">
+              <span class="vo-spec-title">Intra-batch collision</span>
+            </header>
+            <p class="vo-batch-note">Multiple queue items map to the same destination.</p>
+          </section>
         </div>
-      </footer>
+
+        <div class="vo-operator-row vo-decision-bar">
+          <span class="vo-decision-label">Resolution</span>
+          <div class="vo-decision-group" role="group" aria-label="Conflict resolution decision">
+            <button
+              type="button"
+              class="vo-decision-btn vo-decision-btn--overwrite"
+              :class="{ 'is-active': decisions[conflict.itemId] === 'overwrite' }"
+              :aria-pressed="decisions[conflict.itemId] === 'overwrite'"
+              data-decision="overwrite"
+              @click="setDecision(conflict.itemId, 'overwrite')"
+            >
+              Overwrite destination
+            </button>
+            <button
+              type="button"
+              class="vo-decision-btn vo-decision-btn--ignore"
+              :class="{ 'is-active': decisions[conflict.itemId] === 'ignore' }"
+              :aria-pressed="decisions[conflict.itemId] === 'ignore'"
+              data-decision="ignore"
+              @click="setDecision(conflict.itemId, 'ignore')"
+            >
+              Ignore (keep existing)
+            </button>
+          </div>
+        </div>
+      </article>
     </div>
-  </div>
+
+    <template #footer>
+      <button type="button" class="vo-btn" @click="emit('close')">
+        <span aria-hidden="true">⬅️</span> Back
+      </button>
+      <div class="vo-modal-footer-actions">
+        <button
+          v-if="mode !== 'confirm'"
+          type="button"
+          class="vo-btn"
+          :class="{ 'vo-btn--primary': mode === 'save-only' }"
+          :disabled="!allResolved"
+          @click="emit('save', decisions)"
+        >
+          <span aria-hidden="true">💾</span>
+          {{ conflicts.length === 1 ? 'Save Decision' : 'Save Decisions' }}
+        </button>
+        <button
+          v-if="mode !== 'save-only'"
+          type="button"
+          class="vo-btn vo-btn--primary"
+          :disabled="!allResolved"
+          @click="emit('confirm', decisions)"
+        >
+          <UiIcon name="bolt" />
+          {{ mode === 'save-and-confirm' ? 'Confirm & Apply' : 'Confirm & Process' }}
+        </button>
+      </div>
+    </template>
+  </BaseModalShell>
 </template>
 
 <style scoped lang="scss">
-.vo-conflict-modal {
-  display: flex;
-  flex-direction: column;
-  max-height: 88dvh;
-}
-
-.vo-modal-title-group {
-  display: flex;
-  align-items: center;
-  gap: var(--vo-space-3);
-}
-
 .vo-conflict-progress {
   color: var(--vo-text-muted);
   font-size: var(--vo-text-xs);
@@ -352,15 +338,11 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
 .vo-disk-item {
   display: grid;
   gap: var(--vo-space-1);
-  padding: var(--vo-space-2) var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background: var(--vo-surface-elevated);
 }
 
 .vo-disk-item--low {
   background: color-mix(in oklch, var(--vo-danger) 8%, var(--vo-surface-elevated));
-  border-color: var(--vo-danger);
+  border-inline-start: 2px solid var(--vo-danger);
 }
 
 .vo-disk-item__head {
@@ -406,27 +388,15 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
 .vo-conflict-list {
   display: grid;
   gap: var(--vo-space-3);
-  margin: var(--vo-space-4) 0;
-  overflow-y: auto;
-  padding-right: var(--vo-space-1);
 }
 
 .vo-conflict-item {
-  display: grid;
-  gap: var(--vo-space-3);
-  padding: var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-  background-color: var(--vo-surface-elevated);
+  gap: 0;
 }
 
 .vo-path-panel {
   display: grid;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-2) var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background-color: var(--vo-surface);
+  gap: var(--vo-space-1);
 }
 
 .vo-path-row {
@@ -468,18 +438,20 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
 
 .vo-compare-grid {
   display: grid;
-  gap: var(--vo-space-3);
   grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  border-block-start: 1px solid var(--vo-border);
 }
 
 .vo-spec-card {
   display: grid;
   align-content: start;
   gap: var(--vo-space-2);
-  padding: var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
+  padding: var(--vo-space-2) var(--vo-space-3);
   background-color: var(--vo-surface);
+
+  & + & {
+    border-inline-start: 1px solid var(--vo-border);
+  }
 }
 
 .vo-spec-card--incoming {
@@ -566,8 +538,7 @@ const allResolved = computed((): boolean => resolvedCount.value === props.confli
   justify-content: space-between;
   align-items: center;
   gap: var(--vo-space-2);
-  padding-top: var(--vo-space-2);
-  border-top: 1px solid var(--vo-border);
+  background-color: var(--vo-surface-elevated);
 }
 
 .vo-decision-label {

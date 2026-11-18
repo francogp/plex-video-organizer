@@ -22,11 +22,15 @@ defineProps<{
     <div class="vo-tracks-overview">
       <div class="vo-tracks-row">
         <span class="vo-tracks-key">Audio</span>
-        <span class="vo-tracks-val">{{ summary.audioSummaryText }}</span>
+        <span class="vo-tracks-val" :title="summary.audioSummaryText">{{
+          summary.audioSummaryText
+        }}</span>
       </div>
       <div class="vo-tracks-row">
         <span class="vo-tracks-key">Subs</span>
-        <span class="vo-tracks-val">{{ summary.subsSummaryText }}</span>
+        <span class="vo-tracks-val" :title="summary.subsSummaryText">{{
+          summary.subsSummaryText
+        }}</span>
         <span
           v-if="!summary.hasConflict && summary.addedCount > 0"
           class="vo-tracks-badge vo-tracks-badge--ok"
@@ -76,12 +80,14 @@ defineProps<{
 .vo-tracks-compact {
   display: grid;
   gap: var(--vo-space-1);
+  min-width: 0;
   font-size: var(--vo-text-xs);
 }
 
 .vo-tracks-overview {
   display: grid;
   gap: calc(var(--vo-space-1) / 2);
+  min-width: 0;
 }
 
 .vo-tracks-row {
@@ -101,7 +107,10 @@ defineProps<{
 }
 
 .vo-tracks-val {
+  min-width: 0;
   color: var(--vo-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

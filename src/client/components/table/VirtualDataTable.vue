@@ -276,7 +276,7 @@ defineExpose({
   border: 1px solid var(--vo-border);
   border-radius: var(--vo-radius-md);
   background: var(--vo-surface);
-  overflow: hidden;
+  overflow: clip;
 }
 
 .vo-vtable-shell--resizing {

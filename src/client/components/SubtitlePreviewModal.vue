@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 import type { ScannedItem } from '../../domain/types.ts';
-import { useModalVars } from '../composables/useGsapMotion.ts';
+import BaseModalShell from './BaseModalShell.vue';
 
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3600;
@@ -17,7 +17,6 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const modalVars = useModalVars(1);
 const videoRef = ref<HTMLVideoElement | null>(null);
 const seekOffsetSeconds = ref(0);
 const streamElapsedSeconds = ref(0);
@@ -227,29 +226,17 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    v-if="props.item"
-    class="vo-modal-backdrop"
-    :style="modalVars"
-    role="dialog"
-    aria-modal="true"
+  <BaseModalShell
+    :open="Boolean(props.item)"
+    title="Subtitle Sync Preview"
+    :subtitle="props.item?.fileName"
     aria-label="Subtitle Sync Preview"
-    tabindex="-1"
-    @click.self="emit('close')"
-    @keydown.esc="emit('close')"
+    close-aria-label="Close subtitle preview"
+    max-width="min(900px, 95dvw)"
+    :z-offset="1"
+    @close="emit('close')"
   >
-    <div class="vo-modal-card vo-subtitle-preview-modal">
-      <header class="vo-modal-header">
-        <h2 class="vo-modal__title vo-mono">{{ props.item.fileName }}</h2>
-        <button
-          type="button"
-          class="vo-btn"
-          aria-label="Close subtitle preview"
-          @click="emit('close')"
-        >
-          <span aria-hidden="true">✕</span>
-        </button>
-      </header>
+    <template v-if="props.item">
       <div class="vo-subtitle-preview-body">
         <video
           ref="videoRef"
@@ -358,17 +345,14 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
-    </div>
-  </div>
+    </template>
+  </BaseModalShell>
 </template>
 
 <style scoped lang="scss">
-.vo-subtitle-preview-modal {
-  inline-size: min(900px, 95dvw);
-}
-
 .vo-subtitle-preview-body {
-  padding: var(--vo-space-4);
+  display: grid;
+  gap: var(--vo-space-2);
 }
 
 .vo-subtitle-preview-video {
@@ -382,14 +366,12 @@ onBeforeUnmount(() => {
 .vo-preview-error {
   color: var(--vo-danger);
   font-size: var(--vo-text-xs);
-  margin-block-start: var(--vo-space-2);
 }
 
 .vo-preview-timeline {
   display: flex;
   flex-direction: column;
   gap: var(--vo-space-2);
-  margin-block-start: var(--vo-space-3);
 }
 
 .vo-preview-timeline__row {

@@ -2,9 +2,10 @@
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { defineComponent, ref } from 'vue';
+import { defineComponent, nextTick, ref } from 'vue';
 
 import App from '../../src/client/App.vue';
+import BaseModalShell from '../../src/client/components/BaseModalShell.vue';
 import ConflictResolutionModal from '../../src/client/components/ConflictResolutionModal.vue';
 import MetadataSearchModal from '../../src/client/components/MetadataSearchModal.vue';
 import SubtitlePickerModal from '../../src/client/components/SubtitlePickerModal.vue';
@@ -170,6 +171,78 @@ describe('Client Modals & App', () => {
       needsUserPrompt: false,
       subtitleMergeMode: 'replace'
     });
+  });
+
+  it('TrackInspectorModal distinguishes multiple audio tracks with profile, layout, bitrate, sample rate, and dispositions', () => {
+    const wrapper = mount(TrackInspectorModal, {
+      props: {
+        item: {
+          id: asItemId('ti-diff-1'),
+          sourcePath: '/in/Foundation.S03E08.mp4',
+          relativePath: 'Foundation.S03E08.mp4',
+          fileName: 'Foundation.S03E08.mp4',
+          mediaKind: 'tv',
+          category: 'tv-shows',
+          include: true,
+          parsedTitle: 'Foundation',
+          tags: [],
+          probe: {
+            durationSeconds: 3000,
+            videoStreams: [{ index: 0, codecName: 'hevc', width: 3840, height: 2160 }],
+            audioStreams: [
+              {
+                index: 1,
+                streamOrder: 0,
+                codecName: 'eac3',
+                profile: 'Dolby Digital Plus + Dolby Atmos',
+                language: asIso639_2Code('eng'),
+                channels: 6,
+                channelLayout: '5.1(side)',
+                bitrateBps: 768_000,
+                sampleRateHz: 48_000,
+                isDefault: true,
+                isOriginal: true
+              },
+              {
+                index: 2,
+                streamOrder: 1,
+                codecName: 'eac3',
+                language: asIso639_2Code('eng'),
+                channels: 6,
+                channelLayout: '5.1(side)',
+                bitrateBps: 384_000,
+                sampleRateHz: 48_000,
+                isDefault: false,
+                isAudioDescription: true
+              }
+            ],
+            subtitleStreams: []
+          },
+          externalSubtitles: [],
+          trackSelection: {
+            audioTracks: [
+              { streamOrder: 0, language: asIso639_2Code('eng'), isDefault: true, include: true },
+              { streamOrder: 1, language: asIso639_2Code('eng'), isDefault: false, include: true }
+            ],
+            subtitleMergeMode: 'keep-and-add',
+            includedInternalSubtitles: [],
+            externalSubtitleOrder: [],
+            needsUserPrompt: false
+          },
+          candidates: [],
+          warnings: []
+        }
+      }
+    });
+
+    const text = wrapper.text();
+    expect(text).toContain('Dolby Digital Plus + Dolby Atmos');
+    expect(text).toContain('5.1(side)');
+    expect(text).toContain('768 kbps');
+    expect(text).toContain('384 kbps');
+    expect(text).toContain('48 kHz');
+    expect(text).toContain('Original');
+    expect(text).toContain('AD');
   });
 
   it('App mounts, fetches state, and toggles theme', async () => {
@@ -692,5 +765,78 @@ describe('Client Modals & App', () => {
 
     expect(wrapper.text()).toContain('Applying to 3 selected items');
     expect(wrapper.find('#apply-series').exists()).toBe(false);
+  });
+
+  it('BaseModalShell focuses dialog on open and emits close on Escape', async () => {
+    const wrapper = mount(BaseModalShell, {
+      attachTo: document.body,
+      props: { open: true, title: 'Sample Modal' }
+    });
+    await nextTick();
+    const dialog = wrapper.find('[role="dialog"]');
+    expect(document.activeElement).toBe(dialog.element);
+    await dialog.trigger('keydown.esc');
+    expect(wrapper.emitted('close')).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it('TrackInspectorModal collapses internal subtitle streams behind Streams (N) toggle when not selected-only and no conflict', async () => {
+    const wrapper = mount(TrackInspectorModal, {
+      props: {
+        item: {
+          id: asItemId('id-sub-toggle'),
+          filePath: '/data/input/Movie.mkv',
+          fileName: 'Movie.mkv',
+          relativeDir: '',
+          mediaKind: 'movie',
+          category: 'movies',
+          sizeBytes: 1000,
+          included: true,
+          probe: {
+            durationSeconds: 120,
+            sizeBytes: 1000,
+            formatName: 'matroska',
+            bitrateBps: 1_000_000,
+            videoStreams: [],
+            audioStreams: [
+              {
+                index: 1,
+                streamOrder: 0,
+                codecName: 'eac3',
+                language: asIso639_2Code('eng'),
+                channels: 6,
+                isDefault: true
+              }
+            ],
+            subtitleStreams: [
+              { index: 2, streamOrder: 0, codecName: 'subrip', language: asIso639_2Code('eng') },
+              { index: 3, streamOrder: 1, codecName: 'subrip', language: asIso639_2Code('spa') }
+            ]
+          },
+          externalSubtitles: [],
+          candidates: [],
+          trackSelection: {
+            audioTracks: [
+              { streamOrder: 0, include: true, language: asIso639_2Code('eng'), isDefault: true }
+            ],
+            subtitleMergeMode: 'keep-and-add',
+            includedInternalSubtitles: [],
+            externalSubtitleOrder: [],
+            needsUserPrompt: false
+          },
+          warnings: []
+        }
+      }
+    });
+
+    const toggle = wrapper.find('.vo-sub-toggle');
+    expect(toggle.exists()).toBe(true);
+    expect(toggle.text()).toContain('Streams (2)');
+    expect(toggle.attributes('aria-expanded')).toBe('false');
+    expect(wrapper.find('.vo-sub-list').exists()).toBe(false);
+
+    await toggle.trigger('click');
+    expect(toggle.attributes('aria-expanded')).toBe('true');
+    expect(wrapper.find('.vo-sub-list').exists()).toBe(true);
   });
 });

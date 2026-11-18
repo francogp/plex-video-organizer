@@ -20,10 +20,14 @@ Frontend Maintainers.
 - In `SubtitlePreviewModal.vue`, key `<track :key="vttSrc">` on seek to prevent stale cue accumulation in Chromium, explicitly release the `<video>` stream (`pause` + `removeAttribute('src')` + `load()`) on close/unmount/item change, and suppress benign `AbortError` rejections from `play()`.
 - Render Spanish subtitle discovery in `SubtitlePickerModal.vue` sorted by `hashMatch` first and descending `score` rather than truncated inline lists inside `QueueTracksCell.vue`.
 - Reuse `ProviderLinks.vue` (via `extractCandidateLinks` from `src/client/utils/formatters.ts`) inside both `QueueMetadataCell.vue` and `MetadataSearchModal.vue`, persist discovered candidates via `ItemPatch.candidates`, highlight the active selection (`✓ Selected` vs `Select`), and expose `Stop After Current` (`drain`) in `OrganizerStatusBar.vue` during `PROCESSING`.
+- Use `BaseModalShell.vue` for all application modals (`grid-template-rows: auto minmax(0, 1fr) auto` with `min-block-size: 0; align-content: start; grid-auto-rows: max-content; overscroll-behavior: contain; scrollbar-gutter: stable` on `.vo-operator-modal__body`, auto-focus on open, and `@keydown.esc.stop`), and share `.vo-operator-list` / `.vo-operator-row` (`border-inline-start: 2px solid transparent`) / `.vo-operator-row--active` from `src/client/styles/main.scss` with fixed action columns (`6.25rem`/`7.25rem minmax(0, 1fr)`) so active rows never shift horizontally.
+- Keep `.vo-vtable-shell` in `table/VirtualDataTable.vue` on `overflow: clip` (never `overflow: hidden`) so programmatic scroll-into-view or focus events cannot scroll the outer shell and expose blank vertical gaps below the horizontal scrollbar.
+- Follow `modern-web-guidance` baseline patterns across client components: prefer `.toSorted()` over `[...arr].sort()` on arrays, keep the native `switch` attribute paired with `.vo-switch` fallback styling on binary queue switches, declare `<meta name="color-scheme" content="dark light">` in `index.html`, and isolate legacy `*::-webkit-scrollbar*` rules inside `@supports not (scrollbar-color: auto)` with `scrollbar-width: auto`.
 
 ## Key Files
 
 - [AppHeader.vue](AppHeader.vue): Top navigation header, workspace tab switcher, mounts drawer, and title/audio language order bars for `App.vue`.
+- [BaseModalShell.vue](BaseModalShell.vue): Shared Operator Rail modal shell (backdrop, Escape/outside-click close, compact header, scrollable body, and footer slot) used by all 5 modals.
 - [ErrorToast.vue](ErrorToast.vue): Persistent top-right error notification toast (manual dismiss only) with scroll-to-logs trigger for `OrganizerWorkspace.vue`.
 - [LanguageOrderBar.vue](LanguageOrderBar.vue): Reusable ordered language-preference chip bar shared by title and audio language preferences.
 - [MountBadge.vue](MountBadge.vue): Shared disk-presence badge (`💾`) with mount category tooltip for `QueueMetadataCell.vue` and `MetadataSearchModal.vue`.

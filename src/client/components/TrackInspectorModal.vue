@@ -13,7 +13,7 @@ import {
   type SubtitleMergeMode,
   type TrackSelection
 } from '../../domain/types.ts';
-import { useModalVars } from '../composables/useGsapMotion.ts';
+import BaseModalShell from './BaseModalShell.vue';
 
 const props = defineProps<{
   readonly item: ScannedItem | null;
@@ -27,8 +27,14 @@ const emit = defineEmits<{
 
 const draft = ref<TrackSelection | null>(null);
 const applyToSeries = ref(false);
-const modalVars = useModalVars(1);
+const internalStreamsExpanded = ref(false);
 const isBulkMode = computed<boolean>(() => (props.bulkCount ?? 0) > 1);
+const canCollapseInternalStreams = computed<boolean>(
+  () => draft.value?.subtitleMergeMode !== 'selected-only' && !draft.value?.promptReason
+);
+const showInternalSubtitles = computed<boolean>(
+  () => !canCollapseInternalStreams.value || internalStreamsExpanded.value
+);
 const externalSubByPath = computed(() => {
   const map = new Map<string, ScannedItem['externalSubtitles'][number]>();
   for (const sub of props.item?.externalSubtitles ?? []) {
@@ -42,6 +48,7 @@ watch(
   (next): void => {
     draft.value = next ? structuredClone(toRaw(next.trackSelection)) : null;
     applyToSeries.value = false;
+    internalStreamsExpanded.value = false;
   },
   { immediate: true }
 );
@@ -91,6 +98,50 @@ function setDefaultAudio(idx: number): void {
     isDefault: i === idx
   }));
   draft.value = { ...draft.value, audioTracks: nextTracks };
+}
+
+function formatAudioSummary(
+  stream: ScannedItem['probe']['audioStreams'][number] | undefined
+): string {
+  if (!stream) {
+    return 'audio';
+  }
+  const parts: string[] = [stream.codecName];
+  if (stream.profile && stream.profile.toLowerCase() !== stream.codecName.toLowerCase()) {
+    parts.push(stream.profile);
+  }
+  if (stream.channelLayout) {
+    parts.push(stream.channelLayout);
+  } else if (stream.channels) {
+    parts.push(`${String(stream.channels)}ch`);
+  }
+  if (stream.bitrateBps && stream.bitrateBps > 0) {
+    parts.push(`${String(Math.round(stream.bitrateBps / 1000))} kbps`);
+  }
+  if (stream.sampleRateHz && stream.sampleRateHz > 0) {
+    parts.push(`${String(Number((stream.sampleRateHz / 1000).toFixed(1)))} kHz`);
+  }
+  return parts.join(' · ');
+}
+
+function getAudioDispositions(
+  stream: ScannedItem['probe']['audioStreams'][number] | undefined
+): readonly { readonly label: string; readonly title: string }[] {
+  if (!stream) {
+    return [];
+  }
+  const flags: {
+    readonly flag: boolean | undefined;
+    readonly label: string;
+    readonly title: string;
+  }[] = [
+    { flag: stream.isAudioDescription, label: 'AD', title: 'Audio Description (Visual Impaired)' },
+    { flag: stream.isCommentary, label: 'Commentary', title: 'Director / Cast Commentary' },
+    { flag: stream.isHearingImpaired, label: 'HI', title: 'Hearing Impaired' },
+    { flag: stream.isOriginal, label: 'Original', title: 'Original Audio' },
+    { flag: stream.isDub, label: 'Dub', title: 'Dubbed Audio' }
+  ];
+  return flags.filter((entry) => Boolean(entry.flag)).map(({ label, title }) => ({ label, title }));
 }
 
 function setMergeMode(mode: SubtitleMergeMode): void {
@@ -158,36 +209,25 @@ function handleSave(): void {
 </script>
 
 <template>
-  <div
-    v-if="item && draft"
-    class="vo-modal-backdrop"
-    :style="modalVars"
-    role="dialog"
-    aria-modal="true"
+  <BaseModalShell
+    :open="Boolean(item && draft)"
+    title="Track Inspector"
+    :badge="item?.mediaKind === 'tv' ? 'Series' : 'Movie'"
+    :subtitle="
+      item
+        ? isBulkMode
+          ? `Template: ${item.fileName} (audio tracks and subtitle merge mode apply to all selected)`
+          : item.fileName
+        : undefined
+    "
+    :z-offset="1"
+    @close="emit('close')"
   >
-    <div class="vo-modal-card vo-inspector-modal">
-      <header class="vo-modal-header vo-inspector-header">
-        <div class="vo-inspector-title-group">
-          <div class="vo-inspector-eyebrow">
-            <h2>Track Inspector</h2>
-            <span class="vo-badge">{{ item.mediaKind === 'tv' ? 'Series' : 'Movie' }}</span>
-            <span v-if="isBulkMode" class="vo-badge">
-              Applying to {{ bulkCount }} selected items
-            </span>
-          </div>
-          <p class="vo-file-pill vo-mono">
-            {{
-              isBulkMode
-                ? `Template: ${item.fileName} (audio tracks and subtitle merge mode apply to all selected)`
-                : item.fileName
-            }}
-          </p>
-        </div>
-        <button type="button" class="vo-btn" @click="emit('close')">
-          <span aria-hidden="true">✖️</span> Close
-        </button>
-      </header>
+    <template v-if="isBulkMode" #header-meta>
+      <span class="vo-badge">Applying to {{ bulkCount }} selected items</span>
+    </template>
 
+    <template v-if="item && draft">
       <div v-if="draft.promptReason" class="vo-alert">
         {{ draft.promptReason }}
       </div>
@@ -200,21 +240,29 @@ function handleSave(): void {
           </span>
         </div>
 
-        <div class="vo-track-list">
+        <div class="vo-operator-list vo-track-list">
           <div
             v-for="(track, idx) in draft.audioTracks"
             :key="track.streamOrder"
-            class="vo-track-card"
-            :class="{ 'vo-track-card--skipped': !track.include }"
+            class="vo-operator-row vo-track-card"
+            :class="{
+              'vo-track-card--skipped': !track.include,
+              'vo-operator-row--active': track.isDefault && track.include
+            }"
           >
-            <div class="vo-track-card-top">
+            <div class="vo-track-main">
               <div class="vo-track-identity">
                 <span class="vo-badge vo-mono">#{{ track.streamOrder }}</span>
                 <span class="vo-mono vo-track-codec">
-                  {{ item.probe.audioStreams[idx]?.codecName ?? 'audio' }}
-                  <template v-if="item.probe.audioStreams[idx]?.channels">
-                    · {{ item.probe.audioStreams[idx]?.channels }}ch
-                  </template>
+                  {{ formatAudioSummary(item.probe.audioStreams[idx]) }}
+                </span>
+                <span
+                  v-for="flag in getAudioDispositions(item.probe.audioStreams[idx])"
+                  :key="flag.label"
+                  class="vo-badge"
+                  :title="flag.title"
+                >
+                  {{ flag.label }}
                 </span>
                 <span v-if="!track.include" class="vo-badge vo-badge--danger">Skipped</span>
                 <span v-if="item.probe.audioStreams[idx]?.title" class="vo-hint">
@@ -222,43 +270,8 @@ function handleSave(): void {
                 </span>
               </div>
 
-              <div class="vo-track-actions">
-                <button
-                  type="button"
-                  class="vo-btn vo-btn--xs"
-                  :class="{ 'vo-btn--danger': !track.include }"
-                  :disabled="track.include && includedAudioCount <= 1"
-                  :title="
-                    track.include && includedAudioCount <= 1
-                      ? 'At least one audio track must remain included'
-                      : track.include
-                        ? 'Mark track as Skip to remove it from output'
-                        : 'Include this audio track in output'
-                  "
-                  @click="toggleAudioInclude(idx)"
-                >
-                  <span aria-hidden="true">{{ track.include ? '⏭️' : '✅' }}</span>
-                  {{ track.include ? 'Skip' : 'Include' }}
-                </button>
-                <label :for="`aud-def-${String(idx)}`" class="vo-radio-pill">
-                  <input
-                    :id="`aud-def-${String(idx)}`"
-                    type="radio"
-                    name="defaultAudio"
-                    :checked="track.isDefault"
-                    :disabled="!track.include"
-                    @change="setDefaultAudio(idx)"
-                  />
-                  Default
-                </label>
-              </div>
-            </div>
-
-            <div class="vo-track-controls">
-              <label :for="`aud-lang-${String(idx)}`" class="vo-control-label">
-                Language (ISO-639-2)
-              </label>
               <div class="vo-lang-inputs">
+                <label :for="`aud-lang-${String(idx)}`" class="vo-control-label">Language</label>
                 <select
                   :id="`aud-lang-${String(idx)}`"
                   class="vo-input"
@@ -285,6 +298,37 @@ function handleSave(): void {
                   @change="updateAudioLang(idx, ($event.target as HTMLInputElement).value)"
                 />
               </div>
+            </div>
+
+            <div class="vo-track-actions">
+              <label :for="`aud-def-${String(idx)}`" class="vo-radio-pill">
+                <input
+                  :id="`aud-def-${String(idx)}`"
+                  type="radio"
+                  name="defaultAudio"
+                  :checked="track.isDefault"
+                  :disabled="!track.include"
+                  @change="setDefaultAudio(idx)"
+                />
+                Default
+              </label>
+              <button
+                type="button"
+                class="vo-btn vo-btn--xs"
+                :class="{ 'vo-btn--danger': !track.include }"
+                :disabled="track.include && includedAudioCount <= 1"
+                :title="
+                  track.include && includedAudioCount <= 1
+                    ? 'At least one audio track must remain included'
+                    : track.include
+                      ? 'Mark track as Skip to remove it from output'
+                      : 'Include this audio track in output'
+                "
+                @click="toggleAudioInclude(idx)"
+              >
+                <span aria-hidden="true">{{ track.include ? '⏭️' : '✅' }}</span>
+                {{ track.include ? 'Skip' : 'Include' }}
+              </button>
             </div>
           </div>
         </div>
@@ -337,129 +381,152 @@ function handleSave(): void {
           </div>
         </div>
 
-        <div class="vo-track-card">
-          <div class="vo-merge-row">
-            <label for="sub-merge-mode" class="vo-control-label">Merge Mode</label>
-            <select
-              id="sub-merge-mode"
-              class="vo-input vo-merge-select"
-              :value="draft.subtitleMergeMode"
-              @change="
-                setMergeMode(($event.target as HTMLSelectElement).value as SubtitleMergeMode)
-              "
-            >
-              <option v-for="mode in SUBTITLE_MERGE_MODES" :key="mode" :value="mode">
-                {{ mode }}
-              </option>
-            </select>
-          </div>
-          <p class="vo-hint">{{ mergeModeDescription(draft.subtitleMergeMode) }}</p>
-
-          <div v-if="item.probe.subtitleStreams.length > 0" class="vo-sub-list">
-            <label
-              v-for="sub in item.probe.subtitleStreams"
-              :key="sub.streamOrder"
-              class="vo-sub-check"
-            >
-              <input
-                v-if="draft.subtitleMergeMode === 'selected-only'"
-                type="checkbox"
-                :checked="draft.includedInternalSubtitles.includes(sub.streamOrder)"
-                :aria-label="`Include internal subtitle stream ${String(sub.streamOrder)}`"
+        <div class="vo-operator-list">
+          <div class="vo-operator-row vo-sub-merge-top">
+            <div class="vo-merge-row">
+              <label for="sub-merge-mode" class="vo-control-label">Merge Mode</label>
+              <select
+                id="sub-merge-mode"
+                class="vo-input vo-merge-select"
+                :value="draft.subtitleMergeMode"
                 @change="
-                  toggleInternalSubtitle(
-                    sub.streamOrder,
-                    ($event.target as HTMLInputElement).checked
-                  )
+                  setMergeMode(($event.target as HTMLSelectElement).value as SubtitleMergeMode)
                 "
-              />
-              <span class="vo-mono vo-sub-meta">
-                #{{ sub.streamOrder }} · {{ sub.language }} ({{ sub.codecName }})
-                <template v-if="sub.title"> · {{ sub.title }}</template>
-              </span>
-              <span class="vo-sub-flags">
-                <span v-if="sub.isDefault" class="vo-badge vo-badge--ok">default</span>
-                <span v-if="sub.isForced" class="vo-badge vo-badge--warn">forced</span>
-              </span>
-            </label>
+              >
+                <option v-for="mode in SUBTITLE_MERGE_MODES" :key="mode" :value="mode">
+                  {{ mode }}
+                </option>
+              </select>
+            </div>
+            <p class="vo-hint">{{ mergeModeDescription(draft.subtitleMergeMode) }}</p>
           </div>
 
-          <div v-if="draft.externalSubtitleOrder.length > 0" class="vo-sub-list">
+          <div
+            v-if="item.probe.subtitleStreams.length > 0 || draft.externalSubtitleOrder.length > 0"
+            class="vo-operator-row vo-sub-rail-body"
+          >
             <div
-              v-for="(extPath, idx) in draft.externalSubtitleOrder"
-              :key="extPath"
-              class="vo-ext-row"
+              v-if="item.probe.subtitleStreams.length > 0 && canCollapseInternalStreams"
+              class="vo-sub-streams-bar"
             >
-              <span class="vo-mono vo-ext-path">
-                {{ idx + 1 }}.
-                <span v-if="externalSubByPath.get(extPath)" class="vo-badge vo-mono">{{
-                  externalSubByPath.get(extPath)!.language
-                }}</span>
-                {{ extPath }}
-              </span>
-              <div class="vo-actions">
-                <button
-                  type="button"
-                  class="vo-btn"
-                  :disabled="idx === 0"
-                  @click="moveExternalSubtitle(idx, -1)"
-                >
-                  <span aria-hidden="true">⬆️</span> Up
-                </button>
-                <button
-                  type="button"
-                  class="vo-btn"
-                  :disabled="idx === draft.externalSubtitleOrder.length - 1"
-                  @click="moveExternalSubtitle(idx, 1)"
-                >
-                  <span aria-hidden="true">⬇️</span> Down
-                </button>
+              <button
+                type="button"
+                class="vo-btn vo-sub-toggle"
+                :aria-expanded="showInternalSubtitles"
+                @click="internalStreamsExpanded = !internalStreamsExpanded"
+              >
+                Streams ({{ item.probe.subtitleStreams.length }})
+                <span aria-hidden="true">{{ showInternalSubtitles ? '▴' : '▾' }}</span>
+              </button>
+            </div>
+
+            <div
+              v-if="item.probe.subtitleStreams.length > 0 && showInternalSubtitles"
+              class="vo-sub-list"
+            >
+              <label
+                v-for="sub in item.probe.subtitleStreams"
+                :key="sub.streamOrder"
+                class="vo-sub-check"
+              >
+                <input
+                  v-if="draft.subtitleMergeMode === 'selected-only'"
+                  type="checkbox"
+                  :checked="draft.includedInternalSubtitles.includes(sub.streamOrder)"
+                  :aria-label="`Include internal subtitle stream ${String(sub.streamOrder)}`"
+                  @change="
+                    toggleInternalSubtitle(
+                      sub.streamOrder,
+                      ($event.target as HTMLInputElement).checked
+                    )
+                  "
+                />
+                <span class="vo-mono vo-sub-meta">
+                  #{{ sub.streamOrder }} · {{ sub.language }} ({{ sub.codecName }})
+                  <template v-if="sub.title"> · {{ sub.title }}</template>
+                </span>
+                <span class="vo-sub-flags">
+                  <span v-if="sub.isDefault" class="vo-badge vo-badge--ok">default</span>
+                  <span v-if="sub.isForced" class="vo-badge vo-badge--warn">forced</span>
+                </span>
+              </label>
+            </div>
+
+            <div v-if="draft.externalSubtitleOrder.length > 0" class="vo-sub-list">
+              <div
+                v-for="(extPath, idx) in draft.externalSubtitleOrder"
+                :key="extPath"
+                class="vo-ext-row"
+              >
+                <div class="vo-actions vo-ext-actions">
+                  <button
+                    type="button"
+                    class="vo-btn vo-btn--xs"
+                    :disabled="idx === 0"
+                    title="Move up"
+                    @click="moveExternalSubtitle(idx, -1)"
+                  >
+                    <span aria-hidden="true">↑</span> Up
+                  </button>
+                  <button
+                    type="button"
+                    class="vo-btn vo-btn--xs"
+                    :disabled="idx === draft.externalSubtitleOrder.length - 1"
+                    title="Move down"
+                    @click="moveExternalSubtitle(idx, 1)"
+                  >
+                    <span aria-hidden="true">↓</span> Down
+                  </button>
+                </div>
+                <span class="vo-mono vo-ext-path">
+                  {{ idx + 1 }}.
+                  <span v-if="externalSubByPath.get(extPath)" class="vo-badge vo-mono">{{
+                    externalSubByPath.get(extPath)!.language
+                  }}</span>
+                  {{ extPath }}
+                </span>
               </div>
             </div>
           </div>
         </div>
       </section>
+    </template>
 
-      <footer class="vo-modal-footer vo-inspector-footer">
-        <label v-if="item.mediaKind === 'tv' && !isBulkMode" class="vo-series-check">
-          <input
-            id="apply-series"
-            v-model="applyToSeries"
-            type="checkbox"
-            aria-label="Apply track setup to entire series"
-          />
-          Apply track setup to entire series
-        </label>
-        <div class="vo-actions">
-          <button type="button" class="vo-btn" @click="emit('close')">
-            <span aria-hidden="true">✖️</span> Cancel
-          </button>
-          <button type="button" class="vo-btn vo-btn--primary" @click="handleSave">
-            <span aria-hidden="true">💾</span> Save Tracks
-          </button>
-        </div>
-      </footer>
-    </div>
-  </div>
+    <template v-if="item && draft" #footer>
+      <label v-if="item.mediaKind === 'tv' && !isBulkMode" class="vo-series-check">
+        <input
+          id="apply-series"
+          v-model="applyToSeries"
+          type="checkbox"
+          aria-label="Apply track setup to entire series"
+        />
+        Apply track setup to entire series
+      </label>
+      <div class="vo-actions vo-inspector-actions">
+        <button type="button" class="vo-btn" @click="emit('close')">
+          <span aria-hidden="true">✖️</span> Cancel
+        </button>
+        <button type="button" class="vo-btn vo-btn--primary" @click="handleSave">
+          <span aria-hidden="true">💾</span> Save Tracks
+        </button>
+      </div>
+    </template>
+  </BaseModalShell>
 </template>
 
 <style scoped lang="scss">
-.vo-inspector-modal {
+.vo-sub-merge-top {
   display: grid;
-  gap: var(--vo-space-4);
+  gap: var(--vo-space-1);
 }
 
-.vo-inspector-header {
-  align-items: flex-start;
-  padding-bottom: var(--vo-space-3);
-  border-bottom: 1px solid var(--vo-border);
-}
-
-.vo-inspector-title-group {
+.vo-sub-rail-body {
   display: grid;
   gap: var(--vo-space-2);
-  min-width: 0;
-  flex: 1 1 240px;
+}
+
+.vo-ext-actions {
+  flex-shrink: 0;
 }
 
 .vo-section {
@@ -481,8 +548,7 @@ function handleSave(): void {
 }
 
 .vo-track-list {
-  display: grid;
-  gap: var(--vo-space-2);
+  gap: 0;
 }
 
 .vo-sub-conflict-banner {
@@ -518,18 +584,23 @@ function handleSave(): void {
 }
 
 .vo-track-card {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
   gap: var(--vo-space-3);
-  padding: var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-md);
-  background-color: var(--vo-surface-elevated);
+}
+
+.vo-track-main {
+  display: grid;
+  gap: var(--vo-space-2);
+  min-width: 0;
+  flex: 1 1 260px;
 }
 
 .vo-track-card--skipped {
   background-color: color-mix(in oklch, var(--vo-danger) 10%, var(--vo-surface));
   opacity: 0.85;
-  border-color: var(--vo-danger);
 }
 
 .vo-track-actions {
@@ -556,7 +627,8 @@ function handleSave(): void {
 
 .vo-track-codec {
   color: var(--vo-text);
-  font-size: var(--vo-text-sm);
+  font-size: var(--vo-text-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .vo-radio-pill,
@@ -621,11 +693,23 @@ function handleSave(): void {
   text-align: center;
 }
 
+.vo-sub-streams-bar {
+  display: flex;
+  align-items: center;
+}
+
+.vo-sub-toggle {
+  gap: var(--vo-space-2);
+  padding: var(--vo-space-1) var(--vo-space-2);
+  font-size: var(--vo-text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
 .vo-sub-list {
   display: grid;
   gap: var(--vo-space-2);
-  padding-top: var(--vo-space-2);
-  border-top: 1px solid var(--vo-border);
+  max-block-size: 13rem;
+  overflow-y: auto;
 }
 
 .vo-sub-check,

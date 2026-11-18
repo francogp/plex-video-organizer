@@ -43,16 +43,24 @@ interface FfprobeRawStream {
   readonly bits_per_raw_sample?: string;
   readonly color_transfer?: string;
   readonly channels?: number;
+  readonly channel_layout?: string;
+  readonly bit_rate?: string;
+  readonly sample_rate?: string;
   readonly side_data_list?: readonly FfprobeSideData[];
   readonly disposition?: {
     readonly default?: number;
+    readonly dub?: number;
+    readonly original?: number;
+    readonly comment?: number;
     readonly forced?: number;
     readonly hearing_impaired?: number;
+    readonly visual_impaired?: number;
     readonly attached_pic?: number;
   };
   readonly tags?: {
     readonly language?: string;
     readonly title?: string;
+    readonly BPS?: string;
   };
 }
 
@@ -112,6 +120,39 @@ function mapVideoStream(stream: NonNullable<FfprobeRawOutput['streams']>[number]
   };
 }
 
+function parsePositiveNumber(raw?: string): number | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function mapAudioStream(
+  stream: NonNullable<FfprobeRawOutput['streams']>[number],
+  streamOrder: number
+): AudioStreamInfo {
+  const disp = stream.disposition;
+  return {
+    index: stream.index ?? 0,
+    streamOrder,
+    codecName: stream.codec_name ?? 'unknown',
+    profile: stream.profile,
+    language: resolveIsoCode(stream.tags?.language),
+    title: stream.tags?.title,
+    channels: stream.channels ?? 2,
+    channelLayout: stream.channel_layout,
+    bitrateBps: parsePositiveNumber(stream.bit_rate) ?? parsePositiveNumber(stream.tags?.BPS),
+    sampleRateHz: parsePositiveNumber(stream.sample_rate),
+    isDefault: disp?.default === 1,
+    isCommentary: disp?.comment === 1 || undefined,
+    isAudioDescription: disp?.visual_impaired === 1 || undefined,
+    isHearingImpaired: disp?.hearing_impaired === 1 || undefined,
+    isOriginal: disp?.original === 1 || undefined,
+    isDub: disp?.dub === 1 || undefined
+  };
+}
+
 function buildMediaProbeSummary(parsed: FfprobeRawOutput): MediaProbeSummary {
   const videoStreams: VideoStreamInfo[] = [];
   const audioStreams: AudioStreamInfo[] = [];
@@ -123,16 +164,7 @@ function buildMediaProbeSummary(parsed: FfprobeRawOutput): MediaProbeSummary {
     if (stream.codec_type === 'video' && stream.disposition?.attached_pic !== 1) {
       videoStreams.push(mapVideoStream(stream));
     } else if (stream.codec_type === 'audio') {
-      audioStreams.push({
-        index: stream.index ?? 0,
-        streamOrder: audioOrder,
-        codecName: stream.codec_name ?? 'unknown',
-        profile: stream.profile,
-        language: resolveIsoCode(stream.tags?.language),
-        title: stream.tags?.title,
-        channels: stream.channels ?? 2,
-        isDefault: stream.disposition?.default === 1
-      });
+      audioStreams.push(mapAudioStream(stream, audioOrder));
       audioOrder += 1;
     } else if (stream.codec_type === 'subtitle') {
       subtitleStreams.push({

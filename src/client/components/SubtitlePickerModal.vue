@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 
 import type { ScannedItem, SubtitleCandidate } from '../../domain/types.ts';
-import { useModalVars } from '../composables/useGsapMotion.ts';
+import BaseModalShell from './BaseModalShell.vue';
 import type { SubtitlePickerViewState } from './QueueTable.vue';
 import UiIcon from './UiIcon.vue';
 
@@ -16,11 +16,10 @@ const emit = defineEmits<{
   download: [item: ScannedItem, candidate: SubtitleCandidate];
 }>();
 
-const modalVars = useModalVars(1);
 const filterQuery = ref('');
 
 const filteredCandidates = computed((): readonly SubtitleCandidate[] => {
-  const sorted = [...(props.picker?.candidates ?? [])].sort(
+  const sorted = (props.picker?.candidates ?? []).toSorted(
     (a, b) => Number(b.hashMatch) - Number(a.hashMatch) || b.score - a.score
   );
   const q = filterQuery.value.trim().toLowerCase();
@@ -44,121 +43,81 @@ watch(
 </script>
 
 <template>
-  <div
-    v-if="props.picker && props.item"
-    class="vo-modal-backdrop"
-    :style="modalVars"
-    role="dialog"
-    aria-modal="true"
+  <BaseModalShell
+    :open="Boolean(props.picker && props.item)"
+    title="Spanish Subtitles"
+    :subtitle="props.item?.fileName"
     aria-label="Spanish Subtitle Candidates"
-    tabindex="-1"
-    @click.self="emit('close')"
-    @keydown.esc="emit('close')"
+    close-aria-label="Close subtitle picker"
+    :z-offset="1"
+    @close="emit('close')"
   >
-    <div class="vo-modal-card vo-subtitle-picker-modal">
-      <header class="vo-modal-header">
-        <div class="vo-subtitle-picker__heading">
-          <h2 class="vo-modal__title vo-mono">Spanish Subtitles</h2>
-          <p class="vo-subtitle-picker__file vo-mono">{{ props.item.fileName }}</p>
-        </div>
-        <button
-          type="button"
-          class="vo-btn"
-          aria-label="Close subtitle picker"
-          @click="emit('close')"
+    <div v-if="props.picker?.loading" class="vo-subtitle-picker__status vo-mono">
+      Searching subtitle providers...
+    </div>
+    <div v-else-if="props.picker?.error" class="vo-subtitle-picker__error vo-mono">
+      {{ props.picker.error }}
+    </div>
+    <template v-else-if="props.picker && props.item">
+      <div class="vo-subtitle-picker__toolbar">
+        <label for="vo-subtitle-filter" class="vo-sr-only">Filter subtitle candidates</label>
+        <input
+          id="vo-subtitle-filter"
+          v-model="filterQuery"
+          type="search"
+          class="vo-input vo-subtitle-picker__search"
+          placeholder="Filter by release, provider, or variant (e.g. AMZ, BluRay, latam)..."
+        />
+        <span class="vo-mono vo-subtitle-picker__count">
+          {{ filteredCandidates.length }} / {{ props.picker.candidates.length }}
+        </span>
+      </div>
+
+      <div class="vo-subtitle-picker__list vo-operator-list">
+        <div
+          v-for="(cand, idx) in filteredCandidates"
+          :key="cand.id"
+          class="vo-subtitle-picker__row vo-operator-row"
+          :class="{ 'vo-operator-row--active': cand.hashMatch || idx === 0 }"
         >
-          <span aria-hidden="true">✕</span>
-        </button>
-      </header>
-
-      <div class="vo-subtitle-picker__body">
-        <div v-if="props.picker.loading" class="vo-subtitle-picker__status vo-mono">
-          Searching subtitle providers...
-        </div>
-        <div v-else-if="props.picker.error" class="vo-subtitle-picker__error vo-mono">
-          {{ props.picker.error }}
-        </div>
-        <template v-else>
-          <div class="vo-subtitle-picker__toolbar">
-            <label for="vo-subtitle-filter" class="vo-sr-only">Filter subtitle candidates</label>
-            <input
-              id="vo-subtitle-filter"
-              v-model="filterQuery"
-              type="search"
-              class="vo-input vo-subtitle-picker__search"
-              placeholder="Filter by release, provider, or variant (e.g. AMZ, BluRay, latam)..."
-            />
-            <span class="vo-mono vo-subtitle-picker__count">
-              {{ filteredCandidates.length }} / {{ props.picker.candidates.length }}
-            </span>
-          </div>
-
-          <div class="vo-subtitle-picker__list">
-            <div v-for="cand in filteredCandidates" :key="cand.id" class="vo-subtitle-picker__row">
-              <div class="vo-subtitle-picker__info">
-                <div class="vo-subtitle-picker__release vo-mono">{{ cand.releaseName }}</div>
-                <div class="vo-subtitle-picker__meta vo-mono">
-                  <span
-                    class="vo-badge"
-                    :class="cand.hashMatch ? 'vo-badge--ok' : 'vo-badge--neutral'"
-                  >
-                    {{ cand.hashMatch ? 'Hash match' : cand.variant }}
-                  </span>
-                  <span>{{ cand.provider }}</span>
-                  <span v-if="cand.downloadCount !== undefined"> {{ cand.downloadCount }} dl </span>
-                  <span>score {{ cand.score }}</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                class="vo-btn vo-btn--primary vo-subtitle-picker__dl"
-                :disabled="props.picker.downloadingId === cand.id"
-                @click="emit('download', props.item, cand)"
-              >
-                <UiIcon :name="props.picker.downloadingId === cand.id ? 'spinner' : 'download'" />
-                {{ props.picker.downloadingId === cand.id ? 'Downloading' : 'Download' }}
-              </button>
+          <button
+            type="button"
+            class="vo-btn vo-subtitle-picker__dl"
+            :class="{ 'vo-btn--primary': cand.hashMatch || idx === 0 }"
+            :disabled="props.picker.downloadingId === cand.id"
+            @click="emit('download', props.item, cand)"
+          >
+            <UiIcon :name="props.picker.downloadingId === cand.id ? 'spinner' : 'download'" />
+            {{ props.picker.downloadingId === cand.id ? 'Downloading' : 'Download' }}
+          </button>
+          <div class="vo-subtitle-picker__info">
+            <div class="vo-subtitle-picker__release vo-mono" :title="cand.releaseName">
+              {{ cand.releaseName }}
+            </div>
+            <div class="vo-subtitle-picker__meta vo-mono">
+              <span class="vo-badge" :class="cand.hashMatch ? 'vo-badge--ok' : 'vo-badge--neutral'">
+                {{ cand.hashMatch ? 'Hash match' : cand.variant }}
+              </span>
+              <span>{{ cand.provider }}</span>
+              <span v-if="cand.downloadCount !== undefined">{{ cand.downloadCount }} dl</span>
+              <span class="vo-subtitle-picker__score">score {{ cand.score }}</span>
             </div>
           </div>
-        </template>
+        </div>
       </div>
-    </div>
-  </div>
+    </template>
+  </BaseModalShell>
 </template>
 
 <style scoped lang="scss">
-.vo-subtitle-picker-modal {
-  inline-size: min(820px, 95dvw);
-}
-
-.vo-subtitle-picker__heading {
-  min-inline-size: 0;
-}
-
-.vo-subtitle-picker__file {
-  color: var(--vo-muted);
-  font-size: var(--vo-text-xs);
-  margin-block-start: var(--vo-space-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.vo-subtitle-picker__body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--vo-space-3);
-  padding: var(--vo-space-4);
-}
-
 .vo-subtitle-picker__status {
-  color: var(--vo-muted);
-  font-size: var(--vo-text-sm);
+  color: var(--vo-text-muted);
+  font-size: var(--vo-text-xs);
 }
 
 .vo-subtitle-picker__error {
   color: var(--vo-danger);
-  font-size: var(--vo-text-sm);
+  font-size: var(--vo-text-xs);
 }
 
 .vo-subtitle-picker__toolbar {
@@ -172,41 +131,41 @@ watch(
 }
 
 .vo-subtitle-picker__count {
-  color: var(--vo-muted);
+  color: var(--vo-text-muted);
   font-size: var(--vo-text-xs);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .vo-subtitle-picker__list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--vo-space-2);
   max-block-size: 58dvh;
-  overflow-y: auto;
-  padding-inline-end: var(--vo-space-1);
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .vo-subtitle-picker__row {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
   align-items: center;
   gap: var(--vo-space-3);
-  padding: var(--vo-space-2) var(--vo-space-3);
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background-color: var(--vo-surface-alt, var(--vo-bg));
+  grid-template-columns: 7.25rem minmax(0, 1fr);
+  min-inline-size: 0;
 }
 
 .vo-subtitle-picker__info {
   display: flex;
   flex-direction: column;
-  gap: var(--vo-space-1);
+  gap: calc(var(--vo-space-1) / 2);
   min-inline-size: 0;
+  overflow: hidden;
 }
 
 .vo-subtitle-picker__release {
-  font-size: var(--vo-text-sm);
-  overflow-wrap: break-word;
+  font-size: var(--vo-text-xs);
+  font-weight: var(--vo-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .vo-subtitle-picker__meta {
@@ -214,11 +173,18 @@ watch(
   flex-wrap: wrap;
   align-items: center;
   gap: var(--vo-space-2);
-  color: var(--vo-muted);
-  font-size: var(--vo-text-xs);
+  color: var(--vo-text-muted);
+  font-size: var(--vo-text-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.vo-subtitle-picker__score {
+  color: var(--vo-success);
+  font-weight: var(--vo-weight-medium);
 }
 
 .vo-subtitle-picker__dl {
-  flex-shrink: 0;
+  justify-content: center;
+  inline-size: 100%;
 }
 </style>

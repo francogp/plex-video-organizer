@@ -144,7 +144,15 @@ export interface AudioStreamInfo {
   readonly language: Iso639_2Code;
   readonly title?: string;
   readonly channels: number;
+  readonly channelLayout?: string;
+  readonly bitrateBps?: number;
+  readonly sampleRateHz?: number;
   readonly isDefault: boolean;
+  readonly isCommentary?: boolean;
+  readonly isAudioDescription?: boolean;
+  readonly isHearingImpaired?: boolean;
+  readonly isOriginal?: boolean;
+  readonly isDub?: boolean;
 }
 
 export interface SubtitleStreamInfo {

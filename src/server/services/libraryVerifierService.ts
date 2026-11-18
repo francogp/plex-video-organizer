@@ -875,7 +875,7 @@ async function removeDirectoryRobust(dirPath: string): Promise<void> {
 }
 
 function sortStepsBottomUp(steps: readonly VerifierRenameStep[]): readonly VerifierRenameStep[] {
-  return [...steps].sort((a, b): number => stepOrder(a.kind) - stepOrder(b.kind));
+  return steps.toSorted((a, b): number => stepOrder(a.kind) - stepOrder(b.kind));
 }
 
 async function isDirectoryEmptyRecursive(dirPath: string): Promise<boolean> {

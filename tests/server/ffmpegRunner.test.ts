@@ -674,4 +674,67 @@ describe('ffmpegRunner', () => {
     failChild.emit('error', new Error('ENOENT'));
     await expect(failPending).resolves.toBeNull();
   });
+
+  it('extracts detailed audio profile, layout, bitrate, sample rate, and disposition flags in probeMedia', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: vi.fn()
+    });
+    spawnMock.mockReturnValueOnce(child);
+    const pending = probeMedia('/input/Foundation.S03E08.mp4');
+    child.stdout.emit(
+      'data',
+      Buffer.from(
+        JSON.stringify({
+          format: {
+            format_name: 'mov,mp4',
+            duration: '3000',
+            size: '1000000',
+            bit_rate: '5000000'
+          },
+          streams: [
+            {
+              index: 1,
+              codec_type: 'audio',
+              codec_name: 'eac3',
+              profile: 'Dolby Digital Plus + Dolby Atmos',
+              channels: 6,
+              channel_layout: '5.1(side)',
+              bit_rate: '768000',
+              sample_rate: '48000',
+              disposition: { default: 1, original: 1 },
+              tags: { language: 'eng' }
+            },
+            {
+              index: 2,
+              codec_type: 'audio',
+              codec_name: 'eac3',
+              channels: 6,
+              channel_layout: '5.1(side)',
+              bit_rate: '384000',
+              sample_rate: '48000',
+              disposition: { default: 0, visual_impaired: 1 },
+              tags: { language: 'eng', title: 'Audio Description' }
+            }
+          ]
+        })
+      )
+    );
+    child.emit('close', 0);
+
+    const summary = await pending;
+    expect(summary.audioStreams[0]).toMatchObject({
+      profile: 'Dolby Digital Plus + Dolby Atmos',
+      channelLayout: '5.1(side)',
+      bitrateBps: 768_000,
+      sampleRateHz: 48_000,
+      isOriginal: true
+    });
+    expect(summary.audioStreams[1]).toMatchObject({
+      bitrateBps: 384_000,
+      isAudioDescription: true,
+      title: 'Audio Description'
+    });
+  });
 });

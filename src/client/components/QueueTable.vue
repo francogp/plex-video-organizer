@@ -634,6 +634,7 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
         <input
           :id="`inc-${row.id}`"
           type="checkbox"
+          switch
           role="switch"
           class="vo-switch"
           :checked="row.include"
@@ -836,6 +837,11 @@ function getRowTracksSummary(item: ScannedItem): TracksSummary {
       background-color: var(--vo-surface);
       transform: translateX(calc(var(--vo-space-4) * 0.75));
     }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--vo-accent);
+    outline-offset: 2px;
   }
 
   &:disabled {

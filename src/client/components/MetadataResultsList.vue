@@ -17,13 +17,22 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="vo-results-list">
+  <div class="vo-results-list vo-operator-list">
     <article
       v-for="(cand, idx) in props.results"
       :key="`${cand.source}-${String(idx)}`"
-      class="vo-result-item"
-      :class="{ 'vo-result-item--selected': props.isSelected(cand) }"
+      class="vo-result-item vo-operator-row"
+      :class="{ 'vo-operator-row--active': props.isSelected(cand) }"
     >
+      <button
+        type="button"
+        class="vo-btn vo-result-item__btn"
+        :class="{ 'vo-btn--primary': props.isSelected(cand) }"
+        :disabled="props.isSelected(cand)"
+        @click="emit('select', cand)"
+      >
+        {{ props.isSelected(cand) ? '✓ Selected' : 'Select' }}
+      </button>
       <div class="vo-result-item__meta">
         <div class="vo-result-item__title-row">
           <strong>{{ formatTitleWithYear(cand.title, cand.year) }}</strong>
@@ -34,21 +43,12 @@ const emit = defineEmits<{
           <span v-else class="vo-mono vo-muted"> · {{ cand.source }}</span>
           <MountBadge v-if="cand.presentInLibrary" :category="cand.presentInLibrary" />
         </div>
-        <div class="vo-mono vo-muted">
+        <div class="vo-mono vo-muted vo-result-item__ids">
           <span v-if="cand.imdbId">{{ cand.imdbId }}</span>
           <span v-if="cand.imdbId && cand.tvdbId"> · </span>
           <span v-if="cand.tvdbId">tvdb-{{ cand.tvdbId }}</span>
         </div>
       </div>
-      <button
-        type="button"
-        class="vo-btn"
-        :class="{ 'vo-btn--primary': props.isSelected(cand) }"
-        :disabled="props.isSelected(cand)"
-        @click="emit('select', cand)"
-      >
-        {{ props.isSelected(cand) ? '✓ Selected' : 'Select' }}
-      </button>
     </article>
     <p v-if="props.results.length === 0" class="vo-muted">No metadata candidates yet.</p>
   </div>
@@ -56,34 +56,30 @@ const emit = defineEmits<{
 
 <style scoped lang="scss">
 .vo-results-list {
-  display: grid;
-  border: 1px solid var(--vo-border);
-  border-radius: var(--vo-radius-sm);
-  background-color: color-mix(in oklch, var(--vo-surface-elevated) 55%, transparent);
-  overflow: hidden;
+  overflow-x: hidden;
 }
 
 .vo-result-item {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
   align-items: center;
-  gap: var(--vo-space-2);
-  padding: var(--vo-space-2) var(--vo-space-3);
+  gap: var(--vo-space-3);
+  grid-template-columns: 6.25rem minmax(0, 1fr);
+  min-inline-size: 0;
+}
 
-  & + & {
-    border-block-start: 1px solid var(--vo-border);
-  }
-
-  &--selected {
-    background-color: color-mix(in oklch, var(--vo-accent) 10%, var(--vo-surface-elevated));
-    border-inline-start: var(--vo-space-1) solid var(--vo-accent);
-  }
+.vo-result-item__btn {
+  justify-content: center;
+  inline-size: 100%;
 }
 
 .vo-result-item__meta {
   display: grid;
-  gap: var(--vo-space-1);
+  gap: calc(var(--vo-space-1) / 2);
   min-width: 0;
+}
+
+.vo-result-item__ids {
+  font-variant-numeric: tabular-nums;
 }
 
 .vo-result-item__title-row {

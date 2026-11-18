@@ -71,7 +71,7 @@ function rankTvCandidatesByYear(
   if (!parsedYear || candidates.length <= 1) {
     return candidates;
   }
-  return [...candidates].sort(
+  return candidates.toSorted(
     (a, b) => tvYearMatchScore(a.year, parsedYear) - tvYearMatchScore(b.year, parsedYear)
   );
 }
@@ -92,9 +92,7 @@ function annotateAndPrioritizeCandidates(
 ): MetadataCandidate[] {
   const annotated = candidates.map((cand) => annotateCandidateWithMount(cand, mountLookup));
   const yearRanked = mediaKind === 'tv' ? rankTvCandidatesByYear(annotated, parsedYear) : annotated;
-  return [...yearRanked].sort(
-    (a, b) => (a.presentInLibrary ? 0 : 1) - (b.presentInLibrary ? 0 : 1)
-  );
+  return yearRanked.toSorted((a, b) => (a.presentInLibrary ? 0 : 1) - (b.presentInLibrary ? 0 : 1));
 }
 
 function annotateSelectedMetadata(
@@ -359,7 +357,7 @@ function sortCandidatesByMediaKind(
   kind: MediaKind
 ): MetadataCandidate[] {
   const priorityMap = kind === 'tv' ? PROVIDER_PRIORITY_TV : PROVIDER_PRIORITY_MOVIE;
-  return [...candidates].sort((a, b) => priorityMap[a.source] - priorityMap[b.source]);
+  return candidates.toSorted((a, b) => priorityMap[a.source] - priorityMap[b.source]);
 }
 
 function unifyTvSeriesMetadataByTvdbId(items: readonly ScannedItem[]): readonly ScannedItem[] {
@@ -420,6 +418,58 @@ function unifyTvSeriesMetadataByTvdbId(items: readonly ScannedItem[]): readonly 
   });
 }
 
+async function searchByImdbRef(
+  imdbRef: string,
+  config: AppConfig,
+  params: { readonly query: string; readonly year?: number; readonly kind: MediaKind },
+  lookupOptions: MetadataLookupOptions
+): Promise<readonly MetadataCandidate[]> {
+  const found = await lookupMovieByImdbId(imdbRef, config.omdbApiKey, fetch, lookupOptions);
+  if (found) {
+    return [found];
+  }
+  const titleQuery = params.query.trim();
+  if (!titleQuery || params.kind !== 'movie') {
+    return [];
+  }
+  const byTitle = await searchMovies(titleQuery, params.year, config.omdbApiKey, fetch, {
+    ...lookupOptions,
+    throwOnFailure: false
+  });
+  return sortCandidatesByMediaKind(byTitle, 'movie');
+}
+
+async function searchByTvdbRef(
+  tvdbRef: string,
+  config: AppConfig,
+  params: { readonly query: string; readonly kind: MediaKind },
+  lookupOptions: MetadataLookupOptions
+): Promise<readonly MetadataCandidate[]> {
+  const typedTvdbId = asTvdbId(tvdbRef);
+  const titleQuery = params.query.trim();
+  const [primaryFound, tvmazeFound, byTitle] = await Promise.all([
+    lookupSeriesByTvdbId(typedTvdbId, config.tvdbApiKey, fetch, lookupOptions),
+    config.tvdbApiKey
+      ? lookupSeriesByTvdbId(typedTvdbId, undefined, fetch, {
+          ...lookupOptions,
+          throwOnFailure: false
+        })
+      : Promise.resolve(undefined),
+    titleQuery && params.kind === 'tv'
+      ? searchTvShows(titleQuery, config.tvdbApiKey, fetch, {
+          ...lookupOptions,
+          throwOnFailure: false
+        })
+      : Promise.resolve([])
+  ]);
+  const merged = mergeDeduplicatedCandidates(
+    primaryFound ? [primaryFound] : [],
+    tvmazeFound ? [tvmazeFound] : [],
+    byTitle
+  );
+  return sortCandidatesByMediaKind(merged, 'tv');
+}
+
 export async function searchMetadataCatalog(
   config: AppConfig,
   preferredLanguages: readonly MetadataLanguageCode[],
@@ -453,47 +503,14 @@ export async function searchMetadataCatalog(
     annotateAndPrioritizeCandidates(list, mountLookup, params.kind, params.year);
 
   if (imdbRef && (params.kind === 'movie' || !params.query.trim())) {
-    const found = await lookupMovieByImdbId(imdbRef, config.omdbApiKey, fetch, lookupOptions);
-    if (found) {
-      return finalizeSearch([found]);
-    }
-    const titleQuery = params.query.trim();
-    if (!titleQuery || params.kind !== 'movie') {
-      return [];
-    }
-    const byTitle = await searchMovies(titleQuery, params.year, config.omdbApiKey, fetch, {
-      ...lookupOptions,
-      throwOnFailure: false
-    });
-    return finalizeSearch(sortCandidatesByMediaKind(byTitle, 'movie'));
+    return finalizeSearch(await searchByImdbRef(imdbRef, config, params, lookupOptions));
   }
   if (tvmazeRef) {
     const found = await lookupSeriesByTvmazeId(tvmazeRef, fetch, lookupOptions);
     return found ? finalizeSearch([found]) : [];
   }
   if (tvdbRef && /^\d+$/.test(tvdbRef)) {
-    const typedTvdbId = asTvdbId(tvdbRef);
-    const [primaryFound, tvmazeFound, byTitle] = await Promise.all([
-      lookupSeriesByTvdbId(typedTvdbId, config.tvdbApiKey, fetch, lookupOptions),
-      config.tvdbApiKey
-        ? lookupSeriesByTvdbId(typedTvdbId, undefined, fetch, {
-            ...lookupOptions,
-            throwOnFailure: false
-          })
-        : Promise.resolve(undefined),
-      params.query.trim() && params.kind === 'tv'
-        ? searchTvShows(params.query.trim(), config.tvdbApiKey, fetch, {
-            ...lookupOptions,
-            throwOnFailure: false
-          })
-        : Promise.resolve([])
-    ]);
-    const merged = mergeDeduplicatedCandidates(
-      primaryFound ? [primaryFound] : [],
-      tvmazeFound ? [tvmazeFound] : [],
-      byTitle
-    );
-    return finalizeSearch(sortCandidatesByMediaKind(merged, 'tv'));
+    return finalizeSearch(await searchByTvdbRef(tvdbRef, config, params, lookupOptions));
   }
   if (params.kind === 'movie') {
     const movies = await searchMovies(

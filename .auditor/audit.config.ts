@@ -2,7 +2,7 @@ import { defineAuditConfig } from '@francogp/auditor';
 
 export default defineAuditConfig({
   name: 'Project',
-  auditorVersion: '10.12.10-build.20261117-190429',
+  auditorVersion: '10.12.13-build.20261118-005505',
   paths: {
     enabled: true,
     srcRoots: ['src'],
