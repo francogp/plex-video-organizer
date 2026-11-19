@@ -14,7 +14,7 @@ Project Maintainers.
 ## Key Files
 
 - [designs/plex-video-organizer.md](designs/plex-video-organizer.md): Approved architecture and implementation blueprint.
-- [designs/eta-predictor.md](designs/eta-predictor.md): Proposed unified stage-aware `EtaPredictor` design document.
+- [designs/eta-predictor.md](designs/eta-predictor.md): Approved unified stage-aware `EtaPredictor` design document.
 - [opensubtitles-api.md](opensubtitles-api.md): OpenSubtitles REST API v1 authentication, headers, quotas, and `.env` configuration guide.
 
 ## Work Guidance

@@ -4,17 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { runSlotWorkerPool } from '../../domain/concurrency.ts';
+import { PROCESS_JOB_CONCURRENCY } from '../../domain/constants.ts';
 import {
-  ORGANIZING_TEMP_MARKER,
-  ORGANIZING_TEMP_SUFFIX,
-  PROCESS_JOB_CONCURRENCY
-} from '../../domain/constants.ts';
-import { computeLinearFallbackEta, resolveChannelProfile } from '../../domain/eta.ts';
+  buildEtaAttemptTaskId,
+  buildEtaStepId,
+  computeLinearFallbackEta,
+  resolveChannelProfile
+} from '../../domain/eta.ts';
 import {
   collectActiveTasks,
   type ActiveParallelTask,
   type ConflictDecision,
   type EtaChannelProfile,
+  type EtaSimulationSnapshot,
   type EtaState,
   type EtaWorkType,
   type ItemId,
@@ -26,10 +28,20 @@ import {
   type ScannedItem,
   type SseProgressEvent
 } from '../../domain/types.ts';
-import { buildMountPathsMap, resolvePortableInputPath, type AppConfig } from '../config.ts';
-import type { EtaInventoryEntry, EtaPredictor } from './etaPredictor.ts';
+import {
+  buildMountPathsMap,
+  resolvePortableInputPath,
+  resolveServerTag,
+  type AppConfig
+} from '../config.ts';
+import {
+  EtaPredictor,
+  type EtaQueuePlanItemInput,
+  type EtaQueueStepInput
+} from './etaPredictor.ts';
 import {
   backupAndCleanupAfterJob,
+  buildOrganizingTempFileName,
   cleanupOrphanTempFiles,
   moveTempOutputFile,
   purgeExpiredBackups
@@ -42,6 +54,7 @@ import {
   runFfmpegRemux,
   type LoudnormMeasurements
 } from './media/ffmpegRunner.ts';
+import { openScanCacheDb } from './scanCacheDb.ts';
 
 const PERCENT_MAX = 100;
 const LOUDNORM_PASS1_WEIGHT = 0.45;
@@ -51,7 +64,7 @@ const VERIFY_STAGE_FRACTION = 0.9;
 const MOVE_STAGE_WEIGHT = 0.1;
 const MS_PER_SECOND = 1000;
 
-type ProcessItemStage = Extract<JobStageKind, 'remuxing' | 'verifying' | 'moving'>;
+type ProcessItemStage = Extract<JobStageKind, 'remuxing' | 'verifying' | 'moving' | 'cleanup'>;
 
 export interface ExecuteMoveJobOptions {
   readonly config: AppConfig;
@@ -80,6 +93,21 @@ function isSameResolvedPath(leftPath: string, rightPath: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
+const FINALIZE_PROGRESS_MOVE_WEIGHT = 0.7;
+
+function resolveDominantAudioProfile(item: ScannedItem): EtaChannelProfile {
+  const includedTracks = item.trackSelection.audioTracks.filter((t) => t.include);
+  const streamByOrder = new Map(item.probe.audioStreams.map((s) => [s.streamOrder, s]));
+  let maxChannels = 0;
+  for (const track of includedTracks) {
+    const ch = streamByOrder.get(track.streamOrder)?.channels ?? 0;
+    if (ch > maxChannels) {
+      maxChannels = ch;
+    }
+  }
+  return resolveChannelProfile(maxChannels > 0 ? maxChannels : undefined);
+}
+
 function resolveTrackChannelProfile(
   streamByOrder: ReadonlyMap<number, ScannedItem['probe']['audioStreams'][number]>,
   streamOrder: number
@@ -98,15 +126,7 @@ function resolveRemuxSpec(item: ScannedItem): {
   const trackCount = Math.max(1, includedTracks.length);
   const durationSec = Math.max(1, item.probe.durationSeconds);
   const sizeBytes = Math.max(1, item.probe.sizeBytes);
-  const streamByOrder = new Map(item.probe.audioStreams.map((s) => [s.streamOrder, s]));
-  let maxChannels = 0;
-  for (const track of includedTracks) {
-    const ch = streamByOrder.get(track.streamOrder)?.channels ?? 0;
-    if (ch > maxChannels) {
-      maxChannels = ch;
-    }
-  }
-  const profile = resolveChannelProfile(maxChannels > 0 ? maxChannels : undefined);
+  const profile = resolveDominantAudioProfile(item);
   if (mode === 'loudnorm') {
     return {
       workType: 'remux_loudnorm',
@@ -126,115 +146,84 @@ function resolveRemuxSpec(item: ScannedItem): {
   return { workType: 'remux_copy', profile: 'default', totalUnits: sizeBytes, trackCount };
 }
 
-async function resolveExistingDev(
-  targetPath: string,
-  cache: Map<string, number | null>
-): Promise<number | null> {
-  let current = path.resolve(targetPath);
-  for (;;) {
-    const cached = cache.get(current);
-    if (cached !== undefined) {
-      return cached;
-    }
-    try {
-      const stat = await fs.stat(current);
-      const dev = typeof stat.dev === 'number' && stat.dev > 0 ? stat.dev : null;
-      cache.set(current, dev);
-      return dev;
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) {
-        cache.set(current, null);
-        return null;
-      }
-      current = parent;
-    }
-  }
+/** Filters queue items eligible for processing, excluding ignored conflicts. */
+export function selectProcessableQueueItems(
+  items: readonly ScannedItem[],
+  conflictResolutions: Readonly<Partial<Record<ItemId, ConflictDecision>>>
+): readonly ScannedItem[] {
+  return items.filter((item) => item.include && conflictResolutions[item.id] !== 'ignore');
 }
 
-async function detectExdevItemIds(
-  config: AppConfig,
-  toProcess: readonly ScannedItem[],
-  projectedByItemId: Readonly<Partial<Record<ItemId, string>>>
-): Promise<Set<ItemId>> {
-  const exdevIds = new Set<ItemId>();
-  const devCache = new Map<string, number | null>();
-  const mountPaths = buildMountPathsMap(config);
-  for (const item of toProcess) {
-    const sourcePath = await resolvePortableInputPath(config, item.sourcePath, item.relativePath);
-    const projectedDest = projectedByItemId[item.id];
-    const destProbePath = projectedDest ? path.dirname(projectedDest) : mountPaths[item.category];
-    const sourceDev = await resolveExistingDev(path.dirname(sourcePath), devCache);
-    const destDev = await resolveExistingDev(destProbePath, devCache);
-    if (sourceDev === null || destDev === null || sourceDev !== destDev) {
-      exdevIds.add(item.id);
-    }
-  }
-  return exdevIds;
-}
-
-function initProcessEtaInventories(
-  etaPredictor: EtaPredictor,
-  toProcess: readonly ScannedItem[],
-  exdevIds: ReadonlySet<ItemId>,
-  workerCount: number
-): void {
-  const p1Entries: EtaInventoryEntry[] = [];
-  const remuxBuckets = new Map<
-    Extract<EtaWorkType, 'remux_loudnorm' | 'remux_peak_gain' | 'remux_copy'>,
-    EtaInventoryEntry[]
-  >();
-  const exdevEntries: EtaInventoryEntry[] = [];
-
-  for (const item of toProcess) {
+/** Builds ordered step-by-step ETA plans for every item scheduled for processing. */
+function buildProcessQueuePlan(
+  toProcess: readonly ScannedItem[]
+): readonly EtaQueuePlanItemInput[] {
+  const cpuCount = Math.max(1, os.cpus().length);
+  return toProcess.map((item): EtaQueuePlanItemInput => {
     const durationSec = Math.max(1, item.probe.durationSeconds);
     const sizeBytes = Math.max(1, item.probe.sizeBytes);
-    const streamByOrder = new Map(item.probe.audioStreams.map((s) => [s.streamOrder, s]));
-    if (item.trackSelection.audioNormalization?.mode === 'loudnorm') {
-      for (const track of item.trackSelection.audioTracks) {
-        if (!track.include) {
-          continue;
-        }
-        p1Entries.push({
-          profile: resolveTrackChannelProfile(streamByOrder, track.streamOrder),
-          units: durationSec
-        });
-      }
-    }
-    const remux = resolveRemuxSpec(item);
-    const list = remuxBuckets.get(remux.workType) ?? [];
-    list.push({ profile: remux.profile, units: remux.totalUnits });
-    remuxBuckets.set(remux.workType, list);
-    if (exdevIds.has(item.id)) {
-      exdevEntries.push({ profile: 'default', units: sizeBytes });
-    }
-  }
+    const includedTracks = item.trackSelection.audioTracks.filter((t) => t.include);
+    const steps: EtaQueueStepInput[] = [];
 
-  const maxTrackCount = toProcess.reduce(
-    (max, item) => Math.max(max, item.trackSelection.audioTracks.filter((t) => t.include).length),
-    1
-  );
-  const p1Concurrency = Math.min(maxTrackCount, Math.max(1, os.cpus().length));
-  if (p1Entries.length > 0) {
-    etaPredictor.initStageInventory('loudnorm_p1', p1Entries, p1Concurrency);
-  }
-  for (const [workType, entries] of remuxBuckets.entries()) {
-    etaPredictor.initStageInventory(workType, entries, workerCount);
-  }
-  if (exdevEntries.length > 0) {
-    etaPredictor.initStageInventory('move_exdev', exdevEntries, 1);
-  }
-  const initialStage =
-    p1Entries.length > 0
-      ? 'loudnorm_p1'
-      : (remuxBuckets.keys().next().value ?? (exdevEntries.length > 0 ? 'move_exdev' : undefined));
-  if (initialStage) {
-    etaPredictor.setActiveStage(initialStage);
+    if (item.trackSelection.audioNormalization?.mode === 'loudnorm' && includedTracks.length > 0) {
+      steps.push({
+        stepId: buildEtaStepId('p1', item.id),
+        workType: 'loudnorm_p1',
+        profile: resolveDominantAudioProfile(item),
+        totalUnits: durationSec * includedTracks.length,
+        parallelTracks: Math.min(includedTracks.length, cpuCount)
+      });
+    }
+
+    const remux = resolveRemuxSpec(item);
+    steps.push({
+      stepId: buildEtaStepId('remux', item.id),
+      workType: remux.workType,
+      profile: remux.profile,
+      totalUnits: remux.totalUnits,
+      parallelTracks: 1
+    });
+
+    steps.push({
+      stepId: buildEtaStepId('finalize', item.id),
+      workType: 'finalize_io',
+      profile: 'default',
+      totalUnits: sizeBytes,
+      parallelTracks: 1
+    });
+
+    return {
+      itemId: item.id,
+      fileName: item.fileName,
+      steps
+    };
+  });
+}
+
+/** Projects an idle queue ETA simulation snapshot from host SQLite baselines. */
+export async function buildIdleEtaSimulationSnapshot(options: {
+  readonly configDir: string;
+  readonly serverId?: string;
+  readonly items: readonly ScannedItem[];
+  readonly conflictResolutions: Readonly<Partial<Record<ItemId, ConflictDecision>>>;
+  readonly onDbFallbackWarning?: (msg: string) => void;
+}): Promise<EtaSimulationSnapshot> {
+  const db = await openScanCacheDb(options.configDir, undefined, options.onDbFallbackWarning);
+  try {
+    const predictor = new EtaPredictor({ db, serverId: options.serverId });
+    const processable = selectProcessableQueueItems(options.items, options.conflictResolutions);
+    const workerCount = Math.min(PROCESS_JOB_CONCURRENCY, Math.max(1, processable.length));
+    predictor.initQueuePlan(buildProcessQueuePlan(processable), workerCount);
+    return predictor.getSimulationSnapshot('preview');
+  } finally {
+    db.close();
   }
 }
 
 async function measureLoudnormForItem(
   item: ScannedItem,
+  slot: number,
+  attempt: JobRetryAttempt,
   downmixStereo: boolean,
   isCancelled: () => boolean,
   createChildTracker: () => (child: ChildProcess | null) => void,
@@ -273,12 +262,24 @@ async function measureLoudnormForItem(
     workerCount,
     async (track, trackIdx, trackSlot) => {
       const trackLabel = `${item.fileName} · audio #${String(trackIdx + 1)} (${track.language})`;
-      const p1TaskId = `p1:${item.id}:${String(track.streamOrder)}`;
+      const p1StepId = buildEtaStepId('p1', item.id);
+      const p1TaskId = buildEtaAttemptTaskId('p1', item.id, attempt, track.streamOrder);
       const trackProfile = resolveTrackChannelProfile(streamByOrder, track.streamOrder);
-      etaPredictor?.startTask(p1TaskId, 'loudnorm_p1', trackProfile, durationSec, {
-        mediaDurationSec: durationSec,
-        trackCount: 1
-      });
+      etaPredictor?.startTask(
+        p1TaskId,
+        'loudnorm_p1',
+        trackProfile,
+        durationSec,
+        {
+          mediaDurationSec: durationSec,
+          trackCount: 1
+        },
+        {
+          itemId: item.id,
+          stepId: p1StepId,
+          slot
+        }
+      );
       trackSlotTasks[trackSlot] = {
         slot: trackSlot,
         itemId: item.id,
@@ -287,33 +288,40 @@ async function measureLoudnormForItem(
       };
       emitPass1Progress();
 
-      const measured = await measureLoudnormPass1(
-        item.sourcePath,
-        track.streamOrder,
-        downmixStereo,
-        item.probe.durationSeconds,
-        (update): void => {
-          if (isCancelled()) {
-            return;
-          }
-          etaPredictor?.recordTaskProgress(
-            p1TaskId,
-            update.outTimeSec ?? (update.percent / PERCENT_MAX) * durationSec,
-            update.speed,
-            update.outTimeSec
-          );
-          trackPercents[trackIdx] = update.percent;
-          trackSlotTasks[trackSlot] = {
-            slot: trackSlot,
-            itemId: item.id,
-            fileName: trackLabel,
-            percent: update.percent
-          };
-          emitPass1Progress();
-        },
-        createChildTracker()
-      );
-      trackSlotTasks[trackSlot] = undefined;
+      let measured: LoudnormMeasurements;
+      try {
+        measured = await measureLoudnormPass1(
+          item.sourcePath,
+          track.streamOrder,
+          downmixStereo,
+          item.probe.durationSeconds,
+          (update): void => {
+            if (isCancelled()) {
+              return;
+            }
+            etaPredictor?.recordTaskProgress(
+              p1TaskId,
+              update.outTimeSec ?? (update.percent / PERCENT_MAX) * durationSec,
+              update.speed,
+              update.outTimeSec
+            );
+            trackPercents[trackIdx] = update.percent;
+            trackSlotTasks[trackSlot] = {
+              slot: trackSlot,
+              itemId: item.id,
+              fileName: trackLabel,
+              percent: update.percent
+            };
+            emitPass1Progress();
+          },
+          createChildTracker()
+        );
+      } catch (err) {
+        etaPredictor?.skipTask(p1TaskId);
+        throw err;
+      } finally {
+        trackSlotTasks[trackSlot] = undefined;
+      }
       if (isCancelled()) {
         etaPredictor?.skipTask(p1TaskId);
         return;
@@ -349,6 +357,7 @@ async function pruneEmptyOldParentDirs(config: AppConfig, oldFilePath: string): 
 async function processSingleJobItem(options: {
   readonly config: AppConfig;
   readonly jobId: JobId;
+  readonly attempt: JobRetryAttempt;
   readonly item: ScannedItem;
   readonly slot: number;
   readonly destPath: string;
@@ -358,7 +367,6 @@ async function processSingleJobItem(options: {
   readonly isCancelled: () => boolean;
   readonly createChildTracker: () => (child: ChildProcess | null) => void;
   readonly etaPredictor?: EtaPredictor;
-  readonly isExdev: boolean;
   readonly onLog: (level: LogLevel, message: string) => void;
   readonly onProgress: (
     slotTasks: ActiveParallelTask | readonly ActiveParallelTask[] | undefined,
@@ -370,6 +378,7 @@ async function processSingleJobItem(options: {
   const {
     config,
     jobId,
+    attempt,
     item,
     slot,
     destPath,
@@ -379,7 +388,6 @@ async function processSingleJobItem(options: {
     isCancelled,
     createChildTracker,
     etaPredictor,
-    isExdev,
     onLog,
     onProgress
   } = options;
@@ -406,9 +414,10 @@ async function processSingleJobItem(options: {
 
   const sourceDir = path.dirname(resolvedItem.sourcePath);
   const baseNoExt = path.basename(resolvedItem.sourcePath, path.extname(resolvedItem.sourcePath));
+  const serverTag = resolveServerTag(config.serverId);
   const tempMkvPath = path.join(
     sourceDir,
-    `${baseNoExt}${ORGANIZING_TEMP_MARKER}${jobId}.${resolvedItem.id}${ORGANIZING_TEMP_SUFFIX}`
+    buildOrganizingTempFileName(baseNoExt, serverTag, jobId, resolvedItem.id)
   );
 
   const subInputs: {
@@ -443,6 +452,8 @@ async function processSingleJobItem(options: {
   const loudnormByStreamOrder = hasLoudnorm
     ? await measureLoudnormForItem(
         resolvedItem,
+        slot,
+        attempt,
         norm.downmixStereo,
         isCancelled,
         createChildTracker,
@@ -459,7 +470,10 @@ async function processSingleJobItem(options: {
   }
 
   const remuxSpec = resolveRemuxSpec(resolvedItem);
-  const remuxTaskId = `remux:${resolvedItem.id}`;
+  const remuxStepId = buildEtaStepId('remux', resolvedItem.id);
+  const remuxTaskId = buildEtaAttemptTaskId('remux', resolvedItem.id, attempt);
+  const finalizeStepId = buildEtaStepId('finalize', resolvedItem.id);
+  const finalizeTaskId = buildEtaAttemptTaskId('finalize', resolvedItem.id, attempt);
   const durationSec = Math.max(1, resolvedItem.probe.durationSeconds);
   const sizeBytes = Math.max(1, resolvedItem.probe.sizeBytes);
   etaPredictor?.startTask(
@@ -471,6 +485,11 @@ async function processSingleJobItem(options: {
       mediaDurationSec: durationSec,
       itemSizeBytes: sizeBytes,
       trackCount: remuxSpec.trackCount
+    },
+    {
+      itemId: resolvedItem.id,
+      stepId: remuxStepId,
+      slot
     }
   );
 
@@ -513,6 +532,14 @@ async function processSingleJobItem(options: {
     etaPredictor?.completeTask(remuxTaskId);
 
     const destFileName = path.basename(destPath);
+    etaPredictor?.startTask(
+      finalizeTaskId,
+      'finalize_io',
+      'default',
+      sizeBytes,
+      { itemSizeBytes: sizeBytes },
+      { itemId: resolvedItem.id, stepId: finalizeStepId, slot }
+    );
     onProgress(
       { slot, itemId: resolvedItem.id, fileName: `${destFileName} · Verifying` },
       VERIFY_STAGE_FRACTION,
@@ -530,17 +557,11 @@ async function processSingleJobItem(options: {
     );
     onLog('info', `Moving ${destFileName} to ${resolvedItem.category}`);
 
-    const moveTaskId = `move:${resolvedItem.id}`;
-    if (isExdev) {
-      etaPredictor?.startTask(moveTaskId, 'move_exdev', 'default', sizeBytes, {
-        itemSizeBytes: sizeBytes
-      });
-    }
-
     await moveTempOutputFile(tempMkvPath, destPath, allowOverwrite, (movePercent): void => {
-      if (isExdev) {
-        etaPredictor?.recordTaskProgress(moveTaskId, (movePercent / PERCENT_MAX) * sizeBytes);
-      }
+      etaPredictor?.recordTaskProgress(
+        finalizeTaskId,
+        (movePercent / PERCENT_MAX) * sizeBytes * FINALIZE_PROGRESS_MOVE_WEIGHT
+      );
       onProgress(
         {
           slot,
@@ -553,10 +574,14 @@ async function processSingleJobItem(options: {
         'Moving'
       );
     });
-    if (isExdev) {
-      etaPredictor?.completeTask(moveTaskId);
+
+    if (allowOverwrite && oldExistingPath && !isSameResolvedPath(oldExistingPath, destPath)) {
+      await fs.rm(oldExistingPath, { force: true });
+      await pruneEmptyOldParentDirs(config, oldExistingPath);
     }
   } catch (err) {
+    etaPredictor?.skipTask(remuxTaskId);
+    etaPredictor?.skipTask(finalizeTaskId);
     try {
       await fs.rm(tempMkvPath, { force: true });
     } catch (cleanupErr) {
@@ -564,11 +589,6 @@ async function processSingleJobItem(options: {
       onLog('warn', `Failed to remove temp file ${path.basename(tempMkvPath)}: ${cleanupMsg}`);
     }
     throw err;
-  }
-
-  if (allowOverwrite && oldExistingPath && !isSameResolvedPath(oldExistingPath, destPath)) {
-    await fs.rm(oldExistingPath, { force: true });
-    await pruneEmptyOldParentDirs(config, oldExistingPath);
   }
 
   onProgress(undefined, 1, 'moving', 'Moved');
@@ -596,9 +616,16 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
   } = options;
   const movedItems: ScannedItem[] = [];
   const createdTempSubs: string[] = [];
+  const serverTag = resolveServerTag(config.serverId);
   let finalizeChain: Promise<void> = Promise.resolve();
 
   try {
+    const workerCount = Math.min(PROCESS_JOB_CONCURRENCY, Math.max(1, toProcess.length));
+    if (etaPredictor) {
+      etaPredictor.initQueuePlan(buildProcessQueuePlan(toProcess), workerCount);
+      onLog('info', etaPredictor.formatBaselineSummaryLog());
+    }
+
     const purged = await purgeExpiredBackups(config.backupDir);
     if (purged.removedFiles > 0) {
       onLog(
@@ -607,42 +634,11 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
       );
     }
 
-    const workerCount = Math.min(PROCESS_JOB_CONCURRENCY, Math.max(1, toProcess.length));
-    const exdevIds = etaPredictor
-      ? await detectExdevItemIds(config, toProcess, projectedByItemId)
-      : new Set<ItemId>();
-    if (etaPredictor) {
-      initProcessEtaInventories(etaPredictor, toProcess, exdevIds, workerCount);
-      onLog('info', etaPredictor.formatBaselineSummaryLog());
-    }
     const slotStates: Array<{
       tasks: readonly ActiveParallelTask[];
       stage?: ProcessItemStage;
       stageLabel?: string;
     }> = Array.from({ length: workerCount }, () => ({ tasks: [] }));
-    const enqueueItemFinalization = (completedItem: ScannedItem): Promise<void> => {
-      const next = finalizeChain.then(async () => {
-        onProgress({
-          jobId,
-          activeTasks: [{ slot: 0, fileName: completedItem.fileName }],
-          totalItems: toProcess.length,
-          completedItems: movedItems.length,
-          percent: Math.min(
-            PERCENT_MAX,
-            Math.round(((movedItems.length + 1) / toProcess.length) * PERCENT_MAX)
-          ),
-          stage: 'cleanup',
-          stageLabel: 'Cleaning up'
-        });
-        await backupAndCleanupAfterJob([completedItem], config.inputDir, config.backupDir);
-        movedItems.push(completedItem);
-        await onFinalizeMovedItems([completedItem]);
-      });
-      finalizeChain = next.catch((err: unknown) => {
-        onLog('error', err instanceof Error ? err.message : String(err));
-      });
-      return next;
-    };
     const itemBytes = toProcess.map((item) => Math.max(1, item.probe.sizeBytes));
     const totalBytes = itemBytes.reduce((sum, b) => sum + b, 0);
     const itemFractions = toProcess.map(() => 0);
@@ -664,7 +660,11 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
       return { stage: fallbackStage, stageLabel: fallbackLabel };
     };
 
-    const emitJobProgress = (fallbackStage: ProcessItemStage, fallbackLabel: string): void => {
+    const emitJobProgress = (
+      fallbackStage: ProcessItemStage,
+      fallbackLabel: string,
+      fallbackTasks?: readonly ActiveParallelTask[]
+    ): void => {
       if (isCancelled()) {
         return;
       }
@@ -673,16 +673,21 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
         doneBytes += (itemBytes[i] ?? 0) * (itemFractions[i] ?? 0);
       }
       const overallFraction = totalBytes > 0 ? Math.max(0, Math.min(1, doneBytes / totalBytes)) : 1;
-      const percent = Math.min(PERCENT_MAX, Math.round(overallFraction * PERCENT_MAX));
       const elapsedSec = (performance.now() - jobStartedAtMs) / MS_PER_SECOND;
       const etaEstimate = etaPredictor?.getEstimate();
+      const progressFraction =
+        etaPredictor && etaEstimate?.weightedFraction !== undefined
+          ? etaEstimate.weightedFraction
+          : overallFraction;
+      const percent = Math.min(PERCENT_MAX, Math.round(progressFraction * PERCENT_MAX));
       const etaSeconds = etaPredictor
         ? etaEstimate?.etaSeconds
         : computeLinearFallbackEta(overallFraction, completedCount, toProcess.length, elapsedSec);
       const etaState: EtaState | undefined = etaEstimate?.etaState;
-      const activeTasks = slotStates
+      const slotTasks = slotStates
         .flatMap((state) => state.tasks)
         .map((task, index) => ({ ...task, slot: index }));
+      const activeTasks = slotTasks.length > 0 ? slotTasks : (fallbackTasks ?? []);
       const resolved = resolveActiveStage(fallbackStage, fallbackLabel);
       onProgress({
         jobId,
@@ -697,6 +702,19 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
       });
     };
 
+    const enqueueItemFinalization = (completedItem: ScannedItem): Promise<void> => {
+      const next = finalizeChain.then(async () => {
+        emitJobProgress('cleanup', 'Cleaning up', [{ slot: 0, fileName: completedItem.fileName }]);
+        await backupAndCleanupAfterJob([completedItem], config.inputDir, config.backupDir);
+        movedItems.push(completedItem);
+        await onFinalizeMovedItems([completedItem]);
+      });
+      finalizeChain = next.catch((err: unknown) => {
+        onLog('error', err instanceof Error ? err.message : String(err));
+      });
+      return next;
+    };
+
     const attemptErrors: JobItemError[] = [];
     const retryItems: ScannedItem[] = [];
     const itemIndexById = new Map<ItemId, number>(toProcess.map((it, index) => [it.id, index]));
@@ -707,6 +725,7 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
       slot: number,
       attempt: JobRetryAttempt
     ): Promise<void> => {
+      const attemptFinalizeTaskId = buildEtaAttemptTaskId('finalize', item.id, attempt);
       try {
         const destPath = projectedByItemId[item.id];
         if (!destPath) {
@@ -715,6 +734,7 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
         const completedItem = await processSingleJobItem({
           config,
           jobId,
+          attempt,
           item,
           slot,
           destPath,
@@ -724,7 +744,6 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
           isCancelled,
           createChildTracker,
           etaPredictor,
-          isExdev: exdevIds.has(item.id),
           onLog,
           onProgress: (slotTasks, itemFraction, stage, stageLabel): void => {
             const tasks = Array.isArray(slotTasks) ? slotTasks : slotTasks ? [slotTasks] : [];
@@ -735,9 +754,12 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
         });
         slotStates[slot] = { tasks: [] };
         if (!completedItem) {
+          etaPredictor?.markItemSkipped(item.id);
           return;
         }
         await enqueueItemFinalization(completedItem);
+        etaPredictor?.completeTask(attemptFinalizeTaskId);
+        etaPredictor?.markItemCompleted(item.id);
         itemFractions[idx] = 1;
         completedCount += 1;
         if (isCancelled()) {
@@ -746,7 +768,9 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
         emitJobProgress('moving', 'Moved');
       } catch (err) {
         slotStates[slot] = { tasks: [] };
+        etaPredictor?.skipTask(attemptFinalizeTaskId);
         if (isCancelled()) {
+          etaPredictor?.markItemSkipped(item.id);
           return;
         }
         const message = err instanceof Error ? err.message : String(err);
@@ -758,10 +782,12 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
           timestamp: Temporal.Now.instant().toString()
         });
         if (attempt === 1) {
+          etaPredictor?.resetItemForRetry(item.id);
           retryItems.push(item);
           itemFractions[idx] = 0;
           onLog('error', `[Attempt 1/2] ${item.fileName} failed: ${message} — deferred for retry.`);
         } else {
+          etaPredictor?.markItemSkipped(item.id);
           itemFractions[idx] = 1;
           onLog('error', `[Attempt 2/2] ${item.fileName} failed: ${message}`);
         }
@@ -797,7 +823,7 @@ export async function executeMoveJob(options: ExecuteMoveJobOptions): Promise<vo
       return;
     }
     const msg = err instanceof Error ? err.message : String(err);
-    await cleanupOrphanTempFiles(config.inputDir);
+    await cleanupOrphanTempFiles(config.inputDir, { serverTag, jobId });
     await onError(msg);
   } finally {
     etaPredictor?.flush();

@@ -980,6 +980,15 @@ describe('JobRunner execution pipeline', () => {
       await runner.init();
 
       const clientId = asClientId('c1:retry');
+      const progressEvents: SseProgressEvent[] = [];
+      const unsubscribe = runner.subscribe({
+        send(event, data): void {
+          if (event === 'progress') {
+            progressEvents.push(data as SseProgressEvent);
+          }
+        }
+      });
+
       runner.startScan(clientId);
       for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
         await new Promise((r) => setTimeout(r, 10));
@@ -993,6 +1002,13 @@ describe('JobRunner execution pipeline', () => {
       await runner.startJob(clientId, preflight.revision, resolutions);
       for (let i = 0; i < 60 && runner.getState().phase === 'PROCESSING'; i += 1) {
         await new Promise((r) => setTimeout(r, 15));
+      }
+      unsubscribe();
+
+      const cleanupEvents = progressEvents.filter((evt) => evt.stage === 'cleanup');
+      expect(cleanupEvents.length).toBeGreaterThan(0);
+      for (const evt of cleanupEvents) {
+        expect(evt.etaState).toBeDefined();
       }
 
       const finalState = runner.getState();
@@ -1062,6 +1078,250 @@ describe('JobRunner execution pipeline', () => {
       expect(searched[0]?.tvdbId).toBe(asTvdbId('366972'));
       expect(searched[0]?.presentInLibrary).toBe('tv-shows');
     } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks preflight/TOCTOU mutations with JOB_IN_PROGRESS during active processing and scopes temp files by serverTag', async () => {
+    const httpMod = await import('node:http');
+    const { createRequestHandler } = await import('../../src/server/routes.ts');
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-job-guard-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(inputDir, 'Arrival.2016.mkv'), 'a');
+
+    const ffmpegMod = await import('../../src/server/services/media/ffmpegRunner.ts');
+    vi.mocked(ffmpegMod.analyzeAudioVolume).mockResolvedValue({
+      streamOrder: 0,
+      meanVolumeDb: -20,
+      maxVolumeDb: -2,
+      suggestion: 'ok',
+      recommendedGainDb: 0
+    });
+
+    let capturedTempDest = '';
+    let remuxStarted!: () => void;
+    const remuxStartedPromise = new Promise<void>((resolve) => {
+      remuxStarted = resolve;
+    });
+    let releaseRemux!: () => void;
+    const remuxWait = new Promise<void>((resolve) => {
+      releaseRemux = resolve;
+    });
+    vi.mocked(ffmpegMod.runFfmpegRemux).mockImplementation(async (args, _dur, onProgress) => {
+      capturedTempDest = args.at(-1) ?? '';
+      remuxStarted();
+      await remuxWait;
+      await fs.writeFile(capturedTempDest, 'remuxed');
+      onProgress(100, 0);
+    });
+
+    const { JobRunner, LockConflictError } = await import('../../src/server/services/jobRunner.ts');
+    const runner = new JobRunner(
+      loadConfig({
+        SERVER_ID: 'NAS',
+        CONFIG_DIR: configDir,
+        INPUT_DIR: inputDir,
+        OUTPUT_MOVIES_DIR: outputDir,
+        OUTPUT_DOCUMENTARIES_DIR: outputDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+        OUTPUT_TV_SHOWS_DIR: outputDir,
+        OUTPUT_ANIMATED_SERIES_DIR: outputDir
+      })
+    );
+    await runner.init();
+
+    const server = httpMod.createServer(createRequestHandler(runner, tmpDir));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+    const clientId = asClientId('c1:guard');
+    try {
+      const addr = server.address() as { readonly port: number };
+      const baseUrl = `http://127.0.0.1:${String(addr.port)}`;
+
+      runner.startScan(clientId);
+      for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const preflight = await runner.preflight(clientId, runner.getState().revision);
+      const resolutions: Record<string, 'overwrite'> = {};
+      for (const conflict of preflight.conflicts) {
+        resolutions[conflict.itemId] = 'overwrite';
+      }
+
+      // Simulate true TOCTOU overlap: create colliding file so a slow preflight enters
+      // probeMedia(), then remove collision so concurrent startJob() enters PROCESSING first.
+      const collidingDir = path.join(outputDir, 'Arrival (2016) {imdb-tt2543164}');
+      const collidingFile = path.join(collidingDir, 'Arrival (2016) {imdb-tt2543164}.mkv');
+      await fs.mkdir(collidingDir, { recursive: true });
+      await fs.writeFile(collidingFile, 'existing');
+      let releaseSlowProbe!: () => void;
+      const slowProbePromise = new Promise<void>((resolve) => {
+        releaseSlowProbe = resolve;
+      });
+      let slowProbeEntered!: () => void;
+      const slowProbeEnteredPromise = new Promise<void>((resolve) => {
+        slowProbeEntered = resolve;
+      });
+      vi.mocked(ffmpegMod.probeMedia).mockImplementationOnce(async () => {
+        slowProbeEntered();
+        await slowProbePromise;
+        return MOCK_PROBE;
+      });
+      const inFlightPreflight = runner.preflight(clientId, preflight.revision);
+      await slowProbeEnteredPromise;
+      await fs.rm(collidingFile, { force: true });
+
+      await runner.startJob(clientId, preflight.revision, resolutions);
+      await remuxStartedPromise;
+
+      releaseSlowProbe();
+      await expect(inFlightPreflight).rejects.toMatchObject({ code: 'JOB_IN_PROGRESS' });
+      expect(runner.getState().phase).toBe('PROCESSING');
+
+      expect(path.basename(capturedTempDest)).toMatch(/\.organizing\.nas\.[^.]+\.[^.]+\.tmp\.mkv$/);
+      expect(runner.getState().lockOwnerClientId).toBe(clientId);
+
+      // HTTP preflight during active job must fail with 409 JOB_IN_PROGRESS and preserve PROCESSING
+      const midPreflightRes = await fetch(`${baseUrl}/api/preflight`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': clientId, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision: runner.getState().revision })
+      });
+      expect(midPreflightRes.status).toBe(409);
+      const midPreflightJson = (await midPreflightRes.json()) as {
+        readonly error?: string;
+        readonly state?: { readonly phase: string };
+      };
+      expect(midPreflightJson.error).toBe('JOB_IN_PROGRESS');
+      expect(midPreflightJson.state?.phase).toBe('PROCESSING');
+
+      // Direct LockConflictError guard check
+      await expect(runner.preflight(clientId, runner.getState().revision)).rejects.toBeInstanceOf(
+        LockConflictError
+      );
+
+      // Drain works during PROCESSING
+      const drainRes = await fetch(`${baseUrl}/api/jobs/drain`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': clientId }
+      });
+      expect(drainRes.status).toBe(200);
+      const drainJson = (await drainRes.json()) as {
+        readonly activeJob?: { readonly drainRequested?: boolean };
+      };
+      expect(drainJson.activeJob?.drainRequested).toBe(true);
+
+      releaseRemux();
+      for (let i = 0; i < 60 && runner.getState().phase === 'PROCESSING'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    } finally {
+      releaseRemux();
+      server.close();
+      await runner.unlock(clientId, true).catch(() => undefined);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('tracks live remux and finalize_io step progress in ETA snapshots across retries before markItemCompleted', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-live-step-eta-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(path.join(inputDir, 'Arrival.2016.mkv'), 'video-bytes-payload');
+
+    const ffmpegMod = await import('../../src/server/services/media/ffmpegRunner.ts');
+    const fileMoverMod = await import('../../src/server/services/fileMover.ts');
+    vi.mocked(ffmpegMod.analyzeAudioVolume).mockResolvedValue({
+      streamOrder: 0,
+      meanVolumeDb: -20,
+      maxVolumeDb: -2,
+      suggestion: 'ok',
+      recommendedGainDb: 0
+    });
+
+    const runner = new JobRunner(
+      loadConfig({
+        INPUT_DIR: inputDir,
+        CONFIG_DIR: configDir,
+        OUTPUT_MOVIES_DIR: outputDir,
+        OUTPUT_DOCUMENTARIES_DIR: outputDir,
+        OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+        OUTPUT_TV_SHOWS_DIR: outputDir,
+        OUTPUT_ANIMATED_SERIES_DIR: outputDir
+      })
+    );
+
+    let midRemuxSnap: Awaited<ReturnType<JobRunner['getEtaSimulationSnapshot']>> | undefined;
+    let midFinalizeSnap: Awaited<ReturnType<JobRunner['getEtaSimulationSnapshot']>> | undefined;
+    let remuxCallCount = 0;
+
+    vi.mocked(ffmpegMod.runFfmpegRemux).mockImplementation(async (args, _dur, onProgress) => {
+      remuxCallCount += 1;
+      const outPath = args.at(-1) ?? '';
+      await fs.writeFile(outPath, 'remuxed-mkv');
+      if (remuxCallCount === 1) {
+        throw new Error('transient attempt 1 failure');
+      }
+      onProgress(50, 5);
+      midRemuxSnap = await runner.getEtaSimulationSnapshot();
+      onProgress(100, 0);
+    });
+
+    const cleanupSpy = vi
+      .spyOn(fileMoverMod, 'backupAndCleanupAfterJob')
+      .mockImplementation(async () => {
+        midFinalizeSnap = await runner.getEtaSimulationSnapshot();
+      });
+
+    try {
+      await runner.init();
+      const clientId = asClientId('c1:live-step');
+      runner.startScan(clientId);
+      for (let i = 0; i < 40 && runner.getState().phase !== 'READY'; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const preflight = await runner.preflight(clientId, runner.getState().revision);
+      const resolutions: Record<string, 'overwrite'> = {};
+      for (const conflict of preflight.conflicts) {
+        resolutions[conflict.itemId] = 'overwrite';
+      }
+      await runner.startJob(clientId, preflight.revision, resolutions);
+      for (let i = 0; i < 60 && runner.getState().phase === 'PROCESSING'; i += 1) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+
+      expect(remuxCallCount).toBe(2);
+      const remuxStep = midRemuxSnap?.slots
+        .flatMap((s) => s.items)
+        .flatMap((it) => it.steps)
+        .find((st) => st.workType === 'remux_copy');
+      expect(remuxStep?.completedUnits).toBeGreaterThan(0);
+      expect(midRemuxSnap?.weightedFraction).toBeGreaterThan(0);
+
+      const postRemuxStep = midFinalizeSnap?.slots
+        .flatMap((s) => s.items)
+        .flatMap((it) => it.steps)
+        .find((st) => st.workType === 'remux_copy');
+      const finalizeStep = midFinalizeSnap?.slots
+        .flatMap((s) => s.items)
+        .flatMap((it) => it.steps)
+        .find((st) => st.workType === 'finalize_io');
+      expect(postRemuxStep?.remainingUnits).toBe(0);
+      expect(finalizeStep?.completedUnits).toBeGreaterThan(0);
+    } finally {
+      cleanupSpy.mockRestore();
+      await runner.unlock(asClientId('c1:live-step'), true).catch(() => undefined);
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { OrganizerWorkflow, WorkflowStorePort } from '../composables/useOrganizerWorkflow.ts';
 import ConflictResolutionModal from './ConflictResolutionModal.vue';
+import EtaSimulationModal from './EtaSimulationModal.vue';
 import MetadataSearchModal from './MetadataSearchModal.vue';
 import SubtitlePickerModal from './SubtitlePickerModal.vue';
 import SubtitlePreviewModal from './SubtitlePreviewModal.vue';
@@ -60,5 +61,14 @@ defineProps<{
     @close="workflow.closeVerifierConflicts"
     @save="workflow.handleSaveVerifierConflicts"
     @confirm="workflow.handleConfirmVerifierConflicts"
+  />
+
+  <EtaSimulationModal
+    :open="workflow.etaSimulationOpen.value"
+    :loading="workflow.etaSimulationLoading.value"
+    :error="workflow.etaSimulationError.value"
+    :data="workflow.etaSimulationData.value"
+    @close="workflow.closeEtaSimulation"
+    @refresh="workflow.refreshEtaSimulation"
   />
 </template>

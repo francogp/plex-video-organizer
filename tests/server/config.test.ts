@@ -7,7 +7,9 @@ import { describe, expect, it } from 'vite-plus/test';
 import {
   buildMountPathsMap,
   loadConfig,
+  resolveHostKey,
   resolvePortableInputPath,
+  resolveServerTag,
   validateMountDirectories
 } from '../../src/server/config.ts';
 
@@ -128,5 +130,17 @@ describe('server config', () => {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it('derives deterministic host keys and filesystem-safe per-server temp tags', () => {
+    expect(resolveHostKey('NAS')).toBe('env:NAS');
+    expect(resolveHostKey('  dev  ')).toBe('env:dev');
+    expect(resolveHostKey(undefined)).toMatch(/^hw:[a-f0-9]{16}$/);
+
+    expect(resolveServerTag('NAS')).toBe('nas');
+    expect(resolveServerTag('  My_NAS.Server#1  ')).toBe('my_nas-server-1');
+    expect(resolveServerTag('***')).toMatch(/^srv-[a-f0-9]{8}$/);
+    expect(resolveServerTag(undefined)).toMatch(/^hw-[a-f0-9]{8}$/);
+    expect(resolveServerTag(undefined)).toBe(resolveServerTag('   '));
   });
 });

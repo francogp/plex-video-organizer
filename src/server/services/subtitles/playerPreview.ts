@@ -4,7 +4,13 @@ import type { OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import type { Readable } from 'node:stream';
 
 const HTTP_OK = 200;
-const SEEK_PRE_BUFFER_SECONDS = 2;
+const PREVIEW_MAX_HEIGHT = 480;
+const PREVIEW_GOP_FRAMES = 24;
+const PREVIEW_FAST_DECODE_GOP_FRAMES = 12;
+const PREVIEW_FRAG_DURATION_US = 500_000;
+const PREVIEW_CRF = 28;
+const PREVIEW_AUDIO_CHANNELS = 2;
+const PREVIEW_AUDIO_BITRATE = '96k';
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3600;
 const MS_PER_SECOND = 1000;
@@ -19,6 +25,7 @@ export interface PreviewStreamOptions {
   readonly sourcePath: string;
   readonly startSeconds?: number;
   readonly audioStreamOrder?: number;
+  readonly fastDecode?: boolean;
 }
 
 export interface PreviewSpawnedProcess {
@@ -66,32 +73,29 @@ function formatVttTimestamp(totalSeconds: number): string {
   return `${String(hours).padStart(PAD_TWO, '0')}:${String(minutes).padStart(PAD_TWO, '0')}:${String(seconds).padStart(PAD_TWO, '0')}.${String(millis).padStart(PAD_THREE, '0')}`;
 }
 
-/** Builds fast-seek, low-latency 720p H.264 + AAC fMP4 arguments for in-browser subtitle preview. */
+/** Builds low-latency 480p H.264 + AAC fMP4 arguments with optional low-CPU `fastDecode`. */
 function buildPreviewFfmpegArgs(options: PreviewStreamOptions): readonly string[] {
   const rawStart = options.startSeconds ?? 0;
   const startSeconds = Number.isFinite(rawStart) && rawStart > 0 ? rawStart : 0;
-  const args: string[] = ['-hide_banner', '-loglevel', 'error'];
+  const fastDecode = options.fastDecode === true;
+  const args: string[] = ['-hide_banner', '-loglevel', 'error', '-skip_loop_filter', 'all'];
 
-  let accurateSeek = 0;
-  if (startSeconds > 0) {
-    const fastSeek = Math.max(0, startSeconds - SEEK_PRE_BUFFER_SECONDS);
-    accurateSeek = startSeconds - fastSeek;
-    if (fastSeek > 0) {
-      args.push('-ss', formatFfmpegSeconds(fastSeek));
-    }
+  if (fastDecode) {
+    args.push('-skip_frame', 'noref');
   }
-
-  args.push('-i', options.sourcePath);
-  if (accurateSeek > 0) {
-    args.push('-ss', formatFfmpegSeconds(accurateSeek));
+  if (startSeconds > 0) {
+    args.push('-ss', formatFfmpegSeconds(startSeconds));
   }
 
   const audioMap =
     options.audioStreamOrder !== undefined && options.audioStreamOrder >= 0
       ? `0:a:${String(options.audioStreamOrder)}?`
       : '0:a:0?';
+  const gopFrames = fastDecode ? PREVIEW_FAST_DECODE_GOP_FRAMES : PREVIEW_GOP_FRAMES;
 
   args.push(
+    '-i',
+    options.sourcePath,
     '-map',
     '0:v:0',
     '-map',
@@ -104,21 +108,25 @@ function buildPreviewFfmpegArgs(options: PreviewStreamOptions): readonly string[
     '-tune',
     'zerolatency',
     '-crf',
-    '28',
+    String(PREVIEW_CRF),
+    '-g',
+    String(gopFrames),
     '-pix_fmt',
     'yuv420p',
     '-vf',
-    'scale=-2:min(720\\,ih)',
+    `scale=-2:min(${String(PREVIEW_MAX_HEIGHT)}\\,ih):flags=fast_bilinear`,
     '-c:a',
     'aac',
     '-ac',
-    '2',
+    String(PREVIEW_AUDIO_CHANNELS),
     '-b:a',
-    '96k',
+    PREVIEW_AUDIO_BITRATE,
     '-f',
     'mp4',
     '-movflags',
     'frag_keyframe+empty_moov+default_base_moof',
+    '-frag_duration',
+    String(PREVIEW_FRAG_DURATION_US),
     'pipe:1'
   );
 
@@ -193,7 +201,7 @@ function convertSrtToVtt(srtContent: string, offsetSeconds = 0): string {
 
 let activePreviewCleanup: (() => void) | null = null;
 
-/** Streams a real-time 720p H.264 + AAC fMP4 preview via `ffmpeg`, terminating `ffmpeg` on client abort. */
+/** Streams a real-time 480p H.264 + AAC fMP4 preview via `ffmpeg`, terminating `ffmpeg` on client abort. */
 export async function streamTranscodedPreview(
   options: PreviewStreamOptions,
   res: ServerResponse,

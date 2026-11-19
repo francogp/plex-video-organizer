@@ -194,8 +194,9 @@ async function handleQueueItemRoutes(
     const streamItemId = matchQueueItemRoute(pathname, '/stream');
     if (streamItemId) {
       const streamInfo = await runner.getItemPreviewStreamInfo(streamItemId);
+      const fastDecode = url.searchParams.get('fast') === '1';
       await streamTranscodedPreview(
-        { ...streamInfo, startSeconds: readPositiveQuerySeconds(url, 't') },
+        { ...streamInfo, startSeconds: readPositiveQuerySeconds(url, 't'), fastDecode },
         res
       );
       return true;
@@ -386,6 +387,11 @@ export function createRequestHandler(runner: JobRunner, distDir: string) {
     try {
       if (method === 'GET' && pathname === '/api/state') {
         sendJson(res, HTTP_OK, runner.getState());
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/api/eta/simulation') {
+        sendJson(res, HTTP_OK, await runner.getEtaSimulationSnapshot());
         return;
       }
 

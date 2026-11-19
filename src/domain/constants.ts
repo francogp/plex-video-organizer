@@ -281,7 +281,7 @@ export const METADATA_CANDIDATE_SOURCES = [
 export const CONFLICT_KINDS = ['existing-file', 'intra-batch'] as const;
 
 /** LAN concurrency/lock error codes. */
-export const LOCK_ERROR_CODES = ['LOCK_HELD', 'STALE_REVISION'] as const;
+export const LOCK_ERROR_CODES = ['LOCK_HELD', 'STALE_REVISION', 'JOB_IN_PROGRESS'] as const;
 
 /** Recognized video container extensions (lowercase, leading dot). */
 const VIDEO_EXTENSIONS = [
@@ -638,7 +638,7 @@ export const ETA_WORK_TYPES = [
   'remux_loudnorm',
   'remux_peak_gain',
   'remux_copy',
-  'move_exdev',
+  'finalize_io',
   'verifier_scan_fs',
   'verifier_scan_probe'
 ] as const;
@@ -652,6 +652,24 @@ export const ETA_WORK_UNIT_KINDS = ['audio_seconds', 'bytes', 'entries'] as cons
 /** Canonical ETA calibration and blending states surfaced to UI consumers. */
 export const ETA_STATES = ['calibrating', 'estimated', 'live_blended'] as const;
 
+/** Canonical hierarchical rate resolution provenance for ETA simulation diagnostics. */
+export const ETA_RATE_SOURCES = [
+  'live_blended',
+  'baseline',
+  'sibling_profile',
+  'related_work_type',
+  'cold_default'
+] as const;
+
+/** Canonical status of an item inside a simulated execution slot. */
+export const ETA_SIMULATED_ITEM_STATUSES = ['active', 'pending'] as const;
+
+/** Canonical execution mode reported in an ETA simulation snapshot. */
+export const ETA_SIMULATION_MODES = ['processing', 'scanning', 'preview'] as const;
+
+/** Canonical step identifiers tracked per queue item in ETA simulation. */
+export const ETA_STEP_KINDS = ['p1', 'remux', 'finalize'] as const;
+
 export const ETA_MAX_SAMPLES_PER_KEY = 1000;
 export const ETA_ORPHAN_HOST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const ETA_WARMUP_OUT_TIME_SEC = 5;
@@ -663,6 +681,36 @@ export const ETA_FLUSH_BATCH_SIZE = 10;
 export const ETA_TRIM_THRESHOLD = 10;
 export const ETA_TRIM_FRACTION = 0.1;
 export const ETA_SPIKE_CLAMP_FACTOR = 3;
+export const ETA_PEAK_FROM_LOUDNORM_FACTOR = 1.5;
+export const ETA_REMUX_LOUDNORM_FROM_P1_FACTOR = 1.4;
+export const ETA_COPY_FROM_IO_FACTOR = 2;
+export const ETA_MULTI_TRACK_CONTENTION_FACTOR = 0.85;
+export const ETA_FALLBACK_CALIBRATING_THRESHOLD = 0.5;
+
+const BYTES_PER_MIB = 1024 * 1024;
+const DEFAULT_REMUX_COPY_MIB_PER_SEC = 80;
+const DEFAULT_FINALIZE_IO_MIB_PER_SEC = 40;
+
+export const ETA_PROFILE_CHANNEL_FACTORS: Readonly<
+  Record<(typeof ETA_CHANNEL_PROFILES)[number], number>
+> = {
+  mono: 4,
+  stereo: 2.5,
+  surround: 1,
+  default: 1
+};
+
+export const ETA_DEFAULT_COLD_RATES: Readonly<Record<(typeof ETA_WORK_TYPES)[number], number>> = {
+  scan_probe: 3,
+  volumedetect: 30,
+  loudnorm_p1: 1,
+  remux_loudnorm: 1.4,
+  remux_peak_gain: 2.5,
+  remux_copy: DEFAULT_REMUX_COPY_MIB_PER_SEC * BYTES_PER_MIB,
+  finalize_io: DEFAULT_FINALIZE_IO_MIB_PER_SEC * BYTES_PER_MIB,
+  verifier_scan_fs: 3,
+  verifier_scan_probe: 3
+};
 
 /** Maximum number of server log entries retained in SQLite and UI state. */
 export const MAX_SERVER_LOG_ENTRIES = 500;

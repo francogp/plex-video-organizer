@@ -52,7 +52,24 @@ h3 {
 
 .vo-hint,
 .vo-muted {
+  margin: 0;
+  color: var(--vo-text-muted);
+  font-size: var(--vo-text-xs);
   text-wrap: pretty;
+}
+
+.vo-alert {
+  margin: 0;
+  padding: var(--vo-space-3);
+  border: 1px solid var(--vo-danger);
+  border-radius: var(--vo-radius-sm);
+  color: var(--vo-danger);
+  font-size: var(--vo-text-xs);
+}
+
+.vo-alert--warn {
+  color: var(--vo-warning);
+  border-color: var(--vo-warning);
 }
 
 body {
@@ -120,6 +137,12 @@ body {
   background-color: color-mix(in oklch, var(--vo-danger) 18%, transparent);
   color: var(--vo-danger);
   border-color: var(--vo-danger);
+}
+
+.vo-btn--active {
+  background-color: color-mix(in oklch, var(--vo-accent) 16%, var(--vo-surface));
+  color: var(--vo-accent);
+  border-color: var(--vo-border-highlight);
 }
 
 .vo-badge {

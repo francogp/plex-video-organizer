@@ -5,10 +5,10 @@ import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vite-plus/test';
 
-import { asClientId, asItemId } from '../../src/domain/types.ts';
+import { asClientId, asItemId, asVerifierEntryId } from '../../src/domain/types.ts';
 import { loadConfig } from '../../src/server/config.ts';
 import { createRequestHandler } from '../../src/server/routes.ts';
-import { JobRunner } from '../../src/server/services/jobRunner.ts';
+import { JobRunner, LockConflictError } from '../../src/server/services/jobRunner.ts';
 
 describe('JobRunner & HTTP routes', () => {
   it('enforces single-user LAN lock, 409 conflict, and forced unlock over HTTP', async () => {
@@ -184,6 +184,20 @@ describe('JobRunner & HTTP routes', () => {
 
       const spaRes = await fetch(`${baseUrl}/some/client/route`);
       expect(spaRes.status).toBe(200);
+
+      const etaSimRes = await fetch(`${baseUrl}/api/eta/simulation`);
+      expect(etaSimRes.status).toBe(200);
+      const etaSimJson = (await etaSimRes.json()) as {
+        readonly mode: string;
+        readonly workerCount: number;
+        readonly hostKey: string;
+        readonly etaState: string;
+        readonly slots: readonly unknown[];
+      };
+      expect(etaSimJson.mode).toBe('preview');
+      expect(etaSimJson.hostKey.length).toBeGreaterThan(0);
+      expect(etaSimJson.workerCount).toBe(1);
+      expect(Array.isArray(etaSimJson.slots)).toBe(true);
 
       const unknownApi = await fetch(`${baseUrl}/api/does-not-exist`);
       expect(unknownApi.status).toBe(404);
@@ -822,8 +836,42 @@ describe('JobRunner & HTTP routes', () => {
         skipped: false
       });
 
-      // Skip during SCANNING marks only that job and clears on next startScan
+      // Skip during SCANNING marks only that job and clears on next startScan;
+      // mutating routes during active run reject with 409 JOB_IN_PROGRESS without clobbering phase
       runner.startScan(asClientId('client-1:tab1'));
+      const blockedPreflightRes = await fetch(`${baseUrl}/api/preflight`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': 'client-1:tab1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision: runner.getState().revision })
+      });
+      expect(blockedPreflightRes.status).toBe(409);
+      const blockedPreflightJson = (await blockedPreflightRes.json()) as {
+        readonly error?: string;
+        readonly state?: { readonly phase: string };
+      };
+      expect(blockedPreflightJson.error).toBe('JOB_IN_PROGRESS');
+      expect(blockedPreflightJson.state?.phase).toBe('SCANNING');
+
+      const blockedPatchRes = await fetch(`${baseUrl}/api/queue/items/item-1`, {
+        method: 'PATCH',
+        headers: { 'X-Client-Id': 'client-1:tab1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision: runner.getState().revision, patch: { edition: 'X' } })
+      });
+      expect(blockedPatchRes.status).toBe(409);
+      expect(((await blockedPatchRes.json()) as { readonly error?: string }).error).toBe(
+        'JOB_IN_PROGRESS'
+      );
+
+      const blockedConflictsRes = await fetch(`${baseUrl}/api/conflict-resolutions`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': 'client-1:tab1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision: runner.getState().revision, conflictResolutions: {} })
+      });
+      expect(blockedConflictsRes.status).toBe(409);
+      expect(((await blockedConflictsRes.json()) as { readonly error?: string }).error).toBe(
+        'JOB_IN_PROGRESS'
+      );
+
       const activeSkipRes = await fetch(`${baseUrl}/api/scan/skip`, {
         method: 'POST',
         headers: { 'X-Client-Id': 'client-1:tab1', 'Content-Type': 'application/json' },
@@ -872,6 +920,237 @@ describe('JobRunner & HTTP routes', () => {
       expect(restored.preferredLanguages).toEqual(['spa', 'eng']);
       expect(restored.audioPreferredLanguages).toEqual(['jpn', 'eng']);
     } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('excludes conflict-ignored items from GET /api/eta/simulation preview', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-eta-ignore-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+
+    const makeItem = (id: string, fileName: string, title: string) => ({
+      id,
+      sourcePath: path.join(inputDir, fileName),
+      relativePath: fileName,
+      fileName,
+      mediaKind: 'movie',
+      category: 'movies',
+      include: true,
+      parsedTitle: title,
+      parsedYear: 2024,
+      tags: [],
+      episodeOrder: 'aired',
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 1200,
+        sizeBytes: 1_000_000,
+        bitrateBps: 1_000_000,
+        videoStreams: [],
+        audioStreams: [],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      trackSelection: {
+        audioTracks: [],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false
+      },
+      warnings: []
+    });
+
+    await fs.writeFile(
+      path.join(configDir, 'queue.json'),
+      JSON.stringify({
+        revision: 1,
+        items: [
+          makeItem('keep-1', 'Keep.2024.mkv', 'Keep'),
+          makeItem('ignore-2', 'Ignored.2024.mkv', 'Ignored')
+        ]
+      })
+    );
+
+    const cfg = loadConfig({
+      CONFIG_DIR: configDir,
+      INPUT_DIR: inputDir,
+      OUTPUT_MOVIES_DIR: outputDir,
+      OUTPUT_DOCUMENTARIES_DIR: outputDir,
+      OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+      OUTPUT_TV_SHOWS_DIR: outputDir,
+      OUTPUT_ANIMATED_SERIES_DIR: outputDir
+    });
+    const runner = new JobRunner(cfg);
+    await runner.init();
+    const server = http.createServer(createRequestHandler(runner, tmpDir));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+    try {
+      const addr = server.address() as { readonly port: number };
+      const baseUrl = `http://127.0.0.1:${String(addr.port)}`;
+
+      await runner.updateConflictResolutions(
+        asClientId('client-ignore:1'),
+        runner.getState().revision,
+        { [asItemId('ignore-2')]: 'ignore' }
+      );
+
+      const simRes = await fetch(`${baseUrl}/api/eta/simulation`);
+      expect(simRes.status).toBe(200);
+      const simJson = (await simRes.json()) as {
+        readonly slots: readonly { readonly items: readonly { readonly itemId: string }[] }[];
+      };
+      const simIds = simJson.slots.flatMap((slot) => slot.items.map((item) => item.itemId));
+      expect(simIds).toEqual(['keep-1']);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects concurrent queue and verifier operations with JOB_IN_PROGRESS (409)', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-mutex-'));
+    const configDir = path.join(tmpDir, 'config');
+    const inputDir = path.join(tmpDir, 'input');
+    const outputDir = path.join(tmpDir, 'output');
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.writeFile(path.join(inputDir, 'Movie.2024.mkv'), 'not-a-real-mkv');
+    await fs.mkdir(path.join(outputDir, 'bad.movie.name.2024'), { recursive: true });
+
+    const cfg = loadConfig({
+      CONFIG_DIR: configDir,
+      INPUT_DIR: inputDir,
+      OUTPUT_MOVIES_DIR: outputDir,
+      OUTPUT_DOCUMENTARIES_DIR: outputDir,
+      OUTPUT_ANIMATED_MOVIES_DIR: outputDir,
+      OUTPUT_TV_SHOWS_DIR: outputDir,
+      OUTPUT_ANIMATED_SERIES_DIR: outputDir
+    });
+    const runner = new JobRunner(cfg);
+    await runner.init();
+    const server = http.createServer(createRequestHandler(runner, tmpDir));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+    const clientId = asClientId('mutex-client:1');
+    const dummyEntryId = asVerifierEntryId('movies:bad.movie.name.2024');
+    const captureLockConflictCode = (action: () => unknown): string | undefined => {
+      try {
+        action();
+        return undefined;
+      } catch (err) {
+        if (err instanceof Error && err instanceof LockConflictError) {
+          return err.code;
+        }
+        throw err;
+      }
+    };
+    const captureAsyncLockConflictCode = async (
+      action: () => Promise<unknown>
+    ): Promise<string | undefined> => {
+      try {
+        await action();
+        return undefined;
+      } catch (err) {
+        if (err instanceof Error && err instanceof LockConflictError) {
+          return err.code;
+        }
+        throw err;
+      }
+    };
+
+    try {
+      const addr = server.address() as { readonly port: number };
+      const baseUrl = `http://127.0.0.1:${String(addr.port)}`;
+
+      // 1. While a queue scan is active, verifier scan/fix must reject with JOB_IN_PROGRESS
+      runner.startScan(clientId);
+      expect(captureLockConflictCode(() => runner.startVerifierScan(clientId))).toBe(
+        'JOB_IN_PROGRESS'
+      );
+
+      const httpVerifierScanDuringQueue = await fetch(`${baseUrl}/api/verifier/scan`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': clientId }
+      });
+      expect(httpVerifierScanDuringQueue.status).toBe(409);
+      const httpVerifierScanJson = (await httpVerifierScanDuringQueue.json()) as {
+        readonly error?: string;
+      };
+      expect(httpVerifierScanJson.error).toBe('JOB_IN_PROGRESS');
+
+      const httpVerifierFixDuringQueue = await fetch(`${baseUrl}/api/verifier/fix`, {
+        method: 'POST',
+        headers: { 'X-Client-Id': clientId, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entryIds: [dummyEntryId] })
+      });
+      expect(httpVerifierFixDuringQueue.status).toBe(409);
+      const httpVerifierFixJson = (await httpVerifierFixDuringQueue.json()) as {
+        readonly error?: string;
+      };
+      expect(httpVerifierFixJson.error).toBe('JOB_IN_PROGRESS');
+
+      await runner.unlock(clientId, true);
+
+      // 2. While verifier scan is running, starting another verifier op or queue scan must reject with JOB_IN_PROGRESS
+      runner.startVerifierScan(clientId);
+      expect(captureLockConflictCode(() => runner.startVerifierScan(clientId))).toBe(
+        'JOB_IN_PROGRESS'
+      );
+      expect(captureLockConflictCode(() => runner.startVerifierFix(clientId, [dummyEntryId]))).toBe(
+        'JOB_IN_PROGRESS'
+      );
+      expect(captureLockConflictCode(() => runner.startScan(clientId))).toBe('JOB_IN_PROGRESS');
+
+      const verifierRev = runner.getState().revision;
+      const [preflightCode, conflictCode, patchCode, bulkPatchCode, httpPreflightDuringVerifier] =
+        await Promise.all([
+          captureAsyncLockConflictCode(() => runner.preflight(clientId, verifierRev)),
+          captureAsyncLockConflictCode(() =>
+            runner.updateConflictResolutions(clientId, verifierRev, {})
+          ),
+          captureAsyncLockConflictCode(() =>
+            runner.patchItem(clientId, verifierRev, asItemId('x'), { include: false })
+          ),
+          captureAsyncLockConflictCode(() =>
+            runner.patchItemsBulk(clientId, verifierRev, [asItemId('x')], { include: false })
+          ),
+          fetch(`${baseUrl}/api/preflight`, {
+            method: 'POST',
+            headers: { 'X-Client-Id': clientId, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ revision: verifierRev })
+          })
+        ]);
+      expect(preflightCode).toBe('JOB_IN_PROGRESS');
+      expect(conflictCode).toBe('JOB_IN_PROGRESS');
+      expect(patchCode).toBe('JOB_IN_PROGRESS');
+      expect(bulkPatchCode).toBe('JOB_IN_PROGRESS');
+      expect(httpPreflightDuringVerifier.status).toBe(409);
+      const httpPreflightJson = (await httpPreflightDuringVerifier.json()) as {
+        readonly error?: string;
+      };
+      expect(httpPreflightJson.error).toBe('JOB_IN_PROGRESS');
+
+      for (let i = 0; i < 40 && runner.getState().verifier?.scanning; i += 1) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    } finally {
+      await runner.unlock(clientId, true);
+      for (let i = 0; i < 40; i += 1) {
+        const v = runner.getState().verifier;
+        if (!v?.scanning && !v?.fixing) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });

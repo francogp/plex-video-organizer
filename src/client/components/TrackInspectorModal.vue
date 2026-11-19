@@ -228,7 +228,7 @@ function handleSave(): void {
     </template>
 
     <template v-if="item && draft">
-      <div v-if="draft.promptReason" class="vo-alert">
+      <div v-if="draft.promptReason" class="vo-alert vo-alert--warn">
         {{ draft.promptReason }}
       </div>
 
@@ -668,19 +668,6 @@ function handleSave(): void {
   display: inline-flex;
   align-items: center;
   gap: var(--vo-space-2);
-}
-
-.vo-alert {
-  padding: var(--vo-space-3);
-  border: 1px solid var(--vo-warning);
-  border-radius: var(--vo-radius-sm);
-  color: var(--vo-warning);
-}
-
-.vo-hint {
-  margin: 0;
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
 }
 
 .vo-actions {

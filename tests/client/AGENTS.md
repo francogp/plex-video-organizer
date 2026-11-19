@@ -18,6 +18,7 @@ QA Engineering Agents.
 - [tableQueryCore.test.ts](tableQueryCore.test.ts): Table filtering, sorting, and query core tests.
 - [tableVirtualizer.test.ts](tableVirtualizer.test.ts): Virtualized table row measurement and windowing tests.
 - [organizerStore.test.ts](organizerStore.test.ts): Pinia store action and SSE event tests.
+- [StatusPanels.test.ts](StatusPanels.test.ts): AppHeader, OrganizerStatusBar, ParallelTasksList, and ServerLogsPanel tests.
 - [Modals.test.ts](Modals.test.ts): Modal components, `App.vue`, and `useGsapMotion` tests.
 
 ## Work Guidance

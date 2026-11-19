@@ -7,6 +7,7 @@ import { defineComponent, nextTick, ref } from 'vue';
 import App from '../../src/client/App.vue';
 import BaseModalShell from '../../src/client/components/BaseModalShell.vue';
 import ConflictResolutionModal from '../../src/client/components/ConflictResolutionModal.vue';
+import EtaSimulationModal from '../../src/client/components/EtaSimulationModal.vue';
 import MetadataSearchModal from '../../src/client/components/MetadataSearchModal.vue';
 import SubtitlePickerModal from '../../src/client/components/SubtitlePickerModal.vue';
 import SubtitlePreviewModal from '../../src/client/components/SubtitlePreviewModal.vue';
@@ -511,32 +512,50 @@ describe('Client Modals & App', () => {
   });
 
   it('SubtitlePreviewModal renders video and track URLs and emits close', async () => {
-    const wrapper = mount(SubtitlePreviewModal, {
-      props: {
-        item: {
-          id: asItemId('preview-1'),
-          sourcePath: '/data/input/Movie.mkv',
-          relativePath: 'Movie.mkv',
-          fileName: 'Movie.mkv',
-          mediaKind: 'movie',
-          category: 'movies',
-          parsedTitle: 'Movie',
-          include: true,
-          tags: [],
-          probe: { durationSeconds: 90, videoStreams: [], audioStreams: [], subtitleStreams: [] },
-          externalSubtitles: [],
-          candidates: [],
-          trackSelection: {
-            audioTracks: [],
-            subtitleMergeMode: 'keep-and-add',
-            includedInternalSubtitles: [],
-            externalSubtitleOrder: [],
-            needsUserPrompt: false
-          },
-          warnings: []
-        }
-      }
+    const firstItem: ScannedItem = {
+      id: asItemId('preview-1'),
+      sourcePath: '/data/input/Movie.mkv',
+      relativePath: 'Movie.mkv',
+      fileName: 'Movie.mkv',
+      mediaKind: 'movie',
+      category: 'movies',
+      parsedTitle: 'Movie',
+      include: true,
+      tags: [],
+      episodeOrder: 'aired',
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 90,
+        sizeBytes: 1_000_000,
+        bitrateBps: 2_000_000,
+        videoStreams: [],
+        audioStreams: [],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      trackSelection: {
+        audioTracks: [],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false
+      },
+      warnings: []
+    };
+    const activeItem = ref<ScannedItem>(firstItem);
+    const Host = defineComponent({
+      components: { SubtitlePreviewModal },
+      setup() {
+        const closeCount = ref(0);
+        const onClose = (): void => {
+          closeCount.value += 1;
+        };
+        return { activeItem, closeCount, onClose };
+      },
+      template: '<SubtitlePreviewModal :item="activeItem" @close="onClose" />'
     });
+    const wrapper = mount(Host);
 
     expect(wrapper.find('video').attributes('controls')).toBeUndefined();
     expect(wrapper.find('video').attributes('src')).toBe('/api/queue/items/preview-1/stream');
@@ -551,12 +570,45 @@ describe('Client Modals & App', () => {
     const jumpForwardBtn = wrapper.findAll('button').find((btn) => btn.text().includes('+30s'));
     expect(jumpForwardBtn).toBeDefined();
     await jumpForwardBtn!.trigger('click');
+    await wrapper.find('video').trigger('waiting');
     expect(wrapper.find('video').attributes('src')).toBe('/api/queue/items/preview-1/stream?t=30');
     expect(wrapper.find('track').attributes('src')).toBe(
       '/api/queue/items/preview-1/subtitles/preview.vtt?offset=30'
     );
+    expect(wrapper.find('.vo-preview-timeline__status').text()).toBe('Transcoding 480p + AAC...');
+
+    const fastBtn = wrapper.find('button[aria-label="Toggle fast low-CPU preview mode"]');
+    expect(fastBtn.exists()).toBe(true);
+    expect(fastBtn.attributes('aria-pressed')).toBe('false');
+
+    const videoEl = wrapper.find('video').element as HTMLVideoElement;
+    Object.defineProperty(videoEl, 'currentTime', { value: 12, configurable: true });
+    await wrapper.find('video').trigger('timeupdate');
+    await fastBtn.trigger('click');
+    await wrapper.find('video').trigger('waiting');
+
+    expect(fastBtn.attributes('aria-pressed')).toBe('true');
+    expect(wrapper.find('video').attributes('src')).toBe(
+      '/api/queue/items/preview-1/stream?t=42&fast=1'
+    );
+    expect(wrapper.find('track').attributes('src')).toBe(
+      '/api/queue/items/preview-1/subtitles/preview.vtt?offset=42'
+    );
+    expect(wrapper.find('.vo-preview-timeline__status').text()).toBe(
+      'Transcoding 480p Fast (Low CPU) + AAC...'
+    );
+
+    activeItem.value = {
+      ...firstItem,
+      id: asItemId('preview-2'),
+      fileName: 'Movie2.mkv'
+    };
+    await nextTick();
+    expect(fastBtn.attributes('aria-pressed')).toBe('false');
+    expect(wrapper.find('video').attributes('src')).toBe('/api/queue/items/preview-2/stream');
+
     await wrapper.find('button[aria-label="Close subtitle preview"]').trigger('click');
-    expect(wrapper.emitted('close')).toHaveLength(1);
+    expect(wrapper.vm.closeCount).toBe(1);
   });
 
   it('SubtitlePickerModal renders >5 candidates, filters by release, and emits download and close', async () => {
@@ -838,5 +890,224 @@ describe('Client Modals & App', () => {
     await toggle.trigger('click');
     expect(toggle.attributes('aria-expanded')).toBe('true');
     expect(wrapper.find('.vo-sub-list').exists()).toBe(true);
+  });
+
+  it('EtaSimulationModal renders slots, steps, collapsible rates, and emits refresh', async () => {
+    const wrapper = mount(EtaSimulationModal, {
+      props: {
+        open: true,
+        loading: false,
+        error: null,
+        data: {
+          generatedAtMs: new Date(2026, 10, 18, 22, 0, 0).getTime(),
+          hostKey: 'env:NAS',
+          mode: 'processing',
+          workerCount: 2,
+          etaSeconds: 3600,
+          etaState: 'live_blended',
+          weightedFraction: 0.75,
+          fallbackShare: 0.1,
+          rates: [
+            {
+              workType: 'loudnorm_p1',
+              profile: 'surround',
+              baselineRate: 0.88,
+              liveRate: 0.75,
+              effectiveRate: 1.5,
+              source: 'live_blended',
+              sampleCount: 40
+            },
+            {
+              workType: 'finalize_io',
+              profile: 'default',
+              baselineRate: 40 * 1024 * 1024,
+              effectiveRate: 40 * 1024 * 1024,
+              source: 'baseline',
+              sampleCount: 12
+            }
+          ],
+          slots: [
+            {
+              slotIndex: 0,
+              totalSeconds: 3600,
+              items: [
+                {
+                  itemId: asItemId('item-1'),
+                  fileName: 'Foundation.S03E05.mkv',
+                  status: 'active',
+                  totalSeconds: 4200,
+                  remainingSeconds: 3600,
+                  steps: [
+                    {
+                      workType: 'loudnorm_p1',
+                      profile: 'surround',
+                      totalUnits: 2000,
+                      completedUnits: 1000,
+                      remainingUnits: 1000,
+                      totalSeconds: 2000,
+                      remainingSeconds: 1000,
+                      rateUsed: 1,
+                      rateSource: 'live_blended'
+                    },
+                    {
+                      workType: 'remux_loudnorm',
+                      profile: 'surround',
+                      totalUnits: 2000,
+                      completedUnits: 0,
+                      remainingUnits: 2000,
+                      totalSeconds: 2000,
+                      remainingSeconds: 2000,
+                      rateUsed: 1,
+                      rateSource: 'baseline'
+                    },
+                    {
+                      workType: 'finalize_io',
+                      profile: 'default',
+                      totalUnits: 1_000_000,
+                      completedUnits: 0,
+                      remainingUnits: 1_000_000,
+                      totalSeconds: 600,
+                      remainingSeconds: 600,
+                      rateUsed: 1666,
+                      rateSource: 'baseline'
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              slotIndex: 1,
+              totalSeconds: 1800,
+              items: [
+                {
+                  itemId: asItemId('item-2'),
+                  fileName: 'The.Frame.mkv',
+                  status: 'pending',
+                  totalSeconds: 1800,
+                  remainingSeconds: 1800,
+                  steps: [
+                    {
+                      workType: 'remux_peak_gain',
+                      profile: 'stereo',
+                      totalUnits: 3600,
+                      completedUnits: 0,
+                      remainingUnits: 3600,
+                      totalSeconds: 1500,
+                      remainingSeconds: 1500,
+                      rateUsed: 2.4,
+                      rateSource: 'related_work_type'
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    });
+
+    const text = wrapper.text();
+    expect(text).toContain('1h 0m');
+    expect(text).toContain('Finish at 23:00');
+    expect(text).not.toContain('(23:00)');
+    expect(text).toContain('75%');
+    expect(text).toContain('Foundation.S03E05.mkv');
+    expect(text).toContain('Pass 1 (50%): 16m 40s');
+    expect(text).toContain('Peak: 25m 0s');
+    expect(text).toContain('The.Frame.mkv');
+    expect(wrapper.findAll('.vo-slot-row')).toHaveLength(2);
+    expect(wrapper.findAll('.vo-eta-item-row')).toHaveLength(2);
+    expect(wrapper.find('.vo-rate-row').exists()).toBe(false);
+
+    await wrapper.find('.vo-rates-toggle').trigger('click');
+    expect(wrapper.findAll('.vo-rate-row')).toHaveLength(2);
+
+    await wrapper.find('.vo-eta-refresh').trigger('click');
+    expect(wrapper.emitted('refresh')).toHaveLength(1);
+  });
+
+  it('EtaSimulationModal renders Calibrating... instead of No pending work when scanning or non-empty calibration has undefined ETA', () => {
+    const scanningWrapper = mount(EtaSimulationModal, {
+      props: {
+        open: true,
+        loading: false,
+        error: null,
+        data: {
+          generatedAtMs: new Date(2026, 10, 18, 22, 0, 0).getTime(),
+          hostKey: 'env:NAS',
+          mode: 'scanning',
+          workerCount: 2,
+          etaSeconds: undefined,
+          etaState: 'calibrating',
+          weightedFraction: 0.25,
+          fallbackShare: 0,
+          rates: [],
+          slots: [
+            {
+              slotIndex: 0,
+              totalSeconds: 120,
+              items: [
+                {
+                  itemId: asItemId('scan-stage-1'),
+                  fileName: 'scan_probe (default)',
+                  status: 'active',
+                  totalSeconds: 120,
+                  remainingSeconds: 120,
+                  steps: [
+                    {
+                      workType: 'loudnorm_p1',
+                      profile: 'default',
+                      totalUnits: 50,
+                      completedUnits: 50,
+                      remainingUnits: 0,
+                      totalSeconds: 50,
+                      remainingSeconds: 0,
+                      rateUsed: 1,
+                      rateSource: 'baseline'
+                    },
+                    {
+                      workType: 'scan_probe',
+                      profile: 'default',
+                      totalUnits: 10,
+                      completedUnits: 2,
+                      remainingUnits: 8,
+                      totalSeconds: 120,
+                      remainingSeconds: 120,
+                      rateUsed: 1,
+                      rateSource: 'baseline'
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    });
+    expect(scanningWrapper.text()).toContain('Calibrating...');
+    expect(scanningWrapper.text()).toContain('Pass 1 (100%)');
+    expect(scanningWrapper.text()).toContain('Probe (20%): 2m 0s');
+    expect(scanningWrapper.text()).not.toContain('No pending work');
+
+    const emptyPreviewWrapper = mount(EtaSimulationModal, {
+      props: {
+        open: true,
+        loading: false,
+        error: null,
+        data: {
+          generatedAtMs: new Date(2026, 10, 18, 22, 0, 0).getTime(),
+          hostKey: 'env:NAS',
+          mode: 'preview',
+          workerCount: 1,
+          etaSeconds: undefined,
+          etaState: 'calibrating',
+          weightedFraction: 0,
+          fallbackShare: 0,
+          rates: [],
+          slots: [{ slotIndex: 0, totalSeconds: 0, items: [] }]
+        }
+      }
+    });
+    expect(emptyPreviewWrapper.text()).toContain('No pending work');
   });
 });

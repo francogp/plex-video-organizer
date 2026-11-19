@@ -280,4 +280,43 @@ describe('scanCacheDb (node:sqlite)', () => {
       db.close();
     }
   });
+
+  it('returns typed ETA sample groups and ignores retired or unknown work types from legacy SQLite rows', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-eta-legacy-'));
+    const dbPath = path.join(tmpDir, 'plex-video-organizer.sqlite');
+    const db = await openScanCacheDb(tmpDir);
+    try {
+      db.recordEtaSamplesBatch([
+        {
+          hostKey: 'env:nas',
+          workType: 'finalize_io',
+          profile: 'default',
+          throughput: 40_000_000,
+          workUnits: 40_000_000,
+          durationMs: 1000
+        }
+      ]);
+      db.close();
+
+      const { DatabaseSync } = await import('node:sqlite');
+      const raw = new DatabaseSync(dbPath);
+      raw
+        .prepare(
+          'INSERT INTO eta_samples (host_key, work_type, profile, throughput, work_units, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run('env:nas', 'move_exdev', 'default', 25_000_000, 25_000_000, 1000, 1_700_000_000_000);
+      raw.close();
+
+      const reopened = await openScanCacheDb(tmpDir);
+      try {
+        expect(reopened.getAllEtaSamplesForHost('env:nas')).toEqual([
+          { workType: 'finalize_io', profile: 'default', samples: [40_000_000] }
+        ]);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,13 +1,38 @@
 import {
+  ETA_COPY_FROM_IO_FACTOR,
+  ETA_DEFAULT_COLD_RATES,
   ETA_EMA_ALPHA,
+  ETA_FALLBACK_CALIBRATING_THRESHOLD,
   ETA_LIVE_WEIGHT_MAX,
+  ETA_MULTI_TRACK_CONTENTION_FACTOR,
+  ETA_PEAK_FROM_LOUDNORM_FACTOR,
+  ETA_PROFILE_CHANNEL_FACTORS,
+  ETA_REMUX_LOUDNORM_FROM_P1_FACTOR,
   ETA_SPIKE_CLAMP_FACTOR,
   ETA_TRIM_FRACTION,
   ETA_TRIM_THRESHOLD,
   ETA_WARMUP_ELAPSED_SEC,
   ETA_WARMUP_OUT_TIME_SEC
 } from './constants.ts';
-import type { EtaChannelProfile, EtaState, EtaWorkType, EtaWorkUnitKind } from './types.ts';
+import {
+  asEtaStageId,
+  asEtaStepId,
+  type EtaChannelProfile,
+  type EtaRateDiagnostic,
+  type EtaRateSource,
+  type EtaSimulatedSlot,
+  type EtaSimulatedSlotItem,
+  type EtaSimulatedStep,
+  type EtaSimulationEntryId,
+  type EtaStageId,
+  type EtaState,
+  type EtaStepId,
+  type EtaStepKind,
+  type EtaWorkType,
+  type EtaWorkUnitKind,
+  type ItemId,
+  type JobRetryAttempt
+} from './types.ts';
 
 const WORK_UNIT_KIND_BY_TYPE: Readonly<Record<EtaWorkType, EtaWorkUnitKind>> = {
   scan_probe: 'entries',
@@ -16,25 +41,19 @@ const WORK_UNIT_KIND_BY_TYPE: Readonly<Record<EtaWorkType, EtaWorkUnitKind>> = {
   remux_loudnorm: 'audio_seconds',
   remux_peak_gain: 'audio_seconds',
   remux_copy: 'bytes',
-  move_exdev: 'bytes',
+  finalize_io: 'bytes',
   verifier_scan_fs: 'entries',
   verifier_scan_probe: 'entries'
 };
 
-export type EtaBucketKey = `${EtaWorkType}:${EtaChannelProfile}`;
+const SIBLING_PROFILE_PRIORITY: readonly EtaChannelProfile[] = [
+  'surround',
+  'stereo',
+  'mono',
+  'default'
+];
 
-export interface EtaBucketState {
-  readonly workType: EtaWorkType;
-  readonly profile: EtaChannelProfile;
-  readonly totalUnits: number;
-  readonly completedUnits: number;
-  readonly inFlightUnits: number;
-  readonly baselineRate: number | undefined;
-  readonly liveRate: number | undefined;
-  readonly liveSamples: number;
-  readonly poolConcurrency: number;
-  readonly activeOrPendingTasks: number;
-}
+export type EtaBucketKey = `${EtaWorkType}:${EtaChannelProfile}`;
 
 export interface EtaFfmpegSpeedContext {
   readonly mediaDurationSec?: number;
@@ -42,15 +61,63 @@ export interface EtaFfmpegSpeedContext {
   readonly trackCount?: number;
 }
 
-export interface EtaComputationInput {
-  readonly buckets: readonly EtaBucketState[];
-  readonly activeWorkType?: EtaWorkType;
-  readonly pendingFollowupStages: number;
-}
-
 export interface EtaEstimate {
   readonly etaSeconds?: number;
   readonly etaState: EtaState;
+  readonly weightedFraction?: number;
+}
+
+export interface EtaRateEntry {
+  readonly workType: EtaWorkType;
+  readonly profile: EtaChannelProfile;
+  readonly baselineRate?: number;
+  readonly baselineSampleCount: number;
+  readonly liveRate?: number;
+  readonly liveSamples: number;
+  readonly observedFraction: number;
+}
+
+export interface EtaResolvedRate {
+  readonly rate: number;
+  readonly source: EtaRateSource;
+  readonly baselineRate?: number;
+  readonly liveRate?: number;
+  readonly sampleCount: number;
+}
+
+export interface EtaQueueStepState {
+  readonly stepId: EtaStepId;
+  readonly workType: EtaWorkType;
+  readonly profile: EtaChannelProfile;
+  readonly totalUnits: number;
+  readonly completedUnits: number;
+  readonly inFlightUnits: number;
+  readonly parallelTracks: number;
+}
+
+export interface EtaQueueItemState {
+  readonly itemId: EtaSimulationEntryId;
+  readonly fileName: string;
+  readonly activeSlot?: number;
+  readonly completed: boolean;
+  readonly skipped: boolean;
+  readonly steps: readonly EtaQueueStepState[];
+}
+
+export interface EtaQueueComputationInput {
+  readonly items: readonly EtaQueueItemState[];
+  readonly workerCount: number;
+  readonly rateIndex: ReadonlyMap<EtaBucketKey, EtaRateEntry>;
+  readonly pendingFollowupStages?: number;
+}
+
+export interface EtaQueueComputationResult {
+  readonly etaSeconds?: number;
+  readonly etaState: EtaState;
+  readonly weightedFraction: number;
+  readonly fallbackShare: number;
+  readonly slots: readonly EtaSimulatedSlot[];
+  readonly rates: readonly EtaRateDiagnostic[];
 }
 
 /** Builds the canonical `${workType}:${profile}` bucket key. */
@@ -58,7 +125,51 @@ export function buildEtaBucketKey(workType: EtaWorkType, profile: EtaChannelProf
   return `${workType}:${profile}`;
 }
 
-function getWorkUnitKind(workType: EtaWorkType): EtaWorkUnitKind {
+/** Builds a branded `EtaStepId` invariant across item retry attempts. */
+export function buildEtaStepId(kind: EtaStepKind, itemId: ItemId): EtaStepId {
+  return asEtaStepId(`${kind}:${itemId}`);
+}
+
+/** Builds an attempt-scoped runtime task ID distinct from `EtaStepId`. */
+export function buildEtaAttemptTaskId(
+  kind: EtaStepKind,
+  itemId: ItemId,
+  attempt: JobRetryAttempt,
+  streamOrder?: number
+): string {
+  return streamOrder !== undefined
+    ? `${kind}:${itemId}:a${String(attempt)}:${String(streamOrder)}`
+    : `${kind}:${itemId}:a${String(attempt)}`;
+}
+
+/** Builds a branded `EtaStageId` for stage-based Scan/Verifier slices. */
+export function buildEtaStageId(
+  workType: EtaWorkType,
+  profile: EtaChannelProfile,
+  sliceIndex = 0
+): EtaStageId {
+  return asEtaStageId(
+    sliceIndex > 0
+      ? `stage:${workType}:${profile}:${String(sliceIndex)}`
+      : `stage:${workType}:${profile}`
+  );
+}
+
+/** Builds a branded `EtaStepId` for stage-based Scan/Verifier slices. */
+export function buildEtaStageStepId(
+  workType: EtaWorkType,
+  profile: EtaChannelProfile,
+  sliceIndex = 0
+): EtaStepId {
+  return asEtaStepId(
+    sliceIndex > 0
+      ? `stage-step:${workType}:${profile}:${String(sliceIndex)}`
+      : `stage-step:${workType}:${profile}`
+  );
+}
+
+/** Returns the canonical measurement unit kind for an `EtaWorkType`. */
+export function getWorkUnitKind(workType: EtaWorkType): EtaWorkUnitKind {
   return WORK_UNIT_KIND_BY_TYPE[workType];
 }
 
@@ -138,6 +249,145 @@ function blendRates(
   return liveWeight * validLive + (1 - liveWeight) * validBaseline;
 }
 
+function findWorkTypeEntry(
+  workType: EtaWorkType,
+  preferredProfile: EtaChannelProfile,
+  rateIndex: ReadonlyMap<EtaBucketKey, EtaRateEntry>
+): { readonly entry: EtaRateEntry; readonly rate: number; readonly exact: boolean } | undefined {
+  const exactEntry = rateIndex.get(buildEtaBucketKey(workType, preferredProfile));
+  if (exactEntry) {
+    const exactRate = blendRates(
+      exactEntry.baselineRate,
+      exactEntry.liveRate,
+      exactEntry.observedFraction
+    );
+    if (exactRate !== undefined) {
+      return { entry: exactEntry, rate: exactRate, exact: true };
+    }
+  }
+  for (const candidateProfile of SIBLING_PROFILE_PRIORITY) {
+    if (candidateProfile === preferredProfile) {
+      continue;
+    }
+    const candidate = rateIndex.get(buildEtaBucketKey(workType, candidateProfile));
+    if (!candidate) {
+      continue;
+    }
+    const rate = blendRates(candidate.baselineRate, candidate.liveRate, candidate.observedFraction);
+    if (rate !== undefined) {
+      return { entry: candidate, rate, exact: false };
+    }
+  }
+  return undefined;
+}
+
+function scaleRateBetweenProfiles(
+  workType: EtaWorkType,
+  rate: number,
+  fromProfile: EtaChannelProfile,
+  toProfile: EtaChannelProfile
+): number {
+  if (getWorkUnitKind(workType) !== 'audio_seconds' || fromProfile === toProfile) {
+    return rate;
+  }
+  const fromFactor = ETA_PROFILE_CHANNEL_FACTORS[fromProfile];
+  const toFactor = ETA_PROFILE_CHANNEL_FACTORS[toProfile];
+  return rate * (toFactor / fromFactor);
+}
+
+function resolveRelatedWorkTypeRate(
+  workType: EtaWorkType,
+  profile: EtaChannelProfile,
+  rateIndex: ReadonlyMap<EtaBucketKey, EtaRateEntry>
+): EtaResolvedRate | undefined {
+  let relation: { readonly targetType: EtaWorkType; readonly factor: number } | undefined;
+  switch (workType) {
+    case 'remux_peak_gain':
+      relation = { targetType: 'remux_loudnorm', factor: ETA_PEAK_FROM_LOUDNORM_FACTOR };
+      break;
+    case 'remux_loudnorm':
+      relation = { targetType: 'loudnorm_p1', factor: ETA_REMUX_LOUDNORM_FROM_P1_FACTOR };
+      break;
+    case 'loudnorm_p1':
+      relation = { targetType: 'remux_loudnorm', factor: 1 / ETA_REMUX_LOUDNORM_FROM_P1_FACTOR };
+      break;
+    case 'remux_copy':
+      relation = { targetType: 'finalize_io', factor: ETA_COPY_FROM_IO_FACTOR };
+      break;
+    case 'finalize_io':
+      relation = { targetType: 'remux_copy', factor: 1 / ETA_COPY_FROM_IO_FACTOR };
+      break;
+    case 'verifier_scan_probe':
+      relation = { targetType: 'scan_probe', factor: 1 };
+      break;
+    case 'scan_probe':
+      relation = { targetType: 'verifier_scan_probe', factor: 1 };
+      break;
+    default:
+      relation = undefined;
+  }
+  if (!relation) {
+    return undefined;
+  }
+  const found = findWorkTypeEntry(relation.targetType, profile, rateIndex);
+  if (!found) {
+    return undefined;
+  }
+  const scaled =
+    scaleRateBetweenProfiles(relation.targetType, found.rate, found.entry.profile, profile) *
+    relation.factor;
+  return {
+    rate: scaled,
+    source: 'related_work_type',
+    baselineRate: found.entry.baselineRate,
+    liveRate: found.entry.liveRate,
+    sampleCount: found.entry.baselineSampleCount + found.entry.liveSamples
+  };
+}
+
+/**
+ * Resolves a rate for `(workType, profile)` via 4-tier hierarchy:
+ * 1) exact match (`live_blended`/`baseline`), 2) sibling channel profile,
+ * 3) related work type on same host, 4) cold default rate.
+ */
+function resolveHierarchicalRate(
+  workType: EtaWorkType,
+  profile: EtaChannelProfile,
+  rateIndex: ReadonlyMap<EtaBucketKey, EtaRateEntry>
+): EtaResolvedRate {
+  const direct = findWorkTypeEntry(workType, profile, rateIndex);
+  if (direct) {
+    if (direct.exact) {
+      return {
+        rate: direct.rate,
+        source: direct.entry.liveSamples > 0 ? 'live_blended' : 'baseline',
+        baselineRate: direct.entry.baselineRate,
+        liveRate: direct.entry.liveRate,
+        sampleCount: direct.entry.baselineSampleCount + direct.entry.liveSamples
+      };
+    }
+    return {
+      rate: scaleRateBetweenProfiles(workType, direct.rate, direct.entry.profile, profile),
+      source: 'sibling_profile',
+      baselineRate: direct.entry.baselineRate,
+      liveRate: direct.entry.liveRate,
+      sampleCount: direct.entry.baselineSampleCount + direct.entry.liveSamples
+    };
+  }
+
+  const related = resolveRelatedWorkTypeRate(workType, profile, rateIndex);
+  if (related) {
+    return related;
+  }
+
+  const coldBase = ETA_DEFAULT_COLD_RATES[workType];
+  const coldRate =
+    getWorkUnitKind(workType) === 'audio_seconds'
+      ? scaleRateBetweenProfiles(workType, coldBase, 'surround', profile)
+      : coldBase;
+  return { rate: coldRate, source: 'cold_default', sampleCount: 0 };
+}
+
 /** Checks whether an `ffmpeg` progress tick passes the warm-up threshold for live EMA ingestion. */
 export function isFfmpegSpeedWarm(
   speed: number | undefined,
@@ -180,82 +430,211 @@ export function convertFfmpegSpeedToRate(
   return undefined;
 }
 
-function resolveBucketRemainingUnits(bucket: EtaBucketState): number {
-  return Math.max(0, bucket.totalUnits - bucket.completedUnits - bucket.inFlightUnits);
+function resolveStepEffectiveRate(step: EtaQueueStepState, baseRate: number): number {
+  if (step.workType === 'loudnorm_p1' && step.parallelTracks > 1) {
+    return baseRate * step.parallelTracks * ETA_MULTI_TRACK_CONTENTION_FACTOR;
+  }
+  return baseRate;
 }
 
-function resolveBucketEffectiveRate(bucket: EtaBucketState): number | undefined {
-  const observedUnits = bucket.completedUnits + bucket.inFlightUnits;
-  const observedFraction = bucket.totalUnits > 0 ? observedUnits / bucket.totalUnits : 0;
-  const blended = blendRates(bucket.baselineRate, bucket.liveRate, observedFraction);
-  if (blended === undefined || blended <= 0) {
-    return undefined;
-  }
-  if (bucket.workType === 'move_exdev') {
-    return blended;
-  }
-  const effectiveConcurrency = Math.max(
-    1,
-    Math.min(bucket.poolConcurrency, bucket.activeOrPendingTasks)
-  );
-  return blended * effectiveConcurrency;
+interface SimulatedItemAccumulator {
+  readonly item: EtaQueueItemState;
+  readonly evaluatedSteps: EtaSimulatedStep[];
+  readonly totalSeconds: number;
+  readonly remainingSeconds: number;
+  readonly coldRemainingSeconds: number;
+  readonly nonDirectRemainingSeconds: number;
 }
 
-/** Computes stage-aware remaining seconds and calibration state across all pending buckets. */
-export function computeStageAwareEta(input: EtaComputationInput): EtaEstimate {
-  const pendingBuckets = input.buckets.filter((b) => resolveBucketRemainingUnits(b) > 0);
-  if (pendingBuckets.length === 0) {
-    return {
-      etaSeconds: input.pendingFollowupStages > 0 ? undefined : 0,
-      etaState: input.pendingFollowupStages > 0 ? 'calibrating' : 'live_blended'
-    };
-  }
-  if (input.pendingFollowupStages > 0) {
-    return { etaSeconds: undefined, etaState: 'calibrating' };
-  }
-
+function evaluateQueueItem(
+  item: EtaQueueItemState,
+  rateIndex: ReadonlyMap<EtaBucketKey, EtaRateEntry>,
+  diagnostics: Map<EtaBucketKey, EtaRateDiagnostic>
+): SimulatedItemAccumulator {
+  const evaluatedSteps: EtaSimulatedStep[] = [];
   let totalSeconds = 0;
-  let activeStageSeconds = 0;
-  let hasAnyLiveSamples = false;
-  let missingAnyRate = false;
-  let activeStageMissingRate = false;
-  let hasActiveStageWork = false;
+  let remainingSeconds = 0;
+  let coldRemainingSeconds = 0;
+  let nonDirectRemainingSeconds = 0;
 
-  for (const bucket of pendingBuckets) {
-    if (bucket.liveSamples > 0) {
-      hasAnyLiveSamples = true;
-    }
-    const remaining = resolveBucketRemainingUnits(bucket);
-    const rate = resolveBucketEffectiveRate(bucket);
-    const isActive = input.activeWorkType !== undefined && bucket.workType === input.activeWorkType;
-    if (isActive) {
-      hasActiveStageWork = true;
-    }
-    if (rate === undefined) {
-      missingAnyRate = true;
-      if (isActive) {
-        activeStageMissingRate = true;
-      }
-      continue;
-    }
-    const sec = remaining / rate;
-    totalSeconds += sec;
-    if (isActive) {
-      activeStageSeconds += sec;
-    }
-  }
+  for (const step of item.steps) {
+    const key = buildEtaBucketKey(step.workType, step.profile);
+    const resolved = resolveHierarchicalRate(step.workType, step.profile, rateIndex);
+    const effectiveRate = resolveStepEffectiveRate(step, resolved.rate);
 
-  if (missingAnyRate) {
-    const canShowStageEta = hasActiveStageWork && !activeStageMissingRate;
-    return {
-      etaSeconds: canShowStageEta ? Math.max(0, Math.round(activeStageSeconds)) : undefined,
-      etaState: 'calibrating'
-    };
+    if (!diagnostics.has(key)) {
+      diagnostics.set(key, {
+        workType: step.workType,
+        profile: step.profile,
+        baselineRate: resolved.baselineRate,
+        liveRate: resolved.liveRate,
+        effectiveRate: resolved.rate,
+        source: resolved.source,
+        sampleCount: resolved.sampleCount
+      });
+    }
+
+    const stepTotalSec = step.totalUnits > 0 ? step.totalUnits / effectiveRate : 0;
+    const completedUnits = item.completed
+      ? step.totalUnits
+      : Math.min(step.totalUnits, Math.max(0, step.completedUnits + step.inFlightUnits));
+    const remainingUnits = item.completed ? 0 : Math.max(0, step.totalUnits - completedUnits);
+    const stepRemSec = remainingUnits > 0 ? remainingUnits / effectiveRate : 0;
+
+    totalSeconds += stepTotalSec;
+    remainingSeconds += stepRemSec;
+    if (resolved.source === 'cold_default') {
+      coldRemainingSeconds += stepRemSec;
+    }
+    if (resolved.source !== 'live_blended' && resolved.source !== 'baseline') {
+      nonDirectRemainingSeconds += stepRemSec;
+    }
+
+    evaluatedSteps.push({
+      workType: step.workType,
+      profile: step.profile,
+      totalUnits: step.totalUnits,
+      completedUnits,
+      remainingUnits,
+      totalSeconds: stepTotalSec,
+      remainingSeconds: stepRemSec,
+      rateUsed: effectiveRate,
+      rateSource: resolved.source
+    });
   }
 
   return {
-    etaSeconds: Math.max(0, Math.round(totalSeconds)),
-    etaState: hasAnyLiveSamples ? 'live_blended' : 'estimated'
+    item,
+    evaluatedSteps,
+    totalSeconds,
+    remainingSeconds,
+    coldRemainingSeconds,
+    nonDirectRemainingSeconds
+  };
+}
+
+function assignItemToSlot(
+  slot: { totalSeconds: number; items: EtaSimulatedSlotItem[] },
+  evaluated: SimulatedItemAccumulator,
+  status: EtaSimulatedSlotItem['status']
+): void {
+  slot.totalSeconds += evaluated.remainingSeconds;
+  slot.items.push({
+    itemId: evaluated.item.itemId,
+    fileName: evaluated.item.fileName,
+    status,
+    totalSeconds: evaluated.totalSeconds,
+    remainingSeconds: evaluated.remainingSeconds,
+    steps: evaluated.evaluatedSteps
+  });
+}
+
+/**
+ * Simulates the entire known queue item-by-item and step-by-step across `workerCount`
+ * parallel slots, returning makespan ETA, time-weighted progress fraction, and slot schedules.
+ */
+export function computeQueueEta(input: EtaQueueComputationInput): EtaQueueComputationResult {
+  const workerCount = Math.max(1, Math.floor(input.workerCount));
+  const slotBuckets: Array<{ totalSeconds: number; items: EtaSimulatedSlotItem[] }> = Array.from(
+    { length: workerCount },
+    () => ({ totalSeconds: 0, items: [] })
+  );
+  const diagnostics = new Map<EtaBucketKey, EtaRateDiagnostic>();
+
+  let totalWorkSeconds = 0;
+  let completedWorkSeconds = 0;
+  let remainingWorkSeconds = 0;
+  let coldRemainingSeconds = 0;
+  let nonDirectRemainingSeconds = 0;
+
+  const activeItems: SimulatedItemAccumulator[] = [];
+  const pendingItems: SimulatedItemAccumulator[] = [];
+
+  for (const item of input.items) {
+    if (item.skipped) {
+      continue;
+    }
+    const evaluated = evaluateQueueItem(item, input.rateIndex, diagnostics);
+    totalWorkSeconds += evaluated.totalSeconds;
+    completedWorkSeconds += Math.max(0, evaluated.totalSeconds - evaluated.remainingSeconds);
+
+    if (item.completed || evaluated.remainingSeconds <= 0) {
+      continue;
+    }
+    remainingWorkSeconds += evaluated.remainingSeconds;
+    coldRemainingSeconds += evaluated.coldRemainingSeconds;
+    nonDirectRemainingSeconds += evaluated.nonDirectRemainingSeconds;
+
+    if (item.activeSlot !== undefined && item.activeSlot >= 0 && item.activeSlot < workerCount) {
+      activeItems.push(evaluated);
+    } else {
+      pendingItems.push(evaluated);
+    }
+  }
+
+  for (const active of activeItems) {
+    assignItemToSlot(slotBuckets[active.item.activeSlot!]!, active, 'active');
+  }
+
+  for (const pending of pendingItems) {
+    let target = slotBuckets[0]!;
+    for (const candidate of slotBuckets) {
+      if (candidate.totalSeconds < target.totalSeconds) {
+        target = candidate;
+      }
+    }
+    assignItemToSlot(target, pending, 'pending');
+  }
+
+  const maxSlotSeconds = slotBuckets.reduce((max, s) => Math.max(max, s.totalSeconds), 0);
+  const weightedFraction =
+    totalWorkSeconds > 0 ? Math.min(1, Math.max(0, completedWorkSeconds / totalWorkSeconds)) : 0;
+  const fallbackShare =
+    remainingWorkSeconds > 0 ? nonDirectRemainingSeconds / remainingWorkSeconds : 0;
+  const coldShare = remainingWorkSeconds > 0 ? coldRemainingSeconds / remainingWorkSeconds : 0;
+
+  let hasAnyLiveSamples = false;
+  for (const entry of input.rateIndex.values()) {
+    if (entry.liveSamples > 0) {
+      hasAnyLiveSamples = true;
+      break;
+    }
+  }
+
+  let etaSeconds: number | undefined;
+  let etaState: EtaState;
+  if ((input.pendingFollowupStages ?? 0) > 0 || totalWorkSeconds <= 0) {
+    etaSeconds = undefined;
+    etaState = 'calibrating';
+  } else {
+    etaSeconds = Math.max(0, Math.round(maxSlotSeconds));
+    if (remainingWorkSeconds <= 0) {
+      etaState = 'live_blended';
+    } else if (coldShare >= ETA_FALLBACK_CALIBRATING_THRESHOLD) {
+      etaState = 'calibrating';
+    } else if (hasAnyLiveSamples) {
+      etaState = 'live_blended';
+    } else {
+      etaState = 'estimated';
+    }
+  }
+
+  const slots: EtaSimulatedSlot[] = slotBuckets.map((slot, slotIndex) => ({
+    slotIndex,
+    totalSeconds: slot.totalSeconds,
+    items: slot.items
+  }));
+  const rates = [...diagnostics.values()].toSorted((a, b) =>
+    `${a.workType}:${a.profile}`.localeCompare(`${b.workType}:${b.profile}`)
+  );
+
+  return {
+    etaSeconds,
+    etaState,
+    weightedFraction,
+    fallbackShare,
+    slots,
+    rates
   };
 }
 

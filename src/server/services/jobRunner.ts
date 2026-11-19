@@ -21,6 +21,7 @@ import {
   type ClientId,
   type ConflictDecision,
   type EpisodeOrderMode,
+  type EtaSimulationSnapshot,
   type ExternalSubtitleFile,
   type ItemId,
   type ItemPatch,
@@ -42,10 +43,19 @@ import {
   type VerifierEntryId,
   type VerifierState
 } from '../../domain/types.ts';
-import { buildMountPathsMap, resolvePortableInputPath, type AppConfig } from '../config.ts';
+import {
+  buildMountPathsMap,
+  resolvePortableInputPath,
+  resolveServerTag,
+  type AppConfig
+} from '../config.ts';
 import { EtaPredictor } from './etaPredictor.ts';
 import { cleanupOrphanTempFiles } from './fileMover.ts';
-import { executeMoveJob } from './jobExecutionService.ts';
+import {
+  buildIdleEtaSimulationSnapshot,
+  executeMoveJob,
+  selectProcessableQueueItems
+} from './jobExecutionService.ts';
 import { detectFfmpegVersion, probeMedia } from './media/ffmpegRunner.ts';
 import { configureMetadataCache } from './metadata/metadataCache.ts';
 import { runPreflightCheck, type PreflightReport } from './preflight.ts';
@@ -136,6 +146,7 @@ export class JobRunner {
   readonly #autoDownloadSubtitles: boolean;
   readonly #searchSubtitles: typeof searchSpanishSubtitlesForItem;
   readonly #downloadSubtitle: typeof downloadSubtitleCandidateForItem;
+  readonly #serverTag: string;
 
   public constructor(
     config: AppConfig,
@@ -146,6 +157,7 @@ export class JobRunner {
     }
   ) {
     this.#config = config;
+    this.#serverTag = resolveServerTag(config.serverId);
     this.#autoDownloadSubtitles =
       options?.autoDownloadSubtitles ?? process.env['VITEST'] !== 'true';
     this.#searchSubtitles = options?.searchSubtitles ?? searchSpanishSubtitlesForItem;
@@ -161,7 +173,7 @@ export class JobRunner {
   };
 
   public async init(): Promise<void> {
-    await cleanupOrphanTempFiles(this.#config.inputDir);
+    await cleanupOrphanTempFiles(this.#config.inputDir, { serverTag: this.#serverTag });
     await configureMetadataCache(this.#config.configDir, this.#emitFallbackWarningOnce);
 
     const db = await openScanCacheDb(
@@ -234,6 +246,21 @@ export class JobRunner {
     };
   }
 
+  /** Returns live or pre-flight ETA simulation data across all parallel slots and pending items. */
+  public async getEtaSimulationSnapshot(): Promise<EtaSimulationSnapshot> {
+    if (this.#activeEtaPredictor) {
+      const mode = this.#phase === 'SCANNING' ? 'scanning' : 'processing';
+      return this.#activeEtaPredictor.getSimulationSnapshot(mode);
+    }
+    return buildIdleEtaSimulationSnapshot({
+      configDir: this.#config.configDir,
+      serverId: this.#config.serverId,
+      items: this.#items,
+      conflictResolutions: this.#conflictResolutions,
+      onDbFallbackWarning: this.#emitFallbackWarningOnce
+    });
+  }
+
   public async updatePreferences(input: {
     readonly preferredLanguages?: unknown;
     readonly audioPreferredLanguages?: unknown;
@@ -257,7 +284,7 @@ export class JobRunner {
         AudioLanguageCodeSchema
       );
 
-      if (this.#items.length > 0) {
+      if (!this.#isActiveRun && this.#items.length > 0) {
         let updatedAny = false;
         this.#items = this.#items.map((item) => {
           const stem = path.basename(item.fileName, path.extname(item.fileName));
@@ -396,7 +423,7 @@ export class JobRunner {
   ): Promise<OrganizerStatePayload> {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    this.#assertRevision(revision);
+    this.#assertIdleRevision(revision);
 
     this.#conflictResolutions = sanitizeConflictResolutions(resolutions);
     this.#revision += 1;
@@ -432,6 +459,31 @@ export class JobRunner {
     this.#revision += 1;
     await this.#persistQueue();
     this.#emitState();
+  }
+
+  get #isActiveRun(): boolean {
+    return this.#phase === 'SCANNING' || this.#phase === 'PROCESSING' || this.#activeJob !== null;
+  }
+
+  #assertNoActiveJob(): void {
+    if (this.#isActiveRun) {
+      throw new LockConflictError(
+        'JOB_IN_PROGRESS',
+        `Operation already in progress (${this.#phase})`
+      );
+    }
+  }
+
+  #assertVerifierIdle(): void {
+    if (this.#verifier.scanning || this.#verifier.fixing) {
+      throw new LockConflictError('JOB_IN_PROGRESS', 'Library verifier is already running.');
+    }
+  }
+
+  #assertIdleRevision(revision: number): void {
+    this.#assertNoActiveJob();
+    this.#assertVerifierIdle();
+    this.#assertRevision(revision);
   }
 
   #assertLockOwner(clientId: ClientId): void {
@@ -503,9 +555,8 @@ export class JobRunner {
   public startScan(clientId: ClientId): number {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    if (this.#phase === 'SCANNING' || this.#phase === 'PROCESSING') {
-      throw new LockConflictError('LOCK_HELD', `Operation already in progress (${this.#phase})`);
-    }
+    this.#assertNoActiveJob();
+    this.#assertVerifierIdle();
     this.#lockOwnerClientId = clientId;
     this.#cancelledByUnlock = false;
     this.#drainingAfterCurrent = false;
@@ -679,6 +730,15 @@ export class JobRunner {
     );
   }
 
+  #requireIdleItemIndex(revision: number, itemId: ItemId): number {
+    this.#assertIdleRevision(revision);
+    const targetIdx = this.#items.findIndex((entry): boolean => entry.id === itemId);
+    if (targetIdx < 0) {
+      throw new Error(`Item not found: ${itemId}`);
+    }
+    return targetIdx;
+  }
+
   public async downloadItemSubtitle(
     clientId: ClientId,
     revision: number,
@@ -687,12 +747,7 @@ export class JobRunner {
   ): Promise<{ readonly state: OrganizerStatePayload; readonly downloaded: ExternalSubtitleFile }> {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    this.#assertRevision(revision);
-
-    const idx = this.#items.findIndex((entry) => entry.id === itemId);
-    if (idx < 0) {
-      throw new Error(`Item not found: ${itemId}`);
-    }
+    const idx = this.#requireIdleItemIndex(revision, itemId);
     const item = this.#items[idx]!;
     let chosen = candidate;
     if (!chosen) {
@@ -702,15 +757,21 @@ export class JobRunner {
       chosen = candidates[0];
     }
     if (!chosen) {
-      this.#items[idx] = { ...item, subtitleStatus: { status: 'not_found' } };
+      const targetIdx = this.#requireIdleItemIndex(revision, itemId);
+      this.#items[targetIdx] = {
+        ...this.#items[targetIdx]!,
+        subtitleStatus: { status: 'not_found' }
+      };
       this.#revision += 1;
       await this.#persistQueue();
       this.#emitState();
       throw new Error('No Spanish subtitles found across configured providers.');
     }
 
+    this.#requireIdleItemIndex(revision, itemId);
     const downloaded = await this.#downloadSubtitle(item, chosen, this.#config);
-    this.#items[idx] = attachDownloadedSubtitle(item, downloaded, chosen);
+    const targetIdx = this.#requireIdleItemIndex(revision, itemId);
+    this.#items[targetIdx] = attachDownloadedSubtitle(this.#items[targetIdx]!, downloaded, chosen);
     this.#revision += 1;
     await this.#persistQueue();
     this.#emitLog(
@@ -729,14 +790,11 @@ export class JobRunner {
   ): Promise<OrganizerStatePayload> {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    this.#assertRevision(revision);
+    const idx = this.#requireIdleItemIndex(revision, itemId);
 
-    const idx = this.#items.findIndex((i): boolean => i.id === itemId);
-    if (idx < 0) {
-      throw new Error(`Item not found: ${itemId}`);
-    }
-
-    this.#items[idx] = await applyPatchToItem(this.#items[idx]!, patch, this.#config.tvdbApiKey);
+    const updatedItem = await applyPatchToItem(this.#items[idx]!, patch, this.#config.tvdbApiKey);
+    const targetIdx = this.#requireIdleItemIndex(revision, itemId);
+    this.#items[targetIdx] = updatedItem;
 
     if (this.#phase === 'PREFLIGHT_BLOCKED') {
       this.#phase = 'READY';
@@ -755,7 +813,7 @@ export class JobRunner {
   ): Promise<OrganizerStatePayload> {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    this.#assertRevision(revision);
+    this.#assertIdleRevision(revision);
 
     const { nextItems, updatedCount } = await applyBulkPatchToItems(
       this.#items,
@@ -764,6 +822,7 @@ export class JobRunner {
       this.#config.tvdbApiKey,
       this.#preferredLanguages
     );
+    this.#assertIdleRevision(revision);
 
     this.#items = nextItems;
     if (this.#phase === 'PREFLIGHT_BLOCKED') {
@@ -797,10 +856,11 @@ export class JobRunner {
   ): Promise<PreflightReport & { readonly revision: number }> {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    this.#assertRevision(revision);
+    this.#assertIdleRevision(revision);
 
     const mountPaths = buildMountPathsMap(this.#config);
     const report = await runPreflightCheck(this.#items, mountPaths, probeMedia);
+    this.#assertIdleRevision(revision);
 
     this.#items = this.#items.map((item) => ({
       ...item,
@@ -821,7 +881,7 @@ export class JobRunner {
   ): Promise<{ readonly jobId: JobId; readonly revision: number }> {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    this.#assertRevision(revision);
+    this.#assertIdleRevision(revision);
 
     for (const item of this.#items) {
       if (
@@ -834,6 +894,7 @@ export class JobRunner {
 
     const mountPaths = buildMountPathsMap(this.#config);
     const report = await runPreflightCheck(this.#items, mountPaths, probeMedia);
+    this.#assertIdleRevision(revision);
     const existingCollisionByItemId: Partial<Record<ItemId, string>> = {};
     for (const conflict of report.conflicts) {
       if (!Object.hasOwn(conflictResolutions, conflict.itemId)) {
@@ -845,14 +906,13 @@ export class JobRunner {
     }
 
     const jobId = asJobId(crypto.randomUUID().slice(0, 8));
+    this.#lockOwnerClientId = clientId;
     this.#cancelledByUnlock = false;
     this.#phase = 'PROCESSING';
     this.#drainingAfterCurrent = false;
     this.#revision += 1;
 
-    const toProcess = this.#items.filter(
-      (item) => item.include && conflictResolutions[item.id] !== 'ignore'
-    );
+    const toProcess = selectProcessableQueueItems(this.#items, conflictResolutions);
     this.#activeJob = {
       jobId,
       totalItems: toProcess.length,
@@ -968,7 +1028,10 @@ export class JobRunner {
           this.#phase = 'ERROR';
           this.#activeJob = null;
           this.#revision += 1;
-          await cleanupOrphanTempFiles(this.#config.inputDir);
+          await cleanupOrphanTempFiles(this.#config.inputDir, {
+            serverTag: this.#serverTag,
+            jobId
+          });
           this.#emitLog('error', `Job ${jobId} failed: ${msg}`);
           this.#emitState();
         }
@@ -985,7 +1048,7 @@ export class JobRunner {
   public requestDrain(clientId: ClientId): OrganizerStatePayload {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    if (this.#phase !== 'PROCESSING' || !this.#activeJob) {
+    if (!this.#activeJob || this.#activeJob.jobId === 'scan') {
       return this.getState();
     }
     if (!this.#drainingAfterCurrent) {
@@ -1001,7 +1064,8 @@ export class JobRunner {
     if (!force) {
       this.#assertLockOwner(clientId);
     }
-    const wasRunning = this.#phase === 'SCANNING' || this.#phase === 'PROCESSING';
+    const wasRunning = this.#isActiveRun;
+    const activeJobId = this.#activeJob?.jobId;
     this.#cancelledByUnlock = true;
     this.#drainingAfterCurrent = false;
     for (const child of this.#activeChildren) {
@@ -1012,7 +1076,10 @@ export class JobRunner {
       await this.#activeRunPromise;
     }
     this.#activeEtaPredictor?.flush();
-    await cleanupOrphanTempFiles(this.#config.inputDir);
+    await cleanupOrphanTempFiles(this.#config.inputDir, {
+      serverTag: this.#serverTag,
+      jobId: activeJobId && activeJobId !== 'scan' ? activeJobId : undefined
+    });
     this.#lockOwnerClientId = null;
     this.#activeJob = null;
     this.#phase = wasRunning && this.#items.length > 0 ? 'READY' : 'IDLE';
@@ -1030,9 +1097,8 @@ export class JobRunner {
   public startVerifierScan(clientId: ClientId, recalculateTags = false): number {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    if (this.#verifier.scanning || this.#verifier.fixing) {
-      throw new LockConflictError('LOCK_HELD', 'Library verifier is already running.');
-    }
+    this.#assertNoActiveJob();
+    this.#assertVerifierIdle();
     this.#verifier = {
       ...this.#verifier,
       scanning: true,
@@ -1114,9 +1180,8 @@ export class JobRunner {
   ): number {
     this.#assertInitialized();
     this.#assertLockOwner(clientId);
-    if (this.#verifier.scanning || this.#verifier.fixing) {
-      throw new LockConflictError('LOCK_HELD', 'Library verifier is already running.');
-    }
+    this.#assertNoActiveJob();
+    this.#assertVerifierIdle();
     const idSet = new Set(entryIds);
     const selected = this.#verifier.entries.filter((entry): boolean => idSet.has(entry.id));
     if (selected.length === 0) {

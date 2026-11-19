@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import * as v from 'valibot';
@@ -10,6 +12,12 @@ import {
   DEFAULT_PUID
 } from '../domain/constants.ts';
 import type { MountPathsMap } from '../domain/types.ts';
+
+const BYTES_PER_GIB = 1024 ** 3;
+const HOST_HASH_HEX_LENGTH = 16;
+const SERVER_TAG_HASH_LENGTH = 8;
+const SERVER_TAG_MAX_LENGTH = 16;
+const HW_PREFIX_LENGTH = 3;
 
 const PortSchema = v.pipe(
   v.optional(v.string()),
@@ -158,4 +166,52 @@ export async function resolvePortableInputPath(
     }
   }
   return normalizedRel ? path.join(config.inputDir, ...normalizedRel.split('/')) : storedPath;
+}
+
+/**
+ * Resolves a stable per-server key from `SERVER_ID` or deterministic hardware traits
+ * so Docker container recreations retain history and Windows dev never pollutes NAS baselines.
+ */
+export function resolveHostKey(serverId?: string): string {
+  const trimmed = serverId?.trim();
+  if (trimmed) {
+    return `env:${trimmed}`;
+  }
+  const cpus = os.cpus();
+  const cpuModel = cpus[0]?.model ?? 'unknown';
+  const cpuCount = Math.max(1, cpus.length);
+  const ramGiB = Math.max(1, Math.round(os.totalmem() / BYTES_PER_GIB));
+  const raw = `${process.platform}|${os.arch()}|${cpuModel}|${String(cpuCount)}|${String(ramGiB)}`;
+  const digest = crypto
+    .createHash('sha256')
+    .update(raw)
+    .digest('hex')
+    .slice(0, HOST_HASH_HEX_LENGTH);
+  return `hw:${digest}`;
+}
+
+/**
+ * Derives a compact, filesystem-safe per-server tag (`nas`, `dev`, `hw-<8hex>`) so concurrent
+ * servers sharing an SMB/NAS `INPUT_DIR` never delete or collide on each other's temp files.
+ */
+export function resolveServerTag(serverId?: string): string {
+  const trimmed = serverId?.trim();
+  if (trimmed) {
+    const cleaned = trimmed
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, SERVER_TAG_MAX_LENGTH);
+    if (cleaned.length > 0) {
+      return cleaned;
+    }
+    const digest = crypto
+      .createHash('sha256')
+      .update(trimmed)
+      .digest('hex')
+      .slice(0, SERVER_TAG_HASH_LENGTH);
+    return `srv-${digest}`;
+  }
+  const hwKey = resolveHostKey(undefined);
+  return `hw-${hwKey.slice(HW_PREFIX_LENGTH, HW_PREFIX_LENGTH + SERVER_TAG_HASH_LENGTH)}`;
 }

@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
+import * as v from 'valibot';
+
 import {
   ETA_MAX_SAMPLES_PER_KEY,
   ETA_ORPHAN_HOST_TTL_MS,
@@ -12,6 +14,8 @@ import {
   isPermissionOrReadOnlyError
 } from '../../domain/constants.ts';
 import {
+  EtaChannelProfileSchema,
+  EtaWorkTypeSchema,
   sanitizeConflictResolutions,
   type AudioLanguageCode,
   type AudioTrackAnalysis,
@@ -74,6 +78,12 @@ export interface EtaSampleInput {
   readonly workUnits: number;
   readonly durationMs: number;
   readonly createdAt?: number;
+}
+
+export interface EtaHostSampleGroup {
+  readonly workType: EtaWorkType;
+  readonly profile: EtaChannelProfile;
+  readonly samples: readonly number[];
 }
 
 const MIGRATION_ETA_SAMPLES = '20261116195000_add_eta_samples_table';
@@ -804,6 +814,54 @@ export class ScanCacheDb {
       )
       .all(hostKey, workType, profile, safeLimit) as Array<{ readonly throughput: number }>;
     return rows.map((row): number => row.throughput);
+  }
+
+  /** Preloads up to `limit` newest validated samples per `(work_type, profile)` for one host. */
+  public getAllEtaSamplesForHost(
+    hostKey: string,
+    limitPerKey = ETA_MAX_SAMPLES_PER_KEY
+  ): readonly EtaHostSampleGroup[] {
+    const safeLimit = Math.max(1, Math.min(ETA_MAX_SAMPLES_PER_KEY, Math.floor(limitPerKey)));
+    const rows = this.#db
+      .prepare(
+        'SELECT work_type, profile, throughput FROM eta_samples WHERE host_key = ? ORDER BY id DESC'
+      )
+      .all(hostKey) as Array<{
+      readonly work_type: string;
+      readonly profile: string;
+      readonly throughput: number;
+    }>;
+    const groups: {
+      readonly workType: EtaWorkType;
+      readonly profile: EtaChannelProfile;
+      samples: number[];
+    }[] = [];
+    const byKey = new Map<
+      string,
+      { readonly workType: EtaWorkType; readonly profile: EtaChannelProfile; samples: number[] }
+    >();
+    for (const row of rows) {
+      const parsedWork = v.safeParse(EtaWorkTypeSchema, row.work_type);
+      const parsedProfile = v.safeParse(EtaChannelProfileSchema, row.profile);
+      if (!parsedWork.success || !parsedProfile.success) {
+        continue;
+      }
+      const key = `${parsedWork.output}:${parsedProfile.output}`;
+      let group = byKey.get(key);
+      if (!group) {
+        group = {
+          workType: parsedWork.output,
+          profile: parsedProfile.output,
+          samples: []
+        };
+        byKey.set(key, group);
+        groups.push(group);
+      }
+      if (group.samples.length < safeLimit) {
+        group.samples.push(row.throughput);
+      }
+    }
+    return groups;
   }
 
   public recordEtaSamplesBatch(

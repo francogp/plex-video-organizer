@@ -7,11 +7,13 @@ import { describe, expect, it, vi } from 'vite-plus/test';
 import {
   asIso639_2Code,
   asItemId,
+  asJobId,
   type MediaProbeSummary,
   type ScannedItem
 } from '../../src/domain/types.ts';
 import {
   backupAndCleanupAfterJob,
+  buildOrganizingTempFileName,
   cleanupOrphanTempFiles,
   moveTempOutputFile,
   purgeExpiredBackups
@@ -46,8 +48,8 @@ describe('fileMover', () => {
       const torrentJunkDir = path.join(movieDir, 'Torrent Downloaded From');
       const torrentJunkFile = path.join(torrentJunkDir, 'info.txt');
       const ignoredVideo = path.join(ignoredDir, 'MovieB.mkv');
-      const tempMkv = path.join(movieDir, 'MovieA.organizing.j1.i1.tmp.mkv');
-      const orphanTmp = path.join(ignoredDir, 'Other.organizing.j0.i0.tmp.mkv');
+      const tempMkv = path.join(movieDir, 'MovieA.organizing.dev.j1.i1.tmp.mkv');
+      const orphanTmp = path.join(ignoredDir, 'Other.organizing.dev.j0.i0.tmp.mkv');
 
       await fs.mkdir(torrentJunkDir, { recursive: true });
       await fs.writeFile(srcVideo, 'source');
@@ -57,7 +59,7 @@ describe('fileMover', () => {
       await fs.writeFile(ignoredVideo, 'keep-me');
       await fs.writeFile(orphanTmp, 'orphan');
 
-      const removedOrphans = await cleanupOrphanTempFiles(inputDir);
+      const removedOrphans = await cleanupOrphanTempFiles(inputDir, { serverTag: 'dev' });
       expect(removedOrphans).toBe(1);
 
       await fs.writeFile(tempMkv, 'remuxed');
@@ -224,8 +226,8 @@ describe('fileMover', () => {
       const activePartial = path.join(showDir, 'InProgress', 'S01E02.mkv.!qB');
       await fs.mkdir(path.dirname(activePartial), { recursive: true });
       await fs.mkdir(path.join(inputDir, '@Recycle'), { recursive: true });
-      const recycleOrphan = path.join(inputDir, '@Recycle', 'Old.organizing.j1.i1.tmp.mkv');
-      const regularOrphan = path.join(inputDir, 'Regular.organizing.j1.i1.tmp.mkv');
+      const recycleOrphan = path.join(inputDir, '@Recycle', 'Old.organizing.dev.j1.i1.tmp.mkv');
+      const regularOrphan = path.join(inputDir, 'Regular.organizing.dev.j1.i1.tmp.mkv');
       await fs.writeFile(recycleOrphan, 'keep-recycle');
       await fs.writeFile(regularOrphan, 'remove-orphan');
       await fs.writeFile(movieSrc, 'movie-bytes');
@@ -286,10 +288,70 @@ describe('fileMover', () => {
       await backupAndCleanupAfterJob(items, inputDir, backupDir);
       await expect(fs.access(movieDir)).rejects.toThrow(/ENOENT/);
       await expect(fs.readFile(activePartial, 'utf8')).resolves.toBe('active-download');
-      const cleanedCount = await cleanupOrphanTempFiles(inputDir);
+      const cleanedCount = await cleanupOrphanTempFiles(inputDir, { serverTag: 'dev' });
       expect(cleanedCount).toBe(1);
       await expect(fs.readFile(recycleOrphan, 'utf8')).resolves.toBe('keep-recycle');
       await expect(fs.access(regularOrphan)).rejects.toThrow(/ENOENT/);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('isolates cleanupOrphanTempFiles by serverTag and optional jobId without touching other servers or untagged temps', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-temp-iso-'));
+    try {
+      const inputDir = path.join(tmpDir, 'input');
+      const showDir = path.join(inputDir, 'Foundation');
+      await fs.mkdir(showDir, { recursive: true });
+
+      const devJob1Name = buildOrganizingTempFileName(
+        'Ep1',
+        'dev',
+        asJobId('job1'),
+        asItemId('i1')
+      );
+      const devJob2Name = buildOrganizingTempFileName(
+        'Ep2',
+        'dev',
+        asJobId('job2'),
+        asItemId('i2')
+      );
+      const nasJob1Name = buildOrganizingTempFileName(
+        'Ep3',
+        'nas',
+        asJobId('b04e90cd'),
+        asItemId('i3')
+      );
+      expect(devJob1Name).toBe('Ep1.organizing.dev.job1.i1.tmp.mkv');
+      expect(nasJob1Name).toBe('Ep3.organizing.nas.b04e90cd.i3.tmp.mkv');
+
+      const devJob1 = path.join(showDir, devJob1Name);
+      const devJob2 = path.join(showDir, devJob2Name);
+      const nasJob1 = path.join(showDir, nasJob1Name);
+      const legacyUntagged = path.join(showDir, 'Ep4.organizing.b04e90cd.9fbcdb12dec4.tmp.mkv');
+
+      await Promise.all([
+        fs.writeFile(devJob1, 'dev1'),
+        fs.writeFile(devJob2, 'dev2'),
+        fs.writeFile(nasJob1, 'nas1'),
+        fs.writeFile(legacyUntagged, 'legacy')
+      ]);
+
+      const scopedDeleted = await cleanupOrphanTempFiles(inputDir, {
+        serverTag: 'dev',
+        jobId: asJobId('job1')
+      });
+      expect(scopedDeleted).toBe(1);
+      await expect(fs.access(devJob1)).rejects.toThrow(/ENOENT/);
+      await expect(fs.readFile(devJob2, 'utf8')).resolves.toBe('dev2');
+      await expect(fs.readFile(nasJob1, 'utf8')).resolves.toBe('nas1');
+      await expect(fs.readFile(legacyUntagged, 'utf8')).resolves.toBe('legacy');
+
+      const serverDeleted = await cleanupOrphanTempFiles(inputDir, { serverTag: 'dev' });
+      expect(serverDeleted).toBe(1);
+      await expect(fs.access(devJob2)).rejects.toThrow(/ENOENT/);
+      await expect(fs.readFile(nasJob1, 'utf8')).resolves.toBe('nas1');
+      await expect(fs.readFile(legacyUntagged, 'utf8')).resolves.toBe('legacy');
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

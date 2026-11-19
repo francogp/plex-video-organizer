@@ -9,7 +9,11 @@ import {
   CONNECTION_STATUSES,
   EPISODE_ORDER_MODES,
   ETA_CHANNEL_PROFILES,
+  ETA_RATE_SOURCES,
+  ETA_SIMULATED_ITEM_STATUSES,
+  ETA_SIMULATION_MODES,
   ETA_STATES,
+  ETA_STEP_KINDS,
   ETA_WORK_TYPES,
   ETA_WORK_UNIT_KINDS,
   ISO_639_2_PRESETS,
@@ -39,6 +43,9 @@ export type Brand<T, B extends string> = T & { readonly [brandSymbol]: B };
 
 export type JobId = Brand<string, 'JobId'>;
 export type ItemId = Brand<string, 'ItemId'>;
+export type EtaStepId = Brand<string, 'EtaStepId'>;
+export type EtaStageId = Brand<string, 'EtaStageId'>;
+export type EtaSimulationEntryId = ItemId | EtaStageId;
 export type ImdbId = Brand<string, 'ImdbId'>;
 export type TvdbId = Brand<string, 'TvdbId'>;
 export type TmdbId = Brand<string, 'TmdbId'>;
@@ -102,6 +109,14 @@ export function asJobId(raw: string): JobId {
 
 export function asItemId(raw: string): ItemId {
   return assertNonEmptyId(raw, 'ItemId') as ItemId;
+}
+
+export function asEtaStepId(raw: string): EtaStepId {
+  return assertNonEmptyId(raw, 'EtaStepId') as EtaStepId;
+}
+
+export function asEtaStageId(raw: string): EtaStageId {
+  return assertNonEmptyId(raw, 'EtaStageId') as EtaStageId;
 }
 
 export function asImdbId(raw: string): ImdbId {
@@ -487,10 +502,10 @@ export interface SseProgressEvent {
   readonly drainRequested?: boolean;
 }
 
-const EtaWorkTypeSchema = v.picklist(ETA_WORK_TYPES);
+export const EtaWorkTypeSchema = v.picklist(ETA_WORK_TYPES);
 export type EtaWorkType = v.InferOutput<typeof EtaWorkTypeSchema>;
 
-const EtaChannelProfileSchema = v.picklist(ETA_CHANNEL_PROFILES);
+export const EtaChannelProfileSchema = v.picklist(ETA_CHANNEL_PROFILES);
 export type EtaChannelProfile = v.InferOutput<typeof EtaChannelProfileSchema>;
 
 const EtaWorkUnitKindSchema = v.picklist(ETA_WORK_UNIT_KINDS);
@@ -498,6 +513,68 @@ export type EtaWorkUnitKind = v.InferOutput<typeof EtaWorkUnitKindSchema>;
 
 const EtaStateSchema = v.picklist(ETA_STATES);
 export type EtaState = v.InferOutput<typeof EtaStateSchema>;
+
+const EtaRateSourceSchema = v.picklist(ETA_RATE_SOURCES);
+export type EtaRateSource = v.InferOutput<typeof EtaRateSourceSchema>;
+
+const EtaSimulatedItemStatusSchema = v.picklist(ETA_SIMULATED_ITEM_STATUSES);
+export type EtaSimulatedItemStatus = v.InferOutput<typeof EtaSimulatedItemStatusSchema>;
+
+const EtaSimulationModeSchema = v.picklist(ETA_SIMULATION_MODES);
+export type EtaSimulationMode = v.InferOutput<typeof EtaSimulationModeSchema>;
+
+const EtaStepKindSchema = v.picklist(ETA_STEP_KINDS);
+export type EtaStepKind = v.InferOutput<typeof EtaStepKindSchema>;
+
+export interface EtaRateDiagnostic {
+  readonly workType: EtaWorkType;
+  readonly profile: EtaChannelProfile;
+  readonly baselineRate?: number;
+  readonly liveRate?: number;
+  readonly effectiveRate: number;
+  readonly source: EtaRateSource;
+  readonly sampleCount: number;
+}
+
+export interface EtaSimulatedStep {
+  readonly workType: EtaWorkType;
+  readonly profile: EtaChannelProfile;
+  readonly totalUnits: number;
+  readonly completedUnits: number;
+  readonly remainingUnits: number;
+  readonly totalSeconds: number;
+  readonly remainingSeconds: number;
+  readonly rateUsed: number;
+  readonly rateSource: EtaRateSource;
+}
+
+export interface EtaSimulatedSlotItem {
+  readonly itemId: EtaSimulationEntryId;
+  readonly fileName: string;
+  readonly status: EtaSimulatedItemStatus;
+  readonly totalSeconds: number;
+  readonly remainingSeconds: number;
+  readonly steps: readonly EtaSimulatedStep[];
+}
+
+export interface EtaSimulatedSlot {
+  readonly slotIndex: number;
+  readonly totalSeconds: number;
+  readonly items: readonly EtaSimulatedSlotItem[];
+}
+
+export interface EtaSimulationSnapshot {
+  readonly generatedAtMs: number;
+  readonly hostKey: string;
+  readonly mode: EtaSimulationMode;
+  readonly workerCount: number;
+  readonly etaSeconds?: number;
+  readonly etaState: EtaState;
+  readonly weightedFraction: number;
+  readonly fallbackShare: number;
+  readonly rates: readonly EtaRateDiagnostic[];
+  readonly slots: readonly EtaSimulatedSlot[];
+}
 
 export interface SseLogEvent {
   readonly level: LogLevel;

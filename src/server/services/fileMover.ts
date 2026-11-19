@@ -14,13 +14,34 @@ import {
   isPermissionOrReadOnlyError,
   type VideoExtension
 } from '../../domain/constants.ts';
-import type { ScannedItem } from '../../domain/types.ts';
+import type { ItemId, JobId, ScannedItem } from '../../domain/types.ts';
 
 const COPY_CHUNK_BYTES = 256 * 1024;
 const PROGRESS_THROTTLE_MS = 150;
 
-/** Removes leftover `*.organizing.*.tmp.mkv` files on startup or forced unlock. */
-export async function cleanupOrphanTempFiles(inputDir: string): Promise<number> {
+export interface CleanupOrphanTempOptions {
+  readonly serverTag: string;
+  readonly jobId?: JobId;
+}
+
+/** Builds a per-server, per-job temporary remux filename inside the item source folder. */
+export function buildOrganizingTempFileName(
+  baseNoExt: string,
+  serverTag: string,
+  jobId: JobId,
+  itemId: ItemId
+): string {
+  return `${baseNoExt}${ORGANIZING_TEMP_MARKER}${serverTag}.${jobId}.${itemId}${ORGANIZING_TEMP_SUFFIX}`;
+}
+
+/** Removes leftover `*.organizing.<serverTag>[.<jobId>].*.tmp.mkv` files owned by this server. */
+export async function cleanupOrphanTempFiles(
+  inputDir: string,
+  options: CleanupOrphanTempOptions
+): Promise<number> {
+  const requiredMarker = options.jobId
+    ? `${ORGANIZING_TEMP_MARKER}${options.serverTag}.${options.jobId}.`
+    : `${ORGANIZING_TEMP_MARKER}${options.serverTag}.`;
   let removed = 0;
   try {
     const entries = await fs.readdir(inputDir, { recursive: true, withFileTypes: true });
@@ -28,10 +49,7 @@ export async function cleanupOrphanTempFiles(inputDir: string): Promise<number> 
       if (!entry.isFile() || hasIgnoredAncestorSegment(inputDir, entry.parentPath)) {
         continue;
       }
-      if (
-        entry.name.includes(ORGANIZING_TEMP_MARKER) &&
-        entry.name.endsWith(ORGANIZING_TEMP_SUFFIX)
-      ) {
+      if (entry.name.includes(requiredMarker) && entry.name.endsWith(ORGANIZING_TEMP_SUFFIX)) {
         await fs.rm(path.join(entry.parentPath, entry.name), { force: true });
         removed += 1;
       }

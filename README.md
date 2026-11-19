@@ -9,7 +9,7 @@ A self-hosted, Dockerized NAS media organizer that scans staging video folders, 
 - **Scanner Directives**: Honors `.plexignore` exclusion rules and `.plexmatch` series/episode hints.
 - **Lossless Video & Flexible Audio Remuxing**: Uses `ffmpeg` lossless video stream copy (`-c:v copy`) into MKV by default (`Copy (original)` audio), with optional per-track Peak Gain or 2-pass EBU R128 Loudnorm normalization (`-16 LUFS`) and parallel queue processing (`2` concurrent workers).
 - **Pre-Flight Conflict Resolution**: Detects existing destination files, sibling-library root collisions (via `{tvdb-...}`, `{imdb-...}`, `{tmdb-...}`, or normalized title), and intra-batch collisions before writing, allowing per-row or batch `overwrite` / `ignore` decisions with side-by-side comparison.
-- **Real-Time Web UI (Organizer & Verifier)**: Vue 3 + Pinia dashboard with two tabs — **Organizer** (live SSE progress with FFmpeg Pass 1/2 tracking, monotonic vertical task-list stability during scans, stage-aware per-host ETA prediction with `Calibrating...` / `~duration (stage)` states and O(1) vs `EXDEV` move detection, graceful `Stop After Current` job draining, per-task ephemeral `Skip` during input scans, FFmpeg stall watchdog, clickable `IMDb`/`TVDB`/`TMDB` match links and disk-presence `💾` mount badges with tooltips in both the queue selector and `MetadataSearchModal`, TV series unification by `tvdbId` with persistent candidate history, automated Spanish subtitle discovery via `SubtitlePickerModal` with TVDB `imdbId` resolution and release/source scoring, real-time `720p` H.264 + `AAC` in-browser WebVTT preview with timeline seek, persistent `ErrorToast` notifications and SQLite-backed `Server Logs`, SQLite-persisted conflict resolutions, virtualized tables with `Run` switch toggle and `+ Edition` inline input, `Movie` / `Series` classification, automatic `Animated Movies` / `Animated Series` reclassification, audio Loudnorm/Peak analysis, and batch editing) and **Verifier** (full-library Plex naming compliance audit, SQLite-cached tag recalculation, empty directory deletion, and bottom-up rename fixer).
+- **Real-Time Web UI (Organizer & Verifier)**: Vue 3 + Pinia dashboard with two tabs — **Organizer** (live SSE progress with FFmpeg Pass 1/2 tracking, monotonic vertical task-list stability during scans, queue/stage-aware per-host ETA prediction with `Calibrating...` / `ETA Xh Ym (HH:mm)` local finish clock times, `finalize_io` tracking, and interactive `ETA Plan` simulation modal via `GET /api/eta/simulation`, graceful `Stop After Current` job draining, per-task ephemeral `Skip` during input scans, FFmpeg stall watchdog, clickable `IMDb`/`TVDB`/`TMDB` match links and disk-presence `💾` mount badges with tooltips in both the queue selector and `MetadataSearchModal`, TV series unification by `tvdbId` with persistent candidate history, automated Spanish subtitle discovery via `SubtitlePickerModal` with TVDB `imdbId` resolution and release/source scoring, real-time `480p` (`fast_bilinear` + optional `Fast Mode` `?fast=1`) H.264 + `AAC` in-browser WebVTT preview with timeline seek, persistent `ErrorToast` notifications and SQLite-backed `Server Logs`, SQLite-persisted conflict resolutions, virtualized tables with `Run` switch toggle and `+ Edition` inline input, `Movie` / `Series` classification, automatic `Animated Movies` / `Animated Series` reclassification, audio Loudnorm/Peak analysis, and batch editing) and **Verifier** (full-library Plex naming compliance audit, SQLite-cached tag recalculation, empty directory deletion, and bottom-up rename fixer).
 
 ## Requirements
 
@@ -27,22 +27,26 @@ cp .env.example .env
 
 ### Environment Variables
 
-| Variable                     | Default / Requirement  | Description                                                                                                                                                          |
-| :--------------------------- | :--------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `APP_PORT`                   | `3000`                 | HTTP port exposed by the backend server and Docker container.                                                                                                        |
-| `DEV_CLIENT_PORT`            | `5173`                 | Vite development server port (used by `npm run dev`).                                                                                                                |
-| `PUID`                       | `1000`                 | Host user ID mapped inside the Docker container (`"${PUID}:${PGID}"`). On Windows (Docker Desktop), set `0` so NTFS bind mounts inherit your Windows user ownership. |
-| `PGID`                       | `1000`                 | Host group ID mapped inside the Docker container (`"${PUID}:${PGID}"`). On Windows (Docker Desktop), set `0` to avoid Administrator prompts when deleting files.     |
-| `CONFIG_DIR`                 | **Required in `.env`** | Writable host path mounted to `/config` in Docker (`plex-video-organizer.sqlite`).                                                                                   |
-| `INPUT_DIR`                  | **Required in `.env`** | Host staging path mounted to `/data/input` in Docker.                                                                                                                |
-| `BACKUP_DIR`                 | **Required in `.env`** | Host retention backup path (7-day cleanup) mounted to `/data/backup` in Docker.                                                                                      |
-| `OUTPUT_MOVIES_DIR`          | **Required in `.env`** | Host path mounted to `/data/output/movies` for standard movies.                                                                                                      |
-| `OUTPUT_ANIMATED_MOVIES_DIR` | **Required in `.env`** | Host path mounted to `/data/output/animated-movies` for animated movies.                                                                                             |
-| `OUTPUT_TV_SHOWS_DIR`        | **Required in `.env`** | Host path mounted to `/data/output/tv-shows` for standard TV shows.                                                                                                  |
-| `OUTPUT_ANIMATED_SERIES_DIR` | **Required in `.env`** | Host path mounted to `/data/output/animated-series` for animated series.                                                                                             |
-| `OMDB_API_KEY`               | `""`                   | Optional OMDb API key for movie/series lookup.                                                                                                                       |
-| `TVDB_API_KEY`               | `""`                   | Optional TVDb v4 API key for series and episode lookup (IMDb Suggestions and TVmaze work without keys).                                                              |
-| `SERVER_ID`                  | `""`                   | Optional host identifier partitioning SQLite ETA baselines (`eta_samples`) across NAS and local dev machines (falls back to a deterministic hardware fingerprint).   |
+| Variable                     | Default / Requirement  | Description                                                                                                                                                                       |
+| :--------------------------- | :--------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `APP_PORT`                   | `3000`                 | HTTP port exposed by the backend server and Docker container.                                                                                                                     |
+| `DEV_CLIENT_PORT`            | `5173`                 | Vite development server port (used by `npm run dev`).                                                                                                                             |
+| `PUID`                       | `1000`                 | Host user ID mapped inside the Docker container (`"${PUID}:${PGID}"`). On Windows (Docker Desktop), set `0` so NTFS bind mounts inherit your Windows user ownership.              |
+| `PGID`                       | `1000`                 | Host group ID mapped inside the Docker container (`"${PUID}:${PGID}"`). On Windows (Docker Desktop), set `0` to avoid Administrator prompts when deleting files.                  |
+| `CONFIG_DIR`                 | **Required in `.env`** | Writable host path mounted to `/config` in Docker (`plex-video-organizer.sqlite`).                                                                                                |
+| `INPUT_DIR`                  | **Required in `.env`** | Host staging path mounted to `/data/input` in Docker.                                                                                                                             |
+| `BACKUP_DIR`                 | **Required in `.env`** | Host retention backup path (7-day cleanup) mounted to `/data/backup` in Docker.                                                                                                   |
+| `OUTPUT_MOVIES_DIR`          | **Required in `.env`** | Host path mounted to `/data/output/movies` for standard movies.                                                                                                                   |
+| `OUTPUT_ANIMATED_MOVIES_DIR` | **Required in `.env`** | Host path mounted to `/data/output/animated-movies` for animated movies.                                                                                                          |
+| `OUTPUT_TV_SHOWS_DIR`        | **Required in `.env`** | Host path mounted to `/data/output/tv-shows` for standard TV shows.                                                                                                               |
+| `OUTPUT_ANIMATED_SERIES_DIR` | **Required in `.env`** | Host path mounted to `/data/output/animated-series` for animated series.                                                                                                          |
+| `OMDB_API_KEY`               | `""`                   | Optional OMDb API key for movie/series lookup.                                                                                                                                    |
+| `TVDB_API_KEY`               | `""`                   | Optional TVDb v4 API key for series and episode lookup (IMDb Suggestions and TVmaze work without keys).                                                                           |
+| `OPENSUBTITLES_API_KEY`      | `""`                   | Optional OpenSubtitles REST API key for automated Spanish subtitle search/download.                                                                                               |
+| `OPENSUBTITLES_USERNAME`     | `""`                   | Optional OpenSubtitles account username paired with `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_PASSWORD`.                                                                           |
+| `OPENSUBTITLES_PASSWORD`     | `""`                   | Optional OpenSubtitles account password.                                                                                                                                          |
+| `SUBDL_API_KEY`              | `""`                   | Optional SubDL API key for additional subtitle discovery.                                                                                                                         |
+| `SERVER_ID`                  | `""`                   | Optional host identifier partitioning SQLite ETA baselines (`eta_samples`) and temp files across NAS and local dev machines (falls back to a deterministic hardware fingerprint). |
 
 ### NAS & Host File Permissions (`PUID` / `PGID`)
 
@@ -75,6 +79,7 @@ OUTPUT_ANIMATED_SERIES_DIR=/mnt/user/media/Animated Series
 
 OMDB_API_KEY=your_omdb_key
 TVDB_API_KEY=your_tvdb_key
+SERVER_ID=nas-main
 ```
 
 ## Running with Docker Compose
@@ -106,8 +111,13 @@ services:
       - '${APP_PORT:-3000}:${APP_PORT:-3000}'
     environment:
       APP_PORT: '${APP_PORT:-3000}'
+      SERVER_ID: '${SERVER_ID:-}'
       OMDB_API_KEY: '${OMDB_API_KEY:-}'
       TVDB_API_KEY: '${TVDB_API_KEY:-}'
+      OPENSUBTITLES_API_KEY: '${OPENSUBTITLES_API_KEY:-}'
+      OPENSUBTITLES_USERNAME: '${OPENSUBTITLES_USERNAME:-}'
+      OPENSUBTITLES_PASSWORD: '${OPENSUBTITLES_PASSWORD:-}'
+      SUBDL_API_KEY: '${SUBDL_API_KEY:-}'
       CONFIG_DIR: /config
       INPUT_DIR: /data/input
       BACKUP_DIR: /data/backup
@@ -156,6 +166,14 @@ OUTPUT_ANIMATED_SERIES_DIR=/share/Multimedia/TV Shows/Animation
 # Optional Metadata API Keys (IMDb Suggestions and TVmaze work without keys)
 OMDB_API_KEY=
 TVDB_API_KEY=
+
+# Optional Subtitle API Keys (keyless Stremio/Gestdown/YIFY work without keys)
+OPENSUBTITLES_API_KEY=
+OPENSUBTITLES_USERNAME=
+OPENSUBTITLES_PASSWORD=
+SUBDL_API_KEY=
+
+SERVER_ID=nas-main
 ```
 
 #### Deploying & Updating with Arcane
@@ -216,7 +234,7 @@ Keep app configuration on your Container/SSD share and keep staging, backup, and
 ```text
 /share/Container/plex-video-organizer/
 ├── app/                   # Optional git clone (if building locally)
-└── config/                # CONFIG_DIR (queue.json, scan caches)
+└── config/                # CONFIG_DIR (plex-video-organizer.sqlite)
 
 /share/Media/
 ├── Staging/               # INPUT_DIR (incoming downloads to organize)
@@ -268,6 +286,7 @@ OUTPUT_ANIMATED_SERIES_DIR=/share/Multimedia/TV Shows/Animation
 
 OMDB_API_KEY=your_omdb_key
 TVDB_API_KEY=your_tvdb_key
+SERVER_ID=nas-main
 ```
 
 Start (or update) the container without building locally:

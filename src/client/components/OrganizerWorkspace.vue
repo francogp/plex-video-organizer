@@ -83,6 +83,15 @@ const initBannerText = computed((): string =>
     : 'Server is initializing mounts, cache, and workspace cleanup... Controls will unlock automatically when ready.'
 );
 
+const tablesDisabled = computed<boolean>(
+  () =>
+    props.store.isInitializing ||
+    props.store.isLockedByOther ||
+    props.store.isBusy ||
+    props.store.verifierState.scanning ||
+    props.store.verifierState.fixing
+);
+
 const activeJobSummaryText = computed<string>(() => {
   const job = props.store.activeJob;
   const label = formatPhaseLabel(props.store.phase);
@@ -173,19 +182,21 @@ const activeJobSummaryText = computed<string>(() => {
       :is-cancelling-job="wf.isCancellingJob.value"
       :is-draining-job="wf.isDrainingJob.value"
       :can-skip-tasks="store.activeJob?.jobId === 'scan' && !store.isLockedByOther"
+      :can-inspect-eta="wf.includedQueueCount.value > 0"
       :item-count="store.items.length"
       :summary-text="activeJobSummaryText"
       :phase="store.phase"
       @cancel="wf.handleCancelJob"
       @drain="wf.handleDrainJob"
       @dismiss-error="store.clearError()"
+      @open-eta-simulation="wf.openEtaSimulation"
       @skip-task="void store.skipScanTask($event).catch(() => undefined)"
     />
 
     <section class="vo-panel">
       <QueueTable
         :items="store.items"
-        :disabled="store.isInitializing || store.isLockedByOther || store.isBusy"
+        :disabled="tablesDisabled"
         :conflicts="store.preflightConflicts"
         :conflict-resolutions="store.savedConflictResolutions"
         :job-errors="store.lastJobErrors"
@@ -226,7 +237,7 @@ const activeJobSummaryText = computed<string>(() => {
   <VerifierView
     v-else
     :state="store.verifierState"
-    :disabled="store.isInitializing || store.isLockedByOther"
+    :disabled="tablesDisabled"
     :conflict-resolutions="wf.verifierConflictResolutions.value"
     @update:selected-ids="(ids: readonly VerifierEntryId[]) => (wf.selectedVerifierIds.value = ids)"
     @dismiss-error="store.clearVerifierErrors()"

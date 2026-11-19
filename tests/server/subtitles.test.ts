@@ -64,7 +64,8 @@ import {
   asIso639_2Code,
   asItemId,
   asTvdbId,
-  type ScannedItem
+  type ScannedItem,
+  type SubtitleCandidate
 } from '../../src/domain/types.ts';
 import { loadConfig } from '../../src/server/config.ts';
 import { createRequestHandler } from '../../src/server/routes.ts';
@@ -725,6 +726,13 @@ describe('subtitles & verifier tag recalculation', () => {
       expect(streamRes.headers.get('content-type')).toBe('video/mp4');
       await streamRes.arrayBuffer();
 
+      const fastStreamRes = await fetch(
+        `${baseUrl}/api/queue/items/${encodeURIComponent(scannedItem.id)}/stream?t=5&fast=1`
+      );
+      expect(fastStreamRes.status).toBe(200);
+      expect(fastStreamRes.headers.get('content-type')).toBe('video/mp4');
+      await fastStreamRes.arrayBuffer();
+
       const emptyIdSearchRes = await fetch(`${baseUrl}/api/queue/items//subtitles/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -796,13 +804,43 @@ describe('subtitles & verifier tag recalculation', () => {
         fakeRes,
         fakeSpawn
       );
-      expect(capturedArgs).toContain('118');
+      const inputIdx = capturedArgs.indexOf('-i');
+      expect(inputIdx).toBeGreaterThan(-1);
+      expect(capturedArgs.slice(0, inputIdx)).toContain('-skip_loop_filter');
+      expect(capturedArgs.slice(0, inputIdx)).toContain('all');
+      expect(capturedArgs.slice(0, inputIdx)).toContain('-ss');
+      expect(capturedArgs.slice(0, inputIdx)).toContain('120');
+      expect(capturedArgs.slice(inputIdx)).not.toContain('-ss');
+      expect(capturedArgs).not.toContain('118');
+      expect(capturedArgs).not.toContain('-skip_frame');
       expect(capturedArgs).toContain('0:a:2?');
       expect(capturedArgs).toContain('aac');
-      expect(capturedArgs).toContain('scale=-2:min(720\\,ih)');
+      expect(capturedArgs).toContain('-g');
+      expect(capturedArgs[capturedArgs.indexOf('-g') + 1]).toBe('24');
+      expect(capturedArgs).toContain('-frag_duration');
+      expect(capturedArgs[capturedArgs.indexOf('-frag_duration') + 1]).toBe('500000');
+      expect(capturedArgs).toContain('scale=-2:min(480\\,ih):flags=fast_bilinear');
       expect(
         (fakeRes as unknown as { writeHead: ReturnType<typeof vi.fn> }).writeHead
       ).toHaveBeenCalledWith(200, expect.objectContaining({ 'Content-Type': 'video/mp4' }));
+
+      const fastFakeRes = Object.assign(new PassThrough(), {
+        writeHead: vi.fn(),
+        on: fakeResEmitter.on.bind(fakeResEmitter),
+        off: fakeResEmitter.off.bind(fakeResEmitter)
+      }) as unknown as ServerResponse;
+      await streamTranscodedPreview(
+        { sourcePath: previewVideoPath, startSeconds: 45, audioStreamOrder: 1, fastDecode: true },
+        fastFakeRes,
+        fakeSpawn
+      );
+      const fastInputIdx = capturedArgs.indexOf('-i');
+      expect(fastInputIdx).toBeGreaterThan(-1);
+      expect(capturedArgs.slice(0, fastInputIdx)).toContain('-skip_frame');
+      expect(capturedArgs.slice(0, fastInputIdx)).toContain('noref');
+      expect(capturedArgs.slice(0, fastInputIdx)).toContain('-ss');
+      expect(capturedArgs.slice(0, fastInputIdx)).toContain('45');
+      expect(capturedArgs[capturedArgs.indexOf('-g') + 1]).toBe('12');
 
       // Verify aborting the HTTP response kills the spawned ffmpeg process
       const abortRes = Object.assign(new PassThrough(), {
@@ -1483,6 +1521,125 @@ describe('subtitles & verifier tag recalculation', () => {
           decodeURIComponent(u).includes('opensubtitles-v3.strem.io/subtitles/series/tt4158110:1:5')
         )
       ).toBe(true);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks downloadItemSubtitle before writing to disk if an active run begins during search', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-sub-toctou-'));
+    const inputDir = path.join(tmpDir, 'input');
+    const configDir = path.join(tmpDir, 'config');
+    await fs.mkdir(inputDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true });
+
+    try {
+      const srcFile = path.join(inputDir, 'Movie (2024).mkv');
+      await fs.writeFile(srcFile, 'video');
+      await fs.writeFile(
+        path.join(configDir, 'queue.json'),
+        JSON.stringify({
+          revision: 1,
+          items: [
+            {
+              id: 'sub-item-1',
+              sourcePath: srcFile,
+              relativeSourcePath: 'Movie (2024).mkv',
+              fileName: 'Movie (2024).mkv',
+              extension: '.mkv',
+              mediaKind: 'movie',
+              category: 'movies',
+              parsedTitle: 'Movie',
+              parsedYear: 2024,
+              episodeOrder: 'aired',
+              include: true,
+              probe: {
+                formatName: 'matroska',
+                durationSeconds: 120,
+                sizeBytes: 1000,
+                bitrateBps: 1000,
+                videoStreams: [],
+                audioStreams: [],
+                subtitleStreams: []
+              },
+              externalSubtitles: [],
+              trackSelection: { audioStreamIndices: [], subtitleStreamIndices: [] },
+              candidates: [],
+              needsUserPrompt: false,
+              warnings: []
+            }
+          ]
+        })
+      );
+
+      let releaseSearch!: () => void;
+      const searchEntered = new Promise<void>((resolve) => {
+        const timer = setInterval(() => {
+          if (searchCalls > 0) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 5);
+      });
+      let searchCalls = 0;
+      const downloadSpy = vi.fn();
+
+      const runner = new JobRunner(
+        loadConfig({
+          CONFIG_DIR: configDir,
+          INPUT_DIR: inputDir,
+          BACKUP_DIR: path.join(tmpDir, 'backup'),
+          OUTPUT_MOVIES_DIR: tmpDir,
+          OUTPUT_DOCUMENTARIES_DIR: tmpDir,
+          OUTPUT_ANIMATED_MOVIES_DIR: tmpDir,
+          OUTPUT_TV_SHOWS_DIR: tmpDir,
+          OUTPUT_ANIMATED_SERIES_DIR: tmpDir
+        }),
+        {
+          autoDownloadSubtitles: false,
+          searchSubtitles: async (): Promise<SubtitleCandidate[]> => {
+            searchCalls += 1;
+            await new Promise<void>((resolve) => {
+              releaseSearch = resolve;
+            });
+            return [
+              {
+                id: 'sub-cand-1',
+                provider: 'subdl',
+                language: asIso639_2Code('spa'),
+                variant: 'latam',
+                releaseName: 'Movie.2024',
+                downloadUrl: 'https://example.invalid/sub.zip',
+                hashMatch: false,
+                downloadCount: 10,
+                score: 100
+              }
+            ];
+          },
+          downloadSubtitle: downloadSpy
+        }
+      );
+      await runner.init();
+
+      const clientId = asClientId('client-sub:1');
+      let pendingDownload: Promise<unknown> | undefined;
+      try {
+        pendingDownload = runner.downloadItemSubtitle(
+          clientId,
+          runner.getState().revision,
+          asItemId('sub-item-1')
+        );
+        await searchEntered;
+        runner.startScan(clientId);
+        releaseSearch();
+
+        await expect(pendingDownload).rejects.toMatchObject({ code: 'JOB_IN_PROGRESS' });
+        expect(downloadSpy).not.toHaveBeenCalled();
+      } finally {
+        releaseSearch?.();
+        await pendingDownload?.catch(() => undefined);
+        await runner.unlock(clientId, true).catch(() => undefined);
+      }
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

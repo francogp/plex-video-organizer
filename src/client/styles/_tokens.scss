@@ -12,6 +12,7 @@
   --vo-danger: oklch(64% 0.2 25deg);
   --vo-font-sans: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
   --vo-font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --vo-text-2xs: 0.6875rem;
   --vo-text-xs: 0.75rem;
   --vo-text-sm: 0.8125rem;
   --vo-text-md: 0.875rem;
@@ -29,6 +30,7 @@
   --vo-z-dropdown: 20;
   --vo-z-toast: 60;
   --vo-backdrop: color-mix(in oklch, black 65%, transparent);
+  --vo-segment-divider: color-mix(in oklch, var(--vo-bg) 60%, transparent);
   --vo-bg-gradient:
     radial-gradient(1200px 520px at 15% -10%, oklch(27% 0.045 250deg / 55%), transparent 60%),
     radial-gradient(900px 440px at 90% 0%, oklch(30% 0.05 68deg / 28%), transparent 55%),
@@ -72,6 +74,7 @@
     color-mix(in oklch, var(--vo-accent) 78%, oklch(68% 0.16 78deg))
   );
   --vo-border-highlight: color-mix(in oklch, var(--vo-accent) 42%, var(--vo-border));
+  --vo-segment-divider: color-mix(in oklch, var(--vo-surface) 70%, transparent);
   --vo-shadow-panel: 0 10px 24px color-mix(in oklch, oklch(20% 0.02 255deg) 10%, transparent);
 
   color-scheme: light;

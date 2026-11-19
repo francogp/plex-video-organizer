@@ -11,7 +11,9 @@ export type UiIconName =
   | 'folder-open'
   | 'sun'
   | 'moon'
-  | 'download';
+  | 'download'
+  | 'chart'
+  | 'refresh';
 
 interface IconSpec {
   readonly d: string;
@@ -39,7 +41,9 @@ const ICON_SPECS: Readonly<Record<UiIconName, IconSpec>> = {
     d: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0-6v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41'
   },
   moon: { d: 'M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z' },
-  download: { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3' }
+  download: { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3' },
+  chart: { d: 'M3 3v18h18M7 16v-5M12 16V7M17 16v-3' },
+  refresh: { d: 'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6' }
 };
 
 const props = defineProps<{

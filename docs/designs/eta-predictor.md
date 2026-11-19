@@ -23,7 +23,7 @@ Each workflow currently estimates ETA independently using mismatched physical as
 ## Goals
 
 - Unify ETA calculation across **Process**, **Scan**, and **Verifier** on top of a pure math kernel (`src/domain/eta.ts`) and a coordinator + SQLite adapter (`src/server/`).
-- Separate remaining work inventories by physical unit: audio duration seconds by channel profile (`mono`, `stereo`, `surround`) for CPU-bound stages, `sizeBytes` for I/O-bound stages (`remux_copy`, `move_exdev`), and entry counts for `Scan` probing and `Verifier`.
+- Separate remaining work inventories by physical unit: audio duration seconds by channel profile (`mono`, `stereo`, `surround`) for CPU-bound stages, `sizeBytes` for I/O-bound stages (`remux_copy`, `finalize_io`), and entry counts for `Scan` probing and `Verifier`.
 - Persist up to `1000` recent numeric throughput samples per `(hostKey, workType, profile)` in `plex-video-organizer.sqlite` (`STRICT` table `eta_samples`) via periodic batched writes and end-of-stage flushes.
 - Isolate host metrics via `SERVER_ID` (`.env` / environment) with deterministic fallback to hardware fingerprint (`platform`, `arch`, `os.cpus()`, rounded `os.totalmem()`), with no cross-host fallback.
 - Reuse `speed=` and expose `outTimeSec` from `ffmpegRunner.ts` to update an in-memory EMA and display an explicit cold-start state (`calibrating` -> `"Calibrating..."` when uncalibrated, or active-stage estimate when downstream stages are unseeded).
@@ -43,15 +43,15 @@ None. All initial blending, warm-up, channel-mapping, and cold-start rules are r
 
 ### CUJ 1: `Process` Startup on NAS with Prior History (`SERVER_ID` Set)
 
-- **Given:** The Docker NAS defines `SERVER_ID=nas-main` in `.env` and has prior `eta_samples` rows for `loudnorm_p1`, `remux_loudnorm`, and `move_exdev`. The user starts `Process` on 44 episodes.
-- **When:** Remaining work units are precomputed (deducting `cacheHit` items and checking `stat.dev` on existing mount roots/ancestors to classify `move_rename` vs. `move_exdev`) and `ffmpeg` begins Pass 1/2.
-- **Then:** Once precomputation completes, the UI displays an `estimated` ETA from the NAS baseline and transitions to `live_blended` after warm-up, updating with active pool concurrency and live `speed=` without any cross-host contamination from Windows dev runs.
+- **Given:** The Docker NAS defines `SERVER_ID=nas-main` in `.env` and has prior `eta_samples` rows for `loudnorm_p1`, `remux_loudnorm`, and `finalize_io`. The user starts `Process` on 44 episodes.
+- **When:** Queue step plans (`buildProcessQueuePlan`) are registered per item across worker slots and `ffmpeg` begins Pass 1/2.
+- **Then:** Once queued, `computeQueueEta` projects makespan across all slots and steps using hierarchical rate resolution, transitioning from `'estimated'` to `'live_blended'` and surfacing local finish clock time (`ETA Xh Ym (HH:mm)`) alongside `GET /api/eta/simulation` for `EtaSimulationModal.vue`.
 
 ### CUJ 2: Cold-Start Run (`eta_samples` Empty)
 
-- **Given:** A new server (or a `SERVER_ID` with no prior samples for `remux_loudnorm` / `move_exdev`) starts `Process` or `Scan`.
+- **Given:** A new server (or a `SERVER_ID` with no prior samples for `remux_loudnorm` / `finalize_io`) starts `Process` or `Scan`.
 - **When:** The active stage has not yet passed warm-up (`outTimeSec < 5` and `elapsedSec < 2`), or active stage has live samples while downstream stages remain unseeded.
-- **Then:** While the active stage itself lacks a rate, the backend emits `etaState: 'calibrating'` with `etaSeconds: undefined` and the UI renders `"Calibrating..."` instead of an arbitrary placeholder (`0s`). As soon as the active stage has a valid live rate while downstream stages remain unseeded, it emits the active-stage ETA (`etaSeconds` defined, `etaState: 'calibrating'`) and transitions to `'live_blended'` once all pending stages have rates, persisting completed-stage samples in batch.
+- **Then:** While the active stage/step lacks empirical or hierarchical fallback rates, the backend emits `etaState: 'calibrating'` (and `'Calibrating...'` when `etaSeconds === undefined`, or `~Xh Ym (HH:mm)` once the active step calibrates). With `computeQueueEta` and hierarchical fallback rates (`sibling_profile`, `related_work_type`, `cold_default`), processing queues immediately project full makespan across all slots and steps, transitioning to `'live_blended'` and persisting completed samples in batch.
 
 ### CUJ 3: Cancellation or Manual Skip (`skipScanItem`) Without Baseline Pollution
 
@@ -68,7 +68,7 @@ None. All initial blending, warm-up, channel-mapping, and cold-start rules are r
 ```text
 +-------------------------------------------------------------------+
 |  Callers / Adapters (src/server/services/)                        |
-|  - jobExecutionService.ts (Process: P1, Remux, EXDEV Move)        |
+|  - jobExecutionService.ts (Process: P1, Remux, Finalize I/O)     |
 |  - scanMetadataService.ts + scanner.ts (Scan: Probe, Volumedetect)|
 |  - verifierJobService.ts + libraryVerifierService.ts (Verifier)   |
 |  - ffmpegRunner.ts (emits speed + outTimeSec from -progress)      |
@@ -77,7 +77,7 @@ None. All initial blending, warm-up, channel-mapping, and cold-start rules are r
                                 v
 +-------------------------------------------------------------------+
 |  EtaPredictor Coordinator (src/server/services/etaPredictor.ts)   |
-|  - Resolves hostKey (SERVER_ID -> hardware fingerprint)           |
+|  - Uses resolveHostKey from config.ts (SERVER_ID -> hardware)     |
 |  - Loads baselines from ScanCacheDb                               |
 |  - Tracks in-flight progress deltas & EMA in memory               |
 |  - Flushes completed samples in batch (periodic + stage/job end)  |
@@ -97,14 +97,14 @@ None. All initial blending, warm-up, channel-mapping, and cold-start rules are r
 ### 2. Pure Domain Kernel (`src/domain/eta.ts`) and Contracts (`src/domain/types.ts`)
 
 - **Closed union types derived from `as const` tuples (`domain-type-first` — finite unions with Valibot schema parity)**:
-  - `EtaWorkType`: `'scan_probe' | 'volumedetect' | 'loudnorm_p1' | 'remux_loudnorm' | 'remux_peak_gain' | 'remux_copy' | 'move_exdev' | 'verifier_scan_fs' | 'verifier_scan_probe'`.
+  - `EtaWorkType`: `'scan_probe' | 'volumedetect' | 'loudnorm_p1' | 'remux_loudnorm' | 'remux_peak_gain' | 'remux_copy' | 'finalize_io' | 'verifier_scan_fs' | 'verifier_scan_probe'`.
     - `runFfmpegRemux` executes `-c:v copy` and optional audio normalization in a single `ffmpeg` process, so each queued item registers one of three mutually exclusive remux regimes (`remux_loudnorm`, `remux_peak_gain`, or `remux_copy`), preventing double-counting.
-    - Same-filesystem `fs.rename` (`move_rename` and `verifier_rename`) is `O(1)` (~1ms) and is omitted from inventory/persistence; post-remux `probeMedia` verification (~100ms) is folded into remux stage completion.
+    - `finalize_io` unifies post-remux verification (`probeMedia`), file moving (`moveTempOutputFile`), and backup/cleanup (`backupAndCleanupAfterJob`) measured by `sizeBytes`.
   - `EtaChannelProfile`: `'mono' | 'stereo' | 'surround' | 'default'`.
     - `resolveChannelProfile(channels)`: `channels === 1 -> 'mono'`, `channels === 2 -> 'stereo'`, `channels !== undefined && channels > 2 -> 'surround'`, otherwise `'default'` (used for non-audio stages and unknown channel layouts).
   - `EtaWorkUnitKind`: `'audio_seconds' | 'bytes' | 'entries'`.
     - `'audio_seconds'`: `volumedetect`, `loudnorm_p1`, `remux_loudnorm`, `remux_peak_gain` (using `durationSeconds * includedTrackCount` for multi-track remux so `totalUnits`, `inFlightUnits = outTimeSec * includedTrackCount`, and `completeTask` share identical units).
-    - `'bytes'`: `remux_copy`, `move_exdev`.
+    - `'bytes'`: `remux_copy`, `finalize_io`.
     - `'entries'`: `scan_probe`, `verifier_scan_fs`, `verifier_scan_probe`.
   - `EtaState`: `'calibrating' | 'estimated' | 'live_blended'`.
 - **Mathematical contracts & invariants**:
@@ -115,13 +115,11 @@ None. All initial blending, warm-up, channel-mapping, and cold-start rules are r
     - `bytes` (`remux_copy`): `rate = speed * (context.itemSizeBytes / context.mediaDurationSec)` when both are `> 0` (otherwise computed on completion as `itemSizeBytes / elapsedSec`).
     - Apply EMA update (`alpha = 0.3`) clamped symmetrically to `[prev / 3, prev * 3]` against single-tick spikes.
   - **Blending (`w`)**: Keyed per `${workType}:${profile}` bucket (`observedStageUnits = completedUnits + sum(inFlightUnits)` for that bucket; `totalStageUnits` = post-`skipTask` total). When a historical baseline exists, `w = Math.min(0.7, 0.7 * clamp(observedStageUnits / totalStageUnits, 0, 1))` and `blendedRate = w * liveRate + (1 - w) * baselineRate` (`blendedRate = baselineRate` when `liveRate === undefined`). When no baseline exists, `blendedRate = liveRate`.
-  - **Concurrency scaling (`effectiveRate`)**: Samples recorded from parallel worker pools already reflect active contention per worker slot. For remaining work in bucket `b`, `effectiveRate = blendedRate * min(poolConcurrency, activeOrPendingTasksInPool)` for CPU/pool stages, and `effectiveRate = blendedRate` for single-disk `move_exdev`.
+  - **Concurrency scaling (`effectiveRate`)**: Samples recorded from parallel worker pools already reflect active contention per worker slot. Both `PROCESS` queues (`initQueuePlan`) and stage-mode workflows (`Scan`, `Verifier`, via sliced worker buckets in `#buildStageQueueStates()` with `slices = 1` for serialized `finalize_io`) feed items across `workerCount` parallel slots in `computeQueueEta`, which schedules active/pending work via greedy min-load slot assignment and models intra-item `loudnorm_p1` multi-track parallelism with `ETA_MULTI_TRACK_CONTENTION_FACTOR`.
   - **In-flight progress accounting & idempotency**: `EtaPredictor` tracks `taskState: Map<TaskId, 'active' | 'completed' | 'skipped'>`, `taskStartMs`, `taskTotalUnits`, and `inFlightUnits` (clamped to `[0, taskTotalUnits]`). `remainingUnits(bucket) = Math.max(0, totalUnits - completedUnits - sum(inFlightUnits))`. Calling `completeTask(taskId)` or `skipTask(taskId)` is idempotent: `completeTask` moves `taskTotalUnits` to `completedUnits` and records `taskTotalUnits / ((now - startMs) / 1000)`; `skipTask` subtracts `taskTotalUnits` from `totalUnits` without recording a sample.
   - **State transitions (`EtaState`)**:
     - If `pendingFollowupStages` is non-empty (e.g., `Scan` before `volumedetect` is registered) -> `'calibrating'` with `etaSeconds = undefined`.
-    - If all non-zero pending buckets have `baselineRate` and `liveSamples === 0` (summed across pending stages) -> `'estimated'` with full `etaSeconds`.
-    - If all non-zero pending buckets have `blendedRate` and `liveSamples > 0` -> `'live_blended'` with full `etaSeconds`.
-    - If any pending bucket lacks both `baselineRate` and `liveRate` -> `'calibrating'`; if the active stage's buckets all have rates, `etaSeconds` reports the active stage's remaining seconds (formatted as `~Xm (stage)`), otherwise `etaSeconds = undefined` (`"Calibrating..."`).
+    - Queue plans (`computeQueueEta`) resolve missing `(workType, profile)` entries hierarchically (`live_blended` -> `baseline` -> `sibling_profile` -> `related_work_type` -> `cold_default`) so a single unseeded item never hides downstream stages, outputting `'calibrating'` only when cold-default work accounts for `>= 50%` of remaining seconds (`~Xh Ym (HH:mm)`), otherwise `'estimated'` or `'live_blended'` (`ETA Xh Ym (HH:mm)`).
 - **SSE / UI contracts (`src/domain/types.ts`)**:
   - Add `readonly etaState?: EtaState` to `ActiveJobProgress`, `VerifierProgress`, and `SseProgressEvent`.
   - When `etaState === 'calibrating'` and `etaSeconds === undefined`, `organizerStore.ts` clears any previous `etaSeconds` and `formatEta(etaSeconds, etaState)` returns `'Calibrating...'`.
@@ -146,18 +144,18 @@ CREATE INDEX IF NOT EXISTS idx_eta_samples_lookup
 ```
 
 - **Retention, batching, and NAS mount safety**:
-  - `eta_samples` is exempt from `probe_cache`'s 14-day TTL pruning and instead enforces two rules: (1) keep at most `1000` rows per `(host_key, work_type, profile)` using indexed pruning (`DELETE FROM eta_samples WHERE host_key = ? AND work_type = ? AND profile = ? AND id <= (SELECT id FROM eta_samples WHERE host_key = ? AND work_type = ? AND profile = ? ORDER BY id DESC LIMIT 1 OFFSET 999)`), and (2) prune orphaned `host_key` rows older than 30 days (`created_at < now - 30d`).
+  - `eta_samples` is exempt from `probe_cache`'s 14-day TTL pruning and instead enforces two rules: (1) keep at most `1000` rows per `(host_key, work_type, profile)` using indexed pruning (`DELETE FROM eta_samples WHERE host_key = ? AND work_type = ? AND profile = ? AND id < (SELECT id FROM eta_samples WHERE host_key = ? AND work_type = ? AND profile = ? ORDER BY id DESC LIMIT 1 OFFSET 999)`), and (2) prune orphaned `host_key` rows older than 30 days (`created_at < now - 30d`).
   - Valid samples (`workUnits > 0 && elapsedMs >= 200 && Number.isFinite(rate) && rate > 0`) are buffered in memory and flushed in a single `WAL` transaction every `10` completed tasks, at stage/job end, and on cooperative cancellation (`unlock()`) for already-completed tasks. This produces zero per-tick SQLite I/O and reduces `SQLITE_BUSY` risk on NAS mounts. Note: `WAL` requires local POSIX locking on `CONFIG_DIR`; if `CONFIG_DIR` is on an unsupported network share (`SQLITE_IOERR`, `EACCES`, `EROFS`, `SQLITE_READONLY`), `openScanCacheDb()` falls back to `os.tmpdir()`.
 
 ### 4. Host Identity (`hostKey`) and Service Adapters
 
-- **`resolveHostKey(envServerId?: string): string` (`src/server/services/etaPredictor.ts`)**:
+- **`resolveHostKey(serverId?: string): string` (`src/server/config.ts`)**:
   1. If `SERVER_ID` (trimmed) is non-empty, return `env:${trimmedServerId}`.
-  2. Otherwise, compute `hw:${sha256Hex16}` over `${process.platform}|${os.arch()}|${cpus[0]?.model ?? 'unknown'}|${String(Math.max(1, cpus.length))}|${String(Math.round(os.totalmem() / 1024 ** 3))}` (rounding RAM to nearest GiB prevents minor kernel/cgroup shifts from invalidating history). Log resolved `hostKey`, `coldStart` flag, and loaded baseline counts at job start.
+  2. Otherwise, compute `hw:${sha256Hex16}` over `${process.platform}|${os.arch()}|${cpus[0]?.model ?? 'unknown'}|${String(Math.max(1, cpus.length))}|${String(Math.round(os.totalmem() / 1024 ** 3))}` (rounding RAM to nearest GiB prevents minor kernel/cgroup shifts from invalidating history). Log resolved `hostKey`, `coldStart` flag, and loaded baseline counts at job start. (`resolveServerTag` in `config.ts` derives the filesystem-safe tag used for per-server temporary files.)
 - **`ffmpegRunner.ts`**: Expose `readonly outTimeSec?: number` alongside existing `readonly speed?: number` on `FfmpegProgressUpdate`, and forward full `FfmpegProgressUpdate` in `runFfmpegRemux` and `analyzeAudioVolume` (matching `measureLoudnormPass1`).
-- **`jobExecutionService.ts` (`Process`)**: Before launching the worker pool, compare `fs.stat` (`dev`) between each item's source directory and the nearest existing ancestor of `destPath` (typically the category mount root from `buildMountPathsMap(config)`, falling back to `move_exdev` on `stat` failure) to classify `move_rename` vs. `move_exdev`. Register `loudnorm_p1`, the active remux regime (`remux_loudnorm` / `remux_peak_gain` / `remux_copy`), and `move_exdev`; feed `speed`/`outTimeSec` into `EtaPredictor`.
+- **`jobExecutionService.ts` (`Process`)**: Before launching the worker pool, register per-item queue step plans via `buildProcessQueuePlan(toProcess)` (`loudnorm_p1`, the active remux regime `remux_loudnorm` / `remux_peak_gain` / `remux_copy`, and `finalize_io`); feed `speed`/`outTimeSec` per task ID into `EtaPredictor`, measure `finalize_io` across `probeMedia` + `moveTempOutputFile` + `backupAndCleanupAfterJob`, and weight global percent by `weightedFraction`.
 - **`scanMetadataService.ts` & `scanner.ts` (`Scan`)**: Widen `AudioAnalysisFn` and `analyzeItemAudio` in `scanner.ts` to accept/forward `FfmpegProgressUpdate` (`speed`, `outTimeSec`). Start `Scan` inventory in `scan_probe` with discovered file count, keep `etaState: 'calibrating'` while `scan_probe` collects initial media durations for non-cached items (preventing mid-scan upward ETA jumps), subtract `cacheHit` (`probe_cache` / `audio_cache`) and `skipScanItem` via `skipTask`, and register `volumedetect` inventory for uncached items.
-- **`verifierJobService.ts` & `libraryVerifierService.ts` (`Verifier`)**: Replace local `computeEtaSeconds` with `EtaPredictor`, reconciling dynamic folder/entry discovery and separating `verifier_scan_fs`, `verifier_scan_probe` (`recalculateTags: true`), and `verifier_rename`.
+- **`verifierJobService.ts` & `libraryVerifierService.ts` (`Verifier`)**: Use `EtaPredictor` across `scanLibrariesForCompliance` (including post-fix re-verification in `executeVerifierFix`), reconciling dynamic folder/entry discovery across `verifier_scan_fs` and `verifier_scan_probe` (`recalculateTags: true`), while `applyVerifierRenames` retains linear `computeEtaSeconds` for simple bottom-up rename progress.
 
 ---
 
@@ -198,32 +196,32 @@ CREATE INDEX IF NOT EXISTS idx_eta_samples_lookup
 #### 1. `src/domain/constants.ts` (Modify)
 
 - **Type / Scope:** Domain Constants (`as const` tuples for `domain-type-first` unions and numeric thresholds)
-- **Rationale:** Add union-deriving tuples `ETA_WORK_TYPES`, `ETA_CHANNEL_PROFILES`, `ETA_WORK_UNIT_KINDS`, and `ETA_STATES`, alongside numeric constants `ETA_MAX_SAMPLES_PER_KEY = 1000`, `ETA_ORPHAN_HOST_TTL_MS = 30 * 24 * 60 * 60 * 1000`, `ETA_WARMUP_OUT_TIME_SEC = 5`, `ETA_WARMUP_ELAPSED_SEC = 2`, `ETA_MIN_SAMPLE_MS = 200`, `ETA_EMA_ALPHA = 0.3`, `ETA_LIVE_WEIGHT_MAX = 0.7`, and `ETA_FLUSH_BATCH_SIZE = 10`.
+- **Rationale:** Add union-deriving tuples `ETA_WORK_TYPES`, `ETA_CHANNEL_PROFILES`, `ETA_WORK_UNIT_KINDS`, `ETA_STATES`, `ETA_RATE_SOURCES`, `ETA_SIMULATED_ITEM_STATUSES`, `ETA_SIMULATION_MODES`, and `ETA_STEP_KINDS`, alongside numeric/rate constants `ETA_MAX_SAMPLES_PER_KEY = 1000`, `ETA_ORPHAN_HOST_TTL_MS = 30 * 24 * 60 * 60 * 1000`, `ETA_WARMUP_OUT_TIME_SEC = 5`, `ETA_WARMUP_ELAPSED_SEC = 2`, `ETA_MIN_SAMPLE_MS = 200`, `ETA_EMA_ALPHA = 0.3`, `ETA_LIVE_WEIGHT_MAX = 0.7`, `ETA_FLUSH_BATCH_SIZE = 10`, `ETA_PROFILE_CHANNEL_FACTORS`, `ETA_DEFAULT_COLD_RATES`, `ETA_PEAK_FROM_LOUDNORM_FACTOR`, `ETA_REMUX_LOUDNORM_FROM_P1_FACTOR`, `ETA_COPY_FROM_IO_FACTOR`, `ETA_MULTI_TRACK_CONTENTION_FACTOR`, and `ETA_FALLBACK_CALIBRATING_THRESHOLD`.
 
 #### 2. `src/domain/types.ts` (Modify)
 
 - **Type / Scope:** Domain Type Definitions & Valibot Schemas
-- **Rationale:** Derive `EtaWorkType`, `EtaChannelProfile`, `EtaWorkUnitKind`, and `EtaState` from `constants.ts` tuples with matching Valibot schemas (`EtaWorkTypeSchema`, `EtaChannelProfileSchema`, `EtaWorkUnitKindSchema`, `EtaStateSchema`), and add `readonly etaState?: EtaState` to `ActiveJobProgress`, `VerifierProgress`, and `SseProgressEvent`.
+- **Rationale:** Derive `EtaWorkType`, `EtaChannelProfile`, `EtaWorkUnitKind`, `EtaState`, `EtaRateSource`, `EtaSimulatedItemStatus`, `EtaSimulationMode`, and `EtaStepKind` from `constants.ts` tuples with Valibot schema parity, define branded IDs (`EtaStepId`, `EtaStageId`) and simulation contracts (`EtaRateDiagnostic`, `EtaSimulatedStep`, `EtaSimulatedSlotItem`, `EtaSimulatedSlot`, `EtaSimulationSnapshot`), and add `readonly etaState?: EtaState` to `ActiveJobProgress`, `VerifierProgress`, and `SseProgressEvent`.
 
 #### 3. `src/domain/eta.ts` (Create)
 
 - **Type / Scope:** Pure Domain Prediction Engine (zero I/O)
-- **Rationale:** Implement `getWorkUnitKind(workType)`, `resolveChannelProfile(channels)`, `computeTrimmedMedian(samples)`, `updateEmaRate(prev, rate, alpha)`, `blendRates(baseline, live, observedFraction)`, `convertFfmpegSpeedToRate(workType, speed, context)`, and `computeStageAwareEta(input)` returning `{ readonly etaSeconds?: number; readonly etaState: EtaState }`.
+- **Rationale:** Implement `getWorkUnitKind(workType)`, `resolveChannelProfile(channels)`, `computeTrimmedMedian(samples)`, `updateEmaRate(prev, rate, alpha)`, `convertFfmpegSpeedToRate(workType, speed, context)`, `computeQueueEta(input)` (with internal 4-tier hierarchical rate resolution), `buildEtaStepId`, `buildEtaAttemptTaskId`, `buildEtaStageId`, and `buildEtaStageStepId`.
 
 #### 4. `src/server/config.ts` (Modify)
 
-- **Type / Scope:** Server Environment Config
-- **Rationale:** Add `SERVER_ID: v.optional(v.string())` to env validation, trim whitespace (empty -> `undefined`), and expose `readonly serverId?: string` on `AppConfig`.
+- **Type / Scope:** Server Environment Config & Identity SSoT
+- **Rationale:** Add `SERVER_ID: v.optional(v.string())` to env validation, trim whitespace (empty -> `undefined`), expose `readonly serverId?: string` on `AppConfig`, and export `resolveHostKey` + `resolveServerTag`.
 
 #### 5. `src/server/services/scanCacheDb.ts` (Modify)
 
 - **Type / Scope:** SQLite Unified Persistence (`node:sqlite`)
-- **Rationale:** Append migration `#3` (`eta_samples` `STRICT` table + `CHECK` constraints + `idx_eta_samples_lookup`), extend `isUnwritableDbError` to include `SQLITE_IOERR` / `EIO`, and expose `getEtaSamples(hostKey, workType, profile, limit?)` and `recordEtaSamplesBatch(samples, maxPerKey?, orphanTtlMs?)` pruning only dirty `(host_key, work_type, profile)` tuples per transaction.
+- **Rationale:** Append migration `#3` (`eta_samples` `STRICT` table + `CHECK` constraints + `idx_eta_samples_lookup`), extend `isUnwritableDbError` to include `SQLITE_IOERR` / `EIO`, and expose `getEtaSamples`, `getAllEtaSamplesForHost` (validated via `EtaWorkTypeSchema`/`EtaChannelProfileSchema`), and `recordEtaSamplesBatch` pruning only dirty `(host_key, work_type, profile)` tuples per transaction.
 
 #### 6. `src/server/services/etaPredictor.ts` (Create)
 
-- **Type / Scope:** Server ETA Coordinator & Host Identity Service
-- **Rationale:** Export `resolveHostKey(serverId?: string): string` (`env:<id>` or `hw:<16-hex>`) and per-job `EtaPredictor` with `markStagePending(workType)`, `initStageInventory(workType, entries, poolConcurrency)`, `reconcileStage(workType, entries)`, `startTask(taskId, workType, profile, totalUnits, context)`, `recordTaskProgress(taskId, completedUnits, liveSpeed?)`, `completeTask(taskId)`, `skipTask(taskId)`, `getEstimate()`, and `flush()`. Uses monotonic `performance.now()` and flushes every 10 completed tasks + stage/job completion + cancellation.
+- **Type / Scope:** Server ETA Coordinator
+- **Rationale:** Export `EtaPredictor` using `resolveHostKey` from `config.ts` with `initQueuePlan`, `markStagePending`, `initStageInventory`, `reconcileStage`, `startTask`, `recordTaskProgress`, `completeTask`, `skipTask`, `resetItemForRetry`, `markItemCompleted`, `markItemSkipped`, `getEstimate`, `getSimulationSnapshot`, and `flush`. Uses monotonic `performance.now()` and flushes every 10 completed tasks + stage/job completion + cancellation.
 
 #### 7. `src/server/services/media/ffmpegRunner.ts` (Modify)
 
@@ -233,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_eta_samples_lookup
 #### 8. `src/server/services/jobExecutionService.ts` (Modify)
 
 - **Type / Scope:** Process Job Executor
-- **Rationale:** Replace byte-weighted linear ETA and static stage weights with `EtaPredictor`; inspect `fs.stat` (`dev`) on source dir vs. nearest existing ancestor of `destPath` (or `buildMountPathsMap(config)[item.category]`) before launching workers to classify `move_rename` vs. `move_exdev`; feed `speed`/`outTimeSec` per task ID; and flush completed samples on stage end and cancellation.
+- **Rationale:** Replace byte-weighted linear ETA and static stage weights with `EtaPredictor`; build per-item step plans (`loudnorm_p1`, remux, `finalize_io`), feed `speed`/`outTimeSec` per task ID, and flush completed samples on stage end and cancellation.
 
 #### 9. `src/server/services/scanMetadataService.ts` & `src/server/services/scanner.ts` (Modify)
 
@@ -243,17 +241,17 @@ CREATE INDEX IF NOT EXISTS idx_eta_samples_lookup
 #### 10. `src/server/services/verifierJobService.ts` & `src/server/services/libraryVerifierService.ts` (Modify)
 
 - **Type / Scope:** Verifier Scan & Fix Services
-- **Rationale:** Replace local `computeEtaSeconds` in `libraryVerifierService.ts` with `EtaPredictor`, reconciling dynamic folder/entry discovery and separating `verifier_scan_fs`, `verifier_scan_probe` (`recalculateTags`), and `verifier_rename`.
+- **Rationale:** Use `EtaPredictor` in `scanLibrariesForCompliance` (and post-fix re-verification in `verifierJobService.ts`), reconciling dynamic folder/entry discovery across `verifier_scan_fs` and `verifier_scan_probe` (`recalculateTags`), while retaining linear `computeEtaSeconds` for `applyVerifierRenames`.
 
 #### 11. `src/server/services/jobRunner.ts` (Modify)
 
 - **Type / Scope:** Job Orchestrator
 - **Rationale:** Instantiate a fresh `EtaPredictor` per run (`#activeEtaPredictor`), pass it into `executeScanWorkflow`, `executeMoveJob`, `executeVerifierScan`, and `executeVerifierFix`; wire `skipScanItem` to `EtaPredictor.skipTask`; flush completed samples on `unlock()`; and propagate `etaState` in `#updateProgress`, initial progress objects, and `#emitState`.
 
-#### 12. `src/client/stores/organizerStore.ts`, `src/client/utils/formatters.ts`, `src/client/components/OrganizerWorkspace.vue` & `src/client/components/VerifierStatusToolbar.vue` (Modify)
+#### 12. `src/client/stores/organizerStore.ts`, `src/client/utils/formatters.ts`, `src/client/components/OrganizerWorkspace.vue`, `src/client/components/OrganizerStatusBar.vue`, `src/client/components/EtaSimulationModal.vue` & `src/client/components/VerifierStatusToolbar.vue` (Modify / Create)
 
 - **Type / Scope:** Frontend Store, ETA Formatting & Progress UI
-- **Rationale:** Update `connectSse()` in `organizerStore.ts` to copy `etaState: prog.etaState` and clear stale `etaSeconds` when `prog.etaSeconds === undefined`; update `formatEta(etaSeconds?: number, etaState?: EtaState): string` in `formatters.ts` to return `'Calibrating...'` when `etaState === 'calibrating' && etaSeconds === undefined` and `~Xm (stage)` when `etaState === 'calibrating' && etaSeconds !== undefined`; remove `etaSeconds !== undefined` guards in `OrganizerWorkspace.vue` and `VerifierStatusToolbar.vue` so `formatEta` renders during calibration.
+- **Rationale:** Update `connectSse()` in `organizerStore.ts` to copy `etaState: prog.etaState`, clear stale `etaSeconds` when `prog.etaSeconds === undefined`, and expose `fetchEtaSimulation()`; update `formatEta(etaSeconds?: number, etaState?: EtaState, nowMs?)` in `formatters.ts` to return `'Calibrating...'` when undefined and `ETA Xh Ym (HH:mm)` / `~Xh Ym (HH:mm)` with 24h finish clock time; remove `etaSeconds !== undefined` guards in `OrganizerWorkspace.vue` and `VerifierStatusToolbar.vue` so `formatEta` renders during calibration; and add `ETA Plan` trigger + `EtaSimulationModal.vue` backed by `GET /api/eta/simulation`.
 
 #### 13. `tests/domain/eta.test.ts`, `tests/server/etaPredictor.test.ts`, `tests/server/scanCacheDb.test.ts`, `tests/server/ffmpegRunner.test.ts`, `tests/client/organizerStore.test.ts` & `tests/client/VerifierView.test.ts` (Create / Modify)
 

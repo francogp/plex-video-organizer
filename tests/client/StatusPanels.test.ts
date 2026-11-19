@@ -45,6 +45,25 @@ describe('StatusPanels', () => {
       }
     });
     expect(idleWrapper.text()).toContain('Ready · 3 item(s) in queue');
+    const idleEtaBtn = idleWrapper.find('.vo-progress__eta-btn');
+    expect(idleEtaBtn.exists()).toBe(true);
+    await idleEtaBtn.trigger('click');
+    expect(idleWrapper.emitted('open-eta-simulation')).toHaveLength(1);
+
+    const noInspectWrapper = mount(OrganizerStatusBar, {
+      props: {
+        isBusy: false,
+        activeJob: null,
+        errorMessage: null,
+        isLockedByOther: false,
+        isCancellingJob: false,
+        canInspectEta: false,
+        itemCount: 3,
+        summaryText: '',
+        phase: 'IDLE'
+      }
+    });
+    expect(noInspectWrapper.find('.vo-progress__eta-btn').exists()).toBe(false);
 
     const errorWrapper = mount(OrganizerStatusBar, {
       props: {
@@ -89,6 +108,8 @@ describe('StatusPanels', () => {
     expect(busyWrapper.emitted('cancel')).toHaveLength(1);
     await actionButtons[1]!.trigger('click');
     expect(busyWrapper.emitted('drain')).toHaveLength(1);
+    await busyWrapper.find('.vo-progress__eta-btn').trigger('click');
+    expect(busyWrapper.emitted('open-eta-simulation')).toHaveLength(1);
 
     const drainingWrapper = mount(OrganizerStatusBar, {
       props: {
@@ -113,6 +134,48 @@ describe('StatusPanels', () => {
     expect(
       (drainingWrapper.findAll('.vo-progress__cancel')[1]!.element as HTMLButtonElement).disabled
     ).toBe(true);
+
+    const desyncedProcessingWrapper = mount(OrganizerStatusBar, {
+      props: {
+        isBusy: true,
+        activeJob: {
+          jobId: asJobId('b04e90cd'),
+          totalItems: 31,
+          completedItems: 24,
+          currentPercent: 84,
+          activeTasks: []
+        },
+        errorMessage: null,
+        isLockedByOther: false,
+        isCancellingJob: false,
+        itemCount: 7,
+        summaryText: 'Processing',
+        phase: 'PREFLIGHT_BLOCKED'
+      }
+    });
+    expect(desyncedProcessingWrapper.findAll('.vo-progress__cancel')).toHaveLength(2);
+    expect(desyncedProcessingWrapper.text()).toContain('Stop After Current');
+
+    const scanWrapper = mount(OrganizerStatusBar, {
+      props: {
+        isBusy: true,
+        activeJob: {
+          jobId: asJobId('scan'),
+          totalItems: 10,
+          completedItems: 2,
+          currentPercent: 20,
+          activeTasks: []
+        },
+        errorMessage: null,
+        isLockedByOther: false,
+        isCancellingJob: false,
+        itemCount: 10,
+        summaryText: 'Scanning',
+        phase: 'SCANNING'
+      }
+    });
+    expect(scanWrapper.findAll('.vo-progress__cancel')).toHaveLength(1);
+    expect(scanWrapper.text()).not.toContain('Stop After Current');
   });
 
   it('ServerLogsPanel renders empty state, log items, and emits clear', async () => {
@@ -212,5 +275,102 @@ describe('StatusPanels', () => {
     expect(wrapper.emitted('set-audio-preferred-languages')?.[2]).toEqual([
       ['eng', 'spa', 'zho', 'jpn', 'und', 'kor']
     ]);
+  });
+
+  it('AppHeader enforces cross-tab mutual exclusion on Scan Input and Verifier buttons', () => {
+    const queueBusyVerifierWrapper = mount(AppHeader, {
+      props: {
+        appSemver: '1.2.0',
+        phase: 'PROCESSING',
+        clientId: 'c1:t1',
+        activeTab: 'verifier',
+        queueCount: 1,
+        verifierCount: 1,
+        theme: 'dark',
+        isInitializing: false,
+        isLockedByOther: false,
+        isBusy: true,
+        canProcessQueue: false,
+        hasUnresolvedConflicts: false,
+        includedQueueCount: 1,
+        verifierScanning: false,
+        verifierFixing: false,
+        selectedVerifierCount: 1,
+        recalculateVerifierTags: false,
+        mountPaths: null,
+        preferredLanguages: ['eng'],
+        audioPreferredLanguages: ['eng']
+      }
+    });
+    const scanLibsBtn = queueBusyVerifierWrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Scan Libraries'));
+    const fixLibsBtn = queueBusyVerifierWrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Fix Selected (Rename)'));
+    const recalcInput = queueBusyVerifierWrapper.find('input[type="checkbox"]');
+    expect((scanLibsBtn!.element as HTMLButtonElement).disabled).toBe(true);
+    expect((fixLibsBtn!.element as HTMLButtonElement).disabled).toBe(true);
+    expect((recalcInput.element as HTMLInputElement).disabled).toBe(true);
+
+    const verifierBusyOrganizerWrapper = mount(AppHeader, {
+      props: {
+        appSemver: '1.2.0',
+        phase: 'READY',
+        clientId: 'c1:t1',
+        activeTab: 'organizer',
+        queueCount: 1,
+        verifierCount: 0,
+        theme: 'dark',
+        isInitializing: false,
+        isLockedByOther: false,
+        isBusy: false,
+        canProcessQueue: false,
+        hasUnresolvedConflicts: false,
+        includedQueueCount: 1,
+        verifierScanning: true,
+        verifierFixing: false,
+        selectedVerifierCount: 0,
+        recalculateVerifierTags: false,
+        mountPaths: null,
+        preferredLanguages: ['eng'],
+        audioPreferredLanguages: ['eng']
+      }
+    });
+    const scanInputBtn = verifierBusyOrganizerWrapper
+      .findAll('button')
+      .find((b) => b.text().includes('Scan Input'));
+    expect((scanInputBtn!.element as HTMLButtonElement).disabled).toBe(true);
+
+    const initVerifierWrapper = mount(AppHeader, {
+      props: {
+        appSemver: '1.2.0',
+        phase: 'READY',
+        clientId: 'c1:t1',
+        activeTab: 'verifier',
+        queueCount: 0,
+        verifierCount: 0,
+        theme: 'dark',
+        isInitializing: true,
+        isLockedByOther: false,
+        isBusy: false,
+        canProcessQueue: false,
+        hasUnresolvedConflicts: false,
+        includedQueueCount: 0,
+        verifierScanning: false,
+        verifierFixing: false,
+        selectedVerifierCount: 0,
+        recalculateVerifierTags: false,
+        mountPaths: null,
+        preferredLanguages: ['eng'],
+        audioPreferredLanguages: ['eng']
+      }
+    });
+    expect(
+      (initVerifierWrapper.find('input[type="checkbox"]').element as HTMLInputElement).disabled
+    ).toBe(true);
+    expect(initVerifierWrapper.find('label.vo-toggle-pill').attributes('aria-disabled')).toBe(
+      'true'
+    );
   });
 });

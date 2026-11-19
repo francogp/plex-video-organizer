@@ -6,6 +6,7 @@ import type {
   ConflictDecision,
   DiskSpaceCheck,
   EpisodeOrderMode,
+  EtaSimulationSnapshot,
   ItemId,
   ItemPatch,
   MediaKind,
@@ -43,6 +44,7 @@ export interface WorkflowStorePort {
   startJob(resolutions: Partial<Record<ItemId, ConflictDecision>>): Promise<void>;
   unlock(force: boolean): Promise<void>;
   drainJob(): Promise<void>;
+  fetchEtaSimulation(): Promise<EtaSimulationSnapshot>;
   fixVerifier(
     entryIds: readonly VerifierEntryId[],
     conflictResolutions: Partial<Record<VerifierEntryId, ConflictDecision>>
@@ -78,6 +80,13 @@ export interface OrganizerWorkflow {
   readonly verifierConflictsOpen: Ref<boolean>;
   readonly verifierFixAfterResolve: Ref<boolean>;
   readonly verifierConflictComparisons: ComputedRef<readonly ConflictComparison<VerifierEntryId>[]>;
+  readonly etaSimulationOpen: Ref<boolean>;
+  readonly etaSimulationData: Ref<EtaSimulationSnapshot | null>;
+  readonly etaSimulationLoading: Ref<boolean>;
+  readonly etaSimulationError: Ref<string | null>;
+  openEtaSimulation(): Promise<void>;
+  refreshEtaSimulation(): Promise<void>;
+  closeEtaSimulation(): void;
   handleSearchSubtitles(item: ScannedItem): Promise<void>;
   handleDownloadSubtitle(item: ScannedItem, candidate: SubtitleCandidate): Promise<void>;
   closeSubtitlePicker(): void;
@@ -138,6 +147,10 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
   const conflictsOpen = ref(false);
   const confirmUnlockOpen = ref(false);
   const isCancellingJob = ref(false);
+  const etaSimulationOpen = ref(false);
+  const etaSimulationData = ref<EtaSimulationSnapshot | null>(null);
+  const etaSimulationLoading = ref(false);
+  const etaSimulationError = ref<string | null>(null);
   const isDrainingJob = ref(false);
   const organizerModalConflictItemId = ref<ItemId | null>(null);
   const verifierConflictResolutions = ref<Partial<Record<VerifierEntryId, ConflictDecision>>>({});
@@ -513,6 +526,27 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
     }
   }
 
+  async function refreshEtaSimulation(): Promise<void> {
+    etaSimulationLoading.value = true;
+    etaSimulationError.value = null;
+    try {
+      etaSimulationData.value = await store.fetchEtaSimulation();
+    } catch (err) {
+      etaSimulationError.value = err instanceof Error ? err.message : String(err);
+    } finally {
+      etaSimulationLoading.value = false;
+    }
+  }
+
+  async function openEtaSimulation(): Promise<void> {
+    etaSimulationOpen.value = true;
+    await refreshEtaSimulation();
+  }
+
+  function closeEtaSimulation(): void {
+    etaSimulationOpen.value = false;
+  }
+
   return {
     inspectingItem,
     searchingItem,
@@ -534,6 +568,13 @@ export function useOrganizerWorkflow(store: WorkflowStorePort): OrganizerWorkflo
     verifierConflictsOpen,
     verifierFixAfterResolve,
     verifierConflictComparisons,
+    etaSimulationOpen,
+    etaSimulationData,
+    etaSimulationLoading,
+    etaSimulationError,
+    openEtaSimulation,
+    refreshEtaSimulation,
+    closeEtaSimulation,
     handleSearchSubtitles,
     handleDownloadSubtitle,
     closeSubtitlePicker,

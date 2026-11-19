@@ -163,6 +163,17 @@ const BYTES_PER_KIB = 1024;
 const BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB;
 const BYTES_PER_GIB = BYTES_PER_MIB * BYTES_PER_KIB;
 const BYTES_PER_TIB = BYTES_PER_GIB * BYTES_PER_KIB;
+const MS_PER_SECOND = 1000;
+const MARCH_MONTH_INDEX = 3;
+const ERA_YEARS = 400;
+const DAYS_PER_ERA = 146_097;
+const DAYS_PER_COMMON_YEAR = 365;
+const DOY_MONTH_COEFF = 153;
+const DOY_MONTH_ADD = 2;
+const DOY_MONTH_DIV = 5;
+const MONTH_APRIL_TO_FEB_SHIFT = 9;
+const LEAP_PERIOD_FOUR = 4;
+const LEAP_PERIOD_HUNDRED = 100;
 
 /** Formats byte counts into readable `MB`, `GB`, or `TB` labels. */
 export function formatBytesHuman(bytes: number): string {
@@ -217,25 +228,126 @@ export function formatProbeSpecRows(probe: MediaProbeSummary): readonly ProbeSpe
   ];
 }
 
-/** Formats remaining ETA seconds into a compact human-readable string (`ETA 1m 24s`, `~1m 24s (stage)`, or `Calibrating...`). */
-export function formatEta(etaSeconds?: number, etaState?: EtaState): string {
+/** Formats a rounded seconds duration concisely (`42s`, `2m 5s`, or `5h 58m`). */
+export function formatDurationCompact(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  if (total < SECONDS_PER_MINUTE) {
+    return `${String(total)}s`;
+  }
+  if (total < SECONDS_PER_HOUR) {
+    const mins = Math.floor(total / SECONDS_PER_MINUTE);
+    const secs = total % SECONDS_PER_MINUTE;
+    return `${String(mins)}m ${String(secs)}s`;
+  }
+  const hours = Math.floor(total / SECONDS_PER_HOUR);
+  const mins = Math.floor((total % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
+  return `${String(hours)}h ${String(mins)}m`;
+}
+
+const H23_CLOCK_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23'
+});
+
+function getCurrentEpochMs(): number {
+  return typeof Temporal !== 'undefined'
+    ? Temporal.Now.instant().epochMilliseconds
+    : Math.trunc(performance.timeOrigin + performance.now());
+}
+
+interface LocalDateTimeParts {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+  readonly hour: string;
+  readonly minute: string;
+  readonly second: string;
+}
+
+function getLocalDateTimeParts(epochMs: number): LocalDateTimeParts {
+  const safeMs = Math.trunc(epochMs);
+  if (typeof Temporal !== 'undefined') {
+    const zoned = Temporal.Instant.fromEpochMilliseconds(safeMs).toZonedDateTimeISO(
+      Temporal.Now.timeZoneId()
+    );
+    return {
+      year: zoned.year,
+      month: zoned.month,
+      day: zoned.day,
+      hour: String(zoned.hour).padStart(PAD_TWO, '0'),
+      minute: String(zoned.minute).padStart(PAD_TWO, '0'),
+      second: String(zoned.second).padStart(PAD_TWO, '0')
+    };
+  }
+  const partMap = new Map(H23_CLOCK_FORMATTER.formatToParts(safeMs).map((p) => [p.type, p.value]));
+  return {
+    year: Number(partMap.get('year') ?? 0),
+    month: Number(partMap.get('month') ?? 1),
+    day: Number(partMap.get('day') ?? 1),
+    hour: (partMap.get('hour') ?? '00').padStart(PAD_TWO, '0'),
+    minute: (partMap.get('minute') ?? '00').padStart(PAD_TWO, '0'),
+    second: (partMap.get('second') ?? '00').padStart(PAD_TWO, '0')
+  };
+}
+
+/** Formats a local 24h `HH:mm:ss` timestamp without legacy `Date` globals. */
+export function formatLocalTimeWithSeconds(epochMs: number): string {
+  const { hour, minute, second } = getLocalDateTimeParts(epochMs);
+  return `${hour}:${minute}:${second}`;
+}
+
+function civilDayNumber(year: number, month: number, day: number): number {
+  const shiftedYear = year - (month < MARCH_MONTH_INDEX ? 1 : 0);
+  const era = Math.floor(shiftedYear / ERA_YEARS);
+  const yearOfEra = shiftedYear - era * ERA_YEARS;
+  const monthShifted =
+    month + (month >= MARCH_MONTH_INDEX ? -MARCH_MONTH_INDEX : MONTH_APRIL_TO_FEB_SHIFT);
+  const dayOfYear =
+    Math.floor((DOY_MONTH_COEFF * monthShifted + DOY_MONTH_ADD) / DOY_MONTH_DIV) + day - 1;
+  const dayOfEra =
+    yearOfEra * DAYS_PER_COMMON_YEAR +
+    Math.floor(yearOfEra / LEAP_PERIOD_FOUR) -
+    Math.floor(yearOfEra / LEAP_PERIOD_HUNDRED) +
+    dayOfYear;
+  return era * DAYS_PER_ERA + dayOfEra;
+}
+
+/** Formats local 24h completion clock time (`HH:mm` or `+Nd HH:mm` when crossing midnight). */
+export function formatFinishClockTime(etaSeconds: number, nowMs = getCurrentEpochMs()): string {
+  const startMs = Math.trunc(nowMs);
+  const endMs = startMs + Math.max(0, Math.round(etaSeconds)) * MS_PER_SECOND;
+  const start = getLocalDateTimeParts(startMs);
+  const end = getLocalDateTimeParts(endMs);
+  const dayDiff = Math.max(
+    0,
+    civilDayNumber(end.year, end.month, end.day) -
+      civilDayNumber(start.year, start.month, start.day)
+  );
+  return dayDiff > 0
+    ? `+${String(dayDiff)}d ${end.hour}:${end.minute}`
+    : `${end.hour}:${end.minute}`;
+}
+
+/** Formats remaining ETA seconds with local finish clock (`ETA 1h 2m (04:15)`, `~2m 5s (22:10)`, or `Calibrating...`). */
+export function formatEta(
+  etaSeconds?: number,
+  etaState?: EtaState,
+  nowMs = getCurrentEpochMs()
+): string {
   if (etaSeconds === undefined || !Number.isFinite(etaSeconds) || etaSeconds < 0) {
     return etaState === 'calibrating' ? 'Calibrating...' : '';
   }
   const total = Math.round(etaSeconds);
-  let durationText: string;
-  if (total < SECONDS_PER_MINUTE) {
-    durationText = `${String(total)}s`;
-  } else if (total < SECONDS_PER_HOUR) {
-    const mins = Math.floor(total / SECONDS_PER_MINUTE);
-    const secs = total % SECONDS_PER_MINUTE;
-    durationText = `${String(mins)}m ${String(secs)}s`;
-  } else {
-    const hours = Math.floor(total / SECONDS_PER_HOUR);
-    const mins = Math.floor((total % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
-    durationText = `${String(hours)}h ${String(mins)}m`;
-  }
-  return etaState === 'calibrating' ? `~${durationText} (stage)` : `ETA ${durationText}`;
+  const durationText = formatDurationCompact(total);
+  const finishText = formatFinishClockTime(total, nowMs);
+  return etaState === 'calibrating'
+    ? `~${durationText} (${finishText})`
+    : `ETA ${durationText} (${finishText})`;
 }
 
 export type ExternalProviderKind = 'tvdb' | 'imdb' | 'tmdb';

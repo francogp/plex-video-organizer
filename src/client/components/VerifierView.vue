@@ -86,6 +86,9 @@ const selectedIds = ref<Set<VerifierEntryId>>(new Set());
 const filterCategory = ref<OutputCategory | 'all'>('all');
 const searchQuery = ref('');
 const vTableRef = ref<InstanceType<typeof VirtualDataTable> | null>(null);
+const controlsDisabled = computed<boolean>(
+  () => props.disabled || props.state.scanning || props.state.fixing
+);
 
 const { filteredIndices, setRows, runQuery } = useTableWorker();
 
@@ -257,7 +260,7 @@ function categoryLabel(category: OutputCategory): string {
           <input
             type="checkbox"
             :checked="allVisibleSelected"
-            :disabled="props.disabled || filteredIndices.length === 0"
+            :disabled="controlsDisabled || filteredIndices.length === 0"
             aria-label="Select all visible issues"
             @change="toggleAllVisible()"
           />
@@ -274,7 +277,7 @@ function categoryLabel(category: OutputCategory): string {
           <input
             type="checkbox"
             :checked="selectedIds.has(row.id)"
-            :disabled="props.disabled || props.state.fixing"
+            :disabled="controlsDisabled"
             :aria-label="`Select ${row.currentRootName}`"
             @change="toggleEntry(row.id)"
           />
@@ -317,7 +320,7 @@ function categoryLabel(category: OutputCategory): string {
                 <ConflictActionButton
                   v-if="hasDestinationCollision(row)"
                   :decision="props.conflictResolutions?.[row.id]"
-                  :disabled="props.disabled || props.state.fixing || !row.collisionComparison"
+                  :disabled="controlsDisabled || !row.collisionComparison"
                   :title="
                     row.collisionComparison
                       ? 'Compare files and choose Overwrite or Ignore'

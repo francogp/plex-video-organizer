@@ -424,5 +424,26 @@ describe('VerifierView', () => {
       }
     });
     expect(ignoreWrapper.text()).toContain('Ignore');
+
+    for (const activeFlags of [
+      { scanning: false, fixing: true },
+      { scanning: true, fixing: false }
+    ]) {
+      const busyWrapper = mount(VerifierView, {
+        props: {
+          state: { ...state, ...activeFlags },
+          disabled: false,
+          conflictResolutions: {}
+        }
+      });
+      const busyHeaderCheckbox = busyWrapper.find('thead input[type="checkbox"]');
+      const busyRowCheckbox = busyWrapper.find('input[aria-label="Select Ant-Man (2015)"]');
+      const busyConflictBtn = busyWrapper
+        .findAll('button')
+        .find((btn) => btn.text().includes('Resolve conflict'));
+      expect((busyHeaderCheckbox.element as HTMLInputElement).disabled).toBe(true);
+      expect((busyRowCheckbox.element as HTMLInputElement).disabled).toBe(true);
+      expect((busyConflictBtn!.element as HTMLButtonElement).disabled).toBe(true);
+    }
   });
 });

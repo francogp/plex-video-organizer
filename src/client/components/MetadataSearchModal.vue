@@ -270,19 +270,4 @@ const filePillLabel = computed<string>(() => {
   flex-wrap: wrap;
   gap: var(--vo-space-2);
 }
-
-.vo-alert {
-  margin: 0;
-  padding: var(--vo-space-2) var(--vo-space-3);
-  border: 1px solid var(--vo-danger);
-  border-radius: var(--vo-radius-sm);
-  color: var(--vo-danger);
-  font-size: var(--vo-text-xs);
-}
-
-.vo-muted {
-  margin: 0;
-  color: var(--vo-text-muted);
-  font-size: var(--vo-text-xs);
-}
 </style>

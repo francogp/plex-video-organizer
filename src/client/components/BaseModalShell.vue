@@ -101,7 +101,7 @@ watch(
 .vo-operator-modal__header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--vo-space-3);
   padding: var(--vo-space-3) var(--vo-space-4);
   background-color: var(--vo-surface-elevated);
@@ -125,6 +125,7 @@ watch(
     margin: 0;
     font-size: var(--vo-text-md);
     font-weight: var(--vo-weight-semibold);
+    flex: 0 1 auto;
   }
 }
 
@@ -145,8 +146,10 @@ watch(
 }
 
 .vo-operator-modal__close {
+  justify-content: center;
   padding: var(--vo-space-1) var(--vo-space-2);
   line-height: 1;
+  min-inline-size: 2.375rem;
 }
 
 .vo-operator-modal__body {

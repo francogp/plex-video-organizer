@@ -12,6 +12,7 @@ import type {
   ConnectionStatus,
   DiskSpaceCheck,
   EpisodeOrderMode,
+  EtaSimulationSnapshot,
   ExternalSubtitleFile,
   ItemId,
   ItemPatch,
@@ -94,7 +95,12 @@ export const useOrganizerStore = defineStore('organizer', () => {
   );
 
   const isBusy = computed(
-    (): boolean => phase.value === 'SCANNING' || phase.value === 'PROCESSING'
+    (): boolean =>
+      phase.value === 'SCANNING' || phase.value === 'PROCESSING' || activeJob.value !== null
+  );
+
+  const isVerifierActive = computed(
+    (): boolean => verifierState.value.scanning || verifierState.value.fixing
   );
 
   const isInitializing = computed(
@@ -110,7 +116,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
   );
 
   const canProcessQueue = computed((): boolean => {
-    if (isInitializing.value || isLockedByOther.value || isBusy.value) {
+    if (isInitializing.value || isLockedByOther.value || isBusy.value || isVerifierActive.value) {
       return false;
     }
     const included = items.value.filter((item) => item.include);
@@ -286,7 +292,9 @@ export const useOrganizerStore = defineStore('organizer', () => {
         attempt === 0 &&
         status === HTTP_CONFLICT_STATUS &&
         data.error === 'STALE_REVISION' &&
-        data.state !== undefined;
+        data.state !== undefined &&
+        !isBusy.value &&
+        !isVerifierActive.value;
       if (isRetryableStale) {
         errorMessage.value = null;
         continue;
@@ -467,7 +475,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
   }
 
   async function refreshPreflightSafely(): Promise<void> {
-    if (isLockedByOther.value || isBusy.value) {
+    if (isLockedByOther.value || isBusy.value || isVerifierActive.value) {
       return;
     }
     const hasIncluded = items.value.some((item) => item.include);
@@ -697,6 +705,10 @@ export const useOrganizerStore = defineStore('organizer', () => {
     applyServerState(next);
   }
 
+  async function fetchEtaSimulation(): Promise<EtaSimulationSnapshot> {
+    return requestJson<EtaSimulationSnapshot>('/api/eta/simulation');
+  }
+
   return {
     clientId,
     theme,
@@ -749,6 +761,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     startJob,
     unlock,
     drainJob,
+    fetchEtaSimulation,
     clearLogs,
     clearError,
     dismissErrorToast,

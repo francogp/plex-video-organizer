@@ -25,6 +25,7 @@ const isBuffering = ref(false);
 const isPlaying = ref(false);
 const isMuted = ref(false);
 const subtitlesEnabled = ref(true);
+const fastMode = ref(false);
 const streamError = ref<string | null>(null);
 
 const totalDurationSeconds = computed((): number => {
@@ -46,18 +47,40 @@ const sliderValueSeconds = computed((): number =>
     : Math.floor(absoluteCurrentSeconds.value)
 );
 
-function buildPreviewEndpointUrl(endpoint: string, paramName: string): string {
+type PreviewQueryKey = 't' | 'fast' | 'offset';
+
+function buildPreviewEndpointUrl(
+  endpoint: 'stream' | 'subtitles/preview.vtt',
+  queryEntries: readonly (readonly [PreviewQueryKey, string | undefined])[] = []
+): string {
   if (!props.item) {
     return '';
   }
   const base = `/api/queue/items/${encodeURIComponent(props.item.id)}/${endpoint}`;
-  return seekOffsetSeconds.value > 0
-    ? `${base}?${paramName}=${String(seekOffsetSeconds.value)}`
-    : base;
+  const params = new URLSearchParams();
+  for (const [key, value] of queryEntries) {
+    if (value !== undefined) {
+      params.set(key, value);
+    }
+  }
+  const query = params.toString();
+  return query.length > 0 ? `${base}?${query}` : base;
 }
 
-const videoSrc = computed((): string => buildPreviewEndpointUrl('stream', 't'));
-const vttSrc = computed((): string => buildPreviewEndpointUrl('subtitles/preview.vtt', 'offset'));
+const videoSrc = computed((): string =>
+  buildPreviewEndpointUrl('stream', [
+    ['t', seekOffsetSeconds.value > 0 ? String(seekOffsetSeconds.value) : undefined],
+    ['fast', fastMode.value ? '1' : undefined]
+  ])
+);
+const vttSrc = computed((): string =>
+  buildPreviewEndpointUrl('subtitles/preview.vtt', [
+    ['offset', seekOffsetSeconds.value > 0 ? String(seekOffsetSeconds.value) : undefined]
+  ])
+);
+const bufferingStatusLabel = computed((): string =>
+  fastMode.value ? 'Transcoding 480p Fast (Low CPU) + AAC...' : 'Transcoding 480p + AAC...'
+);
 
 function formatClock(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
@@ -141,6 +164,14 @@ function toggleSubtitles(): void {
   syncTrackMode();
 }
 
+function toggleFastMode(): void {
+  fastMode.value = !fastMode.value;
+  const el = videoRef.value;
+  if (isPlaying.value || isBuffering.value || (el?.readyState ?? 0) > 0) {
+    void seekTo(absoluteCurrentSeconds.value);
+  }
+}
+
 async function toggleFullscreen(): Promise<void> {
   const el = videoRef.value;
   if (!el) {
@@ -216,6 +247,7 @@ watch(
     isBuffering.value = false;
     isPlaying.value = false;
     subtitlesEnabled.value = true;
+    fastMode.value = false;
     streamError.value = null;
   }
 );
@@ -276,7 +308,7 @@ onBeforeUnmount(() => {
               {{ formatClock(sliderValueSeconds) }} / {{ formatClock(totalDurationSeconds) }}
             </span>
             <span v-if="isBuffering" class="vo-preview-timeline__status vo-mono">
-              Transcoding 720p + AAC...
+              {{ bufferingStatusLabel }}
             </span>
           </div>
           <div v-if="totalDurationSeconds > 0" class="vo-preview-timeline__scrubber">
@@ -332,6 +364,18 @@ onBeforeUnmount(() => {
             >
               <span aria-hidden="true">{{ isMuted ? '🔇' : '🔊' }}</span>
               {{ isMuted ? 'Muted' : 'Audio' }}
+            </button>
+            <button
+              type="button"
+              class="vo-btn"
+              :class="{ 'vo-btn--active': fastMode }"
+              :aria-pressed="fastMode"
+              aria-label="Toggle fast low-CPU preview mode"
+              title="Skip non-reference frames (~8–12 fps) to halve NAS CPU usage"
+              @click="toggleFastMode"
+            >
+              <span aria-hidden="true">⚡</span>
+              Fast Mode
             </button>
             <button
               type="button"

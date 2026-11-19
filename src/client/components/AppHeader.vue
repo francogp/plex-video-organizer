@@ -94,8 +94,13 @@ const processQueueTitle = computed<string>(() => {
     : 'Resolve Match Candidate and Tracks for all included items first';
 });
 
-const verifierBusy = computed<boolean>(
-  () => props.isLockedByOther || props.verifierScanning || props.verifierFixing
+const controlsDisabled = computed<boolean>(
+  () =>
+    props.isInitializing ||
+    props.isLockedByOther ||
+    props.isBusy ||
+    props.verifierScanning ||
+    props.verifierFixing
 );
 
 const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label: string }>(() =>
@@ -178,7 +183,7 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
         <button
           type="button"
           class="vo-btn vo-btn--scan"
-          :disabled="props.isInitializing || props.isLockedByOther || props.isBusy"
+          :disabled="controlsDisabled"
           @click="emit('scan-input')"
         >
           <UiIcon name="search" />
@@ -200,13 +205,13 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
         <label
           class="vo-btn vo-toggle-pill"
           :data-active="props.recalculateVerifierTags"
-          :aria-disabled="verifierBusy"
+          :aria-disabled="controlsDisabled"
           title="Run FFprobe on output movie files to recalculate Plex [tags] (DV, HDR10+, audio channels, Spanish Audio)"
         >
           <input
             :checked="props.recalculateVerifierTags"
             type="checkbox"
-            :disabled="verifierBusy"
+            :disabled="controlsDisabled"
             @change="
               emit('update:recalculateVerifierTags', ($event.target as HTMLInputElement).checked)
             "
@@ -216,7 +221,7 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
         <button
           type="button"
           class="vo-btn vo-btn--scan"
-          :disabled="props.isInitializing || verifierBusy"
+          :disabled="controlsDisabled"
           @click="emit('scan-verifier')"
         >
           <UiIcon :name="verifierScanButton.icon" />
@@ -225,7 +230,7 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
         <button
           type="button"
           class="vo-btn vo-btn--primary"
-          :disabled="props.isInitializing || verifierBusy || props.selectedVerifierCount === 0"
+          :disabled="controlsDisabled || props.selectedVerifierCount === 0"
           @click="emit('fix-verifier')"
         >
           <template v-if="props.verifierFixing">

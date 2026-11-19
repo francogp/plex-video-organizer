@@ -173,8 +173,8 @@ describe('QueueTable', () => {
     const baTime = formatBuenosAiresTimestamp('2026-11-13T00:34:15.000Z');
     expect(baTime).toContain('21:34:15');
     expect(formatEta(undefined)).toBe('');
-    expect(formatEta(45)).toBe('ETA 45s');
-    expect(formatEta(3665)).toBe('ETA 1h 1m');
+    expect(formatEta(45)).toMatch(/^ETA 45s \(\d{2}:\d{2}\)$/);
+    expect(formatEta(3665)).toMatch(/^ETA 1h 1m \((?:\+\d+d )?\d{2}:\d{2}\)$/);
     expect(splitRelativePathSegments('')).toEqual({ folders: [], fileName: '' });
     expect(formatSizeDeltaMb(0, 1_048_576)).toContain('-');
 

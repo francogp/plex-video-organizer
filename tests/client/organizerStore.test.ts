@@ -6,6 +6,7 @@ import { useOrganizerStore } from '../../src/client/stores/organizerStore.ts';
 import {
   asIso639_2Code,
   asItemId,
+  asJobId,
   asTvdbId,
   type ScannedItem,
   type SubtitleCandidate
@@ -649,16 +650,38 @@ describe('organizerStore', () => {
     vi.useRealTimers();
   });
 
-  it('formats ETA seconds into compact human-readable strings', async () => {
-    const { formatEta } = await import('../../src/client/utils/formatters.ts');
-    expect(formatEta(undefined)).toBe('');
-    expect(formatEta(undefined, 'calibrating')).toBe('Calibrating...');
-    expect(formatEta(-5)).toBe('');
-    expect(formatEta(42)).toBe('ETA 42s');
-    expect(formatEta(125)).toBe('ETA 2m 5s');
-    expect(formatEta(125, 'calibrating')).toBe('~2m 5s (stage)');
-    expect(formatEta(125, 'estimated')).toBe('ETA 2m 5s');
-    expect(formatEta(3725)).toBe('ETA 1h 2m');
+  it('formats ETA seconds with deterministic local 24h completion clock time including non-Temporal fallback', async () => {
+    const { formatEta, formatFinishClockTime, formatLocalTimeWithSeconds } =
+      await import('../../src/client/utils/formatters.ts');
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const now = new Date(2026, 10, 18, 22, 10, 0).getTime();
+    const expectedAfter = (sec: number): string => {
+      const target = new Date(now + sec * 1000);
+      return `${pad(target.getHours())}:${pad(target.getMinutes())}`;
+    };
+
+    expect(formatEta(undefined, undefined, now)).toBe('');
+    expect(formatEta(undefined, 'calibrating', now)).toBe('Calibrating...');
+    expect(formatEta(-5, undefined, now)).toBe('');
+    expect(formatEta(42, undefined, now)).toBe(`ETA 42s (${expectedAfter(42)})`);
+    expect(formatEta(125, undefined, now)).toBe(`ETA 2m 5s (${expectedAfter(125)})`);
+    expect(formatEta(125, 'calibrating', now)).toBe(`~2m 5s (${expectedAfter(125)})`);
+    expect(formatEta(125, 'estimated', now)).toBe(`ETA 2m 5s (${expectedAfter(125)})`);
+    // 22:10 + 3h (10800s) -> crosses midnight (+1d 01:10)
+    expect(formatFinishClockTime(10_800, now)).toBe('+1d 01:10');
+    expect(formatEta(10_800, 'live_blended', now)).toBe('ETA 3h 0m (+1d 01:10)');
+    // +2 days
+    expect(formatFinishClockTime(136_800, now)).toBe('+2d 12:10');
+
+    // Non-Temporal browser fallback (22:00 + 6h 15m crosses calendar midnight -> +1d 04:15)
+    const now22 = new Date(2026, 10, 18, 22, 0, 0).getTime();
+    vi.stubGlobal('Temporal', undefined);
+    try {
+      expect(formatLocalTimeWithSeconds(now22)).toBe('22:00:00');
+      expect(formatFinishClockTime(6 * 3600 + 15 * 60, now22)).toBe('+1d 04:15');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('persists and syncs preferredLanguages in storage and store', async () => {
@@ -962,5 +985,277 @@ describe('organizerStore', () => {
       { streamOrder: 2, include: true, language: 'spa', isDefault: true }
     ]);
     vi.unstubAllGlobals();
+  });
+
+  it('treats activeJob as busy regardless of phase and skips STALE_REVISION retry when server is active', async () => {
+    const store = useOrganizerStore();
+    let preflightCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith('/api/state')) {
+        return new Response(
+          JSON.stringify(
+            makeBaseState({
+              revision: 4,
+              phase: 'PREFLIGHT_BLOCKED',
+              activeJob: {
+                jobId: asJobId('b04e90cd'),
+                totalItems: 31,
+                completedItems: 24,
+                activeTasks: [],
+                currentPercent: 84,
+                etaState: 'calibrating'
+              }
+            })
+          ),
+          { status: 200 }
+        );
+      }
+      if (url.endsWith('/api/preflight')) {
+        preflightCalls += 1;
+        return new Response(
+          JSON.stringify({
+            error: 'STALE_REVISION',
+            message: 'Stale revision 4; current is 5',
+            state: makeBaseState({
+              revision: 5,
+              phase: 'PROCESSING',
+              activeJob: {
+                jobId: asJobId('job-2'),
+                totalItems: 1,
+                completedItems: 0,
+                activeTasks: [],
+                currentPercent: 0,
+                etaState: 'calibrating'
+              }
+            })
+          }),
+          { status: 409 }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    await store.fetchState();
+    expect(store.isBusy).toBe(true);
+
+    await expect(store.runPreflight()).rejects.toThrow(/Stale revision/);
+    expect(preflightCalls).toBe(1);
+    expect(store.phase).toBe('PROCESSING');
+    fetchSpy.mockRestore();
+  });
+
+  it('disables canProcessQueue while verifier is scanning or fixing without marking queue isBusy', async () => {
+    const store = useOrganizerStore();
+    const readyItem = {
+      id: asItemId('movie-1'),
+      sourcePath: '/in/Movie.2024.mkv',
+      relativePath: 'Movie.2024.mkv',
+      fileName: 'Movie.2024.mkv',
+      mediaKind: 'movie',
+      category: 'movies',
+      include: true,
+      parsedTitle: 'Movie',
+      tags: [],
+      episodeOrder: 'aired',
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 100,
+        sizeBytes: 100,
+        bitrateBps: 100,
+        videoStreams: [],
+        audioStreams: [],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      selectedMetadata: {
+        id: 'tt1234567',
+        source: 'imdb',
+        title: 'Movie',
+        year: 2024,
+        confidence: 1,
+        imdbId: 'tt1234567'
+      },
+      trackSelection: {
+        audioTracks: [],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false
+      },
+      warnings: []
+    };
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify(
+            makeBaseState({
+              initStatus: 'ready',
+              items: [readyItem],
+              verifier: {
+                scanning: true,
+                fixing: false,
+                progress: null,
+                summary: null,
+                entries: [],
+                lastFixResult: null
+              }
+            })
+          ),
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify(
+            makeBaseState({
+              initStatus: 'ready',
+              items: [readyItem],
+              verifier: {
+                scanning: false,
+                fixing: true,
+                progress: null,
+                summary: null,
+                entries: [],
+                lastFixResult: null
+              }
+            })
+          ),
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify(
+            makeBaseState({
+              initStatus: 'ready',
+              items: [readyItem],
+              verifier: {
+                scanning: false,
+                fixing: false,
+                progress: null,
+                summary: null,
+                entries: [],
+                lastFixResult: null
+              }
+            })
+          ),
+          { status: 200 }
+        )
+      );
+
+    await store.fetchState();
+    expect(store.isBusy).toBe(false);
+    expect(store.canProcessQueue).toBe(false);
+
+    await store.fetchState();
+    expect(store.isBusy).toBe(false);
+    expect(store.canProcessQueue).toBe(false);
+
+    await store.fetchState();
+    expect(store.canProcessQueue).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  it('skips refreshPreflightSafely and STALE_REVISION retries while verifier is scanning or fixing', async () => {
+    const store = useOrganizerStore();
+    let preflightCalls = 0;
+    const includedItem = {
+      id: asItemId('movie-preflight'),
+      sourcePath: '/in/Movie.2024.mkv',
+      relativePath: 'Movie.2024.mkv',
+      fileName: 'Movie.2024.mkv',
+      mediaKind: 'movie',
+      category: 'movies',
+      include: true,
+      parsedTitle: 'Movie',
+      tags: [],
+      episodeOrder: 'aired',
+      probe: {
+        formatName: 'matroska',
+        durationSeconds: 100,
+        sizeBytes: 100,
+        bitrateBps: 100,
+        videoStreams: [],
+        audioStreams: [],
+        subtitleStreams: []
+      },
+      externalSubtitles: [],
+      candidates: [],
+      trackSelection: {
+        audioTracks: [],
+        subtitleMergeMode: 'keep-and-add',
+        includedInternalSubtitles: [],
+        externalSubtitleOrder: [],
+        needsUserPrompt: false
+      },
+      warnings: []
+    };
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith('/api/state')) {
+        return new Response(
+          JSON.stringify(
+            makeBaseState({
+              revision: 6,
+              items: [includedItem],
+              verifier: {
+                scanning: true,
+                fixing: false,
+                progress: null,
+                summary: null,
+                entries: [],
+                lastFixResult: null
+              }
+            })
+          ),
+          { status: 200 }
+        );
+      }
+      if (url.endsWith('/api/preflight')) {
+        preflightCalls += 1;
+        return new Response(
+          JSON.stringify({
+            error: 'JOB_IN_PROGRESS',
+            message: 'Library verifier is already running.'
+          }),
+          { status: 409 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          error: 'STALE_REVISION',
+          message: 'Stale revision 6',
+          state: makeBaseState({
+            revision: 7,
+            verifier: {
+              scanning: false,
+              fixing: true,
+              progress: null,
+              summary: null,
+              entries: [],
+              lastFixResult: null
+            }
+          })
+        }),
+        { status: 409 }
+      );
+    });
+
+    await store.fetchState();
+    await store.refreshPreflightSafely();
+    expect(preflightCalls).toBe(0);
+    expect(store.errorMessage).toBeNull();
+
+    // Also ensure STALE_REVISION retry aborts immediately if server reports active verifier
+    await expect(store.patchItem(asItemId('movie-preflight'), { include: false })).rejects.toThrow(
+      /Stale revision/
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    fetchSpy.mockRestore();
   });
 });
