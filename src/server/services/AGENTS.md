@@ -29,6 +29,7 @@ Backend Maintainers.
 - Rescan audio option preservation (`jobRunner.ts` `#preserveAudioNormalizationOnRescan`): re-scanning `INPUT_DIR` preserves prior `trackSelection.audioNormalization` settings and recalculates `[tags]` for unchanged files matching `sourcePath` and `probe.sizeBytes`.
 - Server log persistence & startup mount annotation (`scanCacheDb.ts` `server_logs` table, `jobRunner.ts`): server logs up to `MAX_SERVER_LOG_ENTRIES` are persisted via `#withLogDb` (`appendLog`, `loadRecentLogs`, `clearLogs`), rehydrated on `JobRunner.init()`, and persisted queue items are re-annotated against live output mounts (`annotateQueueItemsWithMounts`).
 - Item retry & failure reporting (`jobExecutionService.ts`): failed queue items record structured `JobItemError` entries with `JobRetryAttempt` (`1 | 2`) while cleaning temporary remux artifacts.
+- **Throttled Verifier SSE State Emissions**: `JobRunner.#withVerifierSession` throttles `#emitState()` calls inside `onProgress` to at most once every `150 ms` (using `performance.now()`, always flushing `stageLabel` changes and completion) so rapid folder scans do not flood SSE clients with full state payloads.
 
 ## Key Files
 

@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, useId, watch, type ComponentPublicInstance } from 'vue';
+import {
+  computed,
+  nextTick,
+  onMounted,
+  ref,
+  useId,
+  watch,
+  type ComponentPublicInstance
+} from 'vue';
 
 import type { SseLogEvent } from '../../domain/types.ts';
 import {
@@ -22,18 +30,15 @@ const emit = defineEmits<{
 const autoScrollId = useId();
 const autoScroll = ref(getLogsAutoScrollPreference());
 const listRef = ref<ComponentPublicInstance | HTMLElement | null>(null);
-const logKeyMap = new WeakMap<SseLogEvent, number>();
-let nextLogKey = 0;
-
-function getLogKey(entry: SseLogEvent): number {
-  const existing = logKeyMap.get(entry);
-  if (existing !== undefined) {
-    return existing;
-  }
-  nextLogKey += 1;
-  logKeyMap.set(entry, nextLogKey);
-  return nextLogKey;
-}
+const logKeys = computed<readonly string[]>(() => {
+  const seen = new Map<string, number>();
+  return props.logs.map((entry) => {
+    const base = `${entry.timestamp}|${entry.level}|${entry.message}`;
+    const count = (seen.get(base) ?? 0) + 1;
+    seen.set(base, count);
+    return `${base}#${String(count)}`;
+  });
+});
 
 function resolveListElement(): HTMLElement | null {
   const target = listRef.value;
@@ -126,8 +131,8 @@ watch(autoScroll, (enabled: boolean): void => {
         @leave="animatePanelLeave"
       >
         <div
-          v-for="entry in props.logs"
-          :key="getLogKey(entry)"
+          v-for="(entry, idx) in props.logs"
+          :key="logKeys[idx]"
           role="listitem"
           class="vo-logs__item"
           :data-level="entry.level"

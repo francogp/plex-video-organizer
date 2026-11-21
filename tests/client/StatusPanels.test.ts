@@ -243,6 +243,31 @@ describe('StatusPanels', () => {
     expect(wrapper.findAll('.vo-logs__item')).toHaveLength(2);
   });
 
+  it('ServerLogsPanel reuses existing DOM nodes when SSE state sends cloned log objects', async () => {
+    const initialLogs = Array.from({ length: 40 }, (_, idx) => ({
+      timestamp: `2026-11-21T16:00:${String(idx).padStart(2, '0')}.000Z`,
+      level: 'info' as const,
+      message: `Log line ${String(idx)}`
+    }));
+    const logs = ref(initialLogs);
+    const Host = defineComponent({
+      setup: () => () => h(ServerLogsPanel, { logs: logs.value })
+    });
+    const wrapper = mount(Host);
+    await nextTick();
+    const initialElements = wrapper.findAll('.vo-logs__item').map((node) => node.element);
+    expect(initialElements).toHaveLength(40);
+
+    logs.value = JSON.parse(JSON.stringify(initialLogs)) as typeof initialLogs;
+    await nextTick();
+
+    const updatedElements = wrapper.findAll('.vo-logs__item').map((node) => node.element);
+    expect(updatedElements).toHaveLength(40);
+    expect(updatedElements[0]).toBe(initialElements[0]);
+    expect(updatedElements[39]).toBe(initialElements[39]);
+    wrapper.unmount();
+  });
+
   it('ParallelTasksList renders Skip button when canSkip and itemId are present and emits skip', async () => {
     const wrapper = mount(ParallelTasksList, {
       props: {

@@ -54,6 +54,26 @@ import {
 const HTTP_CONFLICT_STATUS = 409;
 const MAX_STALE_REVISION_ATTEMPTS = 2;
 
+function logsMatch(a: readonly SseLogEvent[], b: readonly SseLogEvent[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (
+      !left ||
+      !right ||
+      left.timestamp !== right.timestamp ||
+      left.level !== right.level ||
+      left.message !== right.message
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export const useOrganizerStore = defineStore('organizer', () => {
   const clientId = ref<ClientId>(getOrCreateClientId() as ClientId);
   const theme = ref<ThemeMode>(getInitialThemeMode());
@@ -152,7 +172,7 @@ export const useOrganizerStore = defineStore('organizer', () => {
     mountPaths.value = state.mountPaths;
     items.value = [...state.items];
     activeJob.value = state.activeJob;
-    if (Array.isArray(state.logs)) {
+    if (Array.isArray(state.logs) && !logsMatch(logs.value, state.logs)) {
       logs.value = [...state.logs];
     }
     if (state.verifier) {

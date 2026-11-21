@@ -30,7 +30,7 @@ watch(
 watch(
   (): number => store.items.length,
   (nextLen, prevLen): void => {
-    if (nextLen > 0 && nextLen !== prevLen) {
+    if (prevLen === 0 && nextLen > 0) {
       animateEntrance('.vo-queue-row');
     }
   }

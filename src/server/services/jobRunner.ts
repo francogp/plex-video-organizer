@@ -1134,6 +1134,9 @@ export class JobRunner {
     }) => Promise<void>
   ): Promise<void> {
     const session = await this.#createEtaPredictorSession();
+    const VERIFIER_PROGRESS_THROTTLE_MS = 150;
+    let lastProgressEmitAt = 0;
+    let lastStageLabel = '';
     try {
       await run({
         etaPredictor: session.etaPredictor,
@@ -1142,7 +1145,18 @@ export class JobRunner {
         },
         onProgress: (progress): void => {
           this.#verifier = { ...this.#verifier, progress };
-          this.#emitState();
+          const now = performance.now();
+          const stageChanged = progress.stageLabel !== lastStageLabel;
+          const isComplete = progress.total > 0 && progress.completed >= progress.total;
+          if (
+            stageChanged ||
+            isComplete ||
+            now - lastProgressEmitAt >= VERIFIER_PROGRESS_THROTTLE_MS
+          ) {
+            lastProgressEmitAt = now;
+            lastStageLabel = progress.stageLabel;
+            this.#emitState();
+          }
         },
         onError: (msg): void => {
           this.#failVerifierOperation(operation, msg);
