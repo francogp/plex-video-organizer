@@ -17,6 +17,7 @@ Backend Maintainers.
 - Resolve cached input and subtitle file paths via `resolvePortableInputPath` (`config.ts`) to support SQLite caches shared between Docker (`/data/input/...`) and local Windows development.
 - Persist `conflictResolutions` in `system_config` via `ScanCacheDb` using `sanitizeConflictResolutions`, pruning stale item keys in `JobRunner` after completing a scan or job.
 - Designed strictly for trusted LAN deployments: `X-Client-Id` provides an optimistic collaborative session lock rather than HTTP authentication, so the server must not be exposed directly to untrusted networks without an authenticating reverse proxy.
+- **Docker Runtime Dependency Parity**: Every external npm package imported in `src/server/` (or `src/domain/`) and its transitive dependencies must be copied into the `runtime` stage of [../../Dockerfile](../../Dockerfile); update `Dockerfile` whenever dependencies are added or modified (enforced by [../../tests/server/dockerfileRuntimeDeps.test.ts](../../tests/server/dockerfileRuntimeDeps.test.ts)).
 
 ## Key Files
 

@@ -31,6 +31,10 @@ COPY --from=ffmpeg-source --chmod=0755 /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-source --chmod=0755 /ffprobe /usr/local/bin/ffprobe
 COPY package.json ./package.json
 COPY --from=builder /app/node_modules/valibot ./node_modules/valibot
+COPY --from=builder /app/node_modules/franc-min ./node_modules/franc-min
+COPY --from=builder /app/node_modules/trigram-utils ./node_modules/trigram-utils
+COPY --from=builder /app/node_modules/collapse-white-space ./node_modules/collapse-white-space
+COPY --from=builder /app/node_modules/n-gram ./node_modules/n-gram
 COPY --from=builder /app/dist ./dist
 COPY src/domain ./src/domain
 COPY src/server ./src/server

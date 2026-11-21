@@ -13,6 +13,7 @@ QA Engineering Agents.
 ## Key Files
 
 - [config.test.ts](config.test.ts): Environment configuration and mount validation tests.
+- [dockerfileRuntimeDeps.test.ts](dockerfileRuntimeDeps.test.ts): Verifies that all direct and transitive npm packages imported by `src/server` and `src/domain` are copied into the `Dockerfile` runtime stage.
 - [etaPredictor.test.ts](etaPredictor.test.ts): `EtaPredictor` host partitioning, calibration gating, live EMA, and batch flush tests.
 - [scanCacheDb.test.ts](scanCacheDb.test.ts): `ScanCacheDb` migrations, cache persistence, and ETA sample retention tests.
 - [scanner.test.ts](scanner.test.ts): Recursive Plex scanner, `.plexignore`, `.plexmatch`, and subtitle tests.
