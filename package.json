@@ -1,6 +1,6 @@
 {
   "name": "plex-video-organizer",
-  "version": "1.9.2-build.20261121-122421",
+  "version": "1.9.3-build.20261121-124613",
   "type": "module",
   "scripts": {
     "check": "npm run auditor:lint",

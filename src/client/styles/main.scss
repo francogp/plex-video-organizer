@@ -1,6 +1,7 @@
 @use './tokens';
 
 html {
+  overflow-x: clip;
   accent-color: var(--vo-accent);
 }
 
@@ -81,6 +82,7 @@ body {
   font-family: var(--vo-font-sans);
   font-size: var(--vo-text-md);
   line-height: 1.45;
+  overflow-x: clip;
   -webkit-font-smoothing: antialiased;
 }
 

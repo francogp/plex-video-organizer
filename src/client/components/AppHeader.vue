@@ -342,7 +342,6 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
   border-radius: var(--vo-radius-lg);
   background: var(--vo-surface-gradient);
   box-shadow: var(--vo-shadow-panel);
-  will-change: transform;
 
   h1 {
     margin: 0;

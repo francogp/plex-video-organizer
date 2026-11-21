@@ -54,5 +54,6 @@ onUnmounted((): void => {
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
   padding: var(--vo-space-2);
+  overflow-x: clip;
 }
 </style>
