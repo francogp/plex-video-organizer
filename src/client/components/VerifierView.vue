@@ -27,27 +27,31 @@ const VERIFIER_COLUMNS: readonly TableColumnDef<VerifierColId>[] = [
     label: '',
     defaultWidthPx: 44,
     minWidthPx: 40,
+    sticky: true,
     resizable: false,
     reorderable: false,
     align: 'center'
   },
-  { id: 'library', label: 'Library', defaultWidthPx: 140, minWidthPx: 100 },
+  { id: 'library', label: 'Library', defaultWidthPx: 140, compactWidthPx: 116, minWidthPx: 100 },
   {
     id: 'current',
     label: 'Current (Non-Compliant)',
     defaultWidthPx: 290,
+    compactWidthPx: 225,
     minWidthPx: 180
   },
   {
     id: 'expected',
     label: 'Expected Plex Standard',
     defaultWidthPx: 290,
+    compactWidthPx: 225,
     minWidthPx: 180
   },
   {
     id: 'plan',
     label: 'Bottom-Up Rename Plan',
     defaultWidthPx: 520,
+    compactWidthPx: 250,
     minWidthPx: 240
   }
 ];

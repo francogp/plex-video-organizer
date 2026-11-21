@@ -9,6 +9,8 @@ Frontend Maintainers.
 ## Local Contracts
 
 - All GSAP timelines/contexts must respect `prefers-reduced-motion` and revert on `onUnmounted`.
+- Isolate GSAP `shellCtx` from `rowsCtx` in `useGsapMotion.ts` so row entrance updates never revert shell timelines; exclude `.vo-header` from `.vo-panel:not(.vo-header)` stagger and use `gsap.fromTo` (`opacity: 0 -> 1` with `clearProps: 'transform,opacity'`) so headers never remain stuck invisible on re-renders.
+- Centralize all `<Transition :css="false">` enter/leave hooks (`animateModalEnter`/`Leave`, `animatePanelEnter`/`Leave`, `animateToastEnter`/`Leave`, `animateTabViewEnter`/`Leave`), `Flip` layout transitions (`captureFlipState`/`playFlip`), `ScrollToPlugin` (`smoothScrollToElement`), list/Gantt staggers, and delegated GPU micro-interactions (`attachInteractiveMotion`) inside `useGsapMotion.ts`, respecting `prefers-reduced-motion: reduce` (note: Windows `SPI_GETCLIENTAREAANIMATION = False`, e.g. after TeamViewer/RDP sessions, forces Chromium `prefers-reduced-motion: reduce` to `true`).
 
 ## Key Files
 

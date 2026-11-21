@@ -6,6 +6,7 @@ import {
   type AudioNormalizationMode
 } from '../../domain/constants.ts';
 import type { ConflictDecision, MediaKind, OutputCategory } from '../../domain/types.ts';
+import { animatePanelEnter, animatePanelLeave } from '../composables/useGsapMotion.ts';
 import TableResetCount from './table/TableResetCount.vue';
 import UiIcon from './UiIcon.vue';
 
@@ -155,91 +156,95 @@ function onBulkAudioChange(event: Event): void {
     />
   </div>
 
-  <div v-if="props.selectedCount > 0" class="vo-bulk-bar" role="region" aria-label="Bulk actions">
-    <span class="vo-bulk-count vo-mono">{{ props.selectedCount }} selected</span>
-    <select
-      class="vo-select"
-      aria-label="Bulk set type"
-      :disabled="props.disabled"
-      @change="onBulkKindChange"
-    >
-      <option value="">Set Type...</option>
-      <option v-for="kind in MEDIA_KINDS" :key="kind" :value="kind">
-        {{ kind === 'tv' ? 'Series' : 'Movie' }}
-      </option>
-    </select>
-    <select
-      class="vo-select"
-      aria-label="Bulk set library"
-      :disabled="props.disabled"
-      @change="onBulkCategoryChange"
-    >
-      <option value="">Set Library...</option>
-      <option v-for="cat in OUTPUT_CATEGORIES" :key="cat" :value="cat">
-        {{ CATEGORY_LABELS[cat] }}
-      </option>
-    </select>
-    <select
-      class="vo-select"
-      aria-label="Bulk set audio normalization"
-      :disabled="props.disabled"
-      @change="onBulkAudioChange"
-    >
-      <option value="">Set Audio...</option>
-      <option v-for="mode in AUDIO_NORMALIZATION_MODES" :key="mode" :value="mode">
-        {{ AUDIO_MODE_LABELS[mode] }}
-      </option>
-    </select>
-    <button
-      type="button"
-      class="vo-btn"
-      :disabled="props.disabled"
-      @click="emit('edit-tracks-bulk')"
-    >
-      <span aria-hidden="true">🎛️</span> Edit Tracks
-    </button>
-    <button
-      type="button"
-      class="vo-btn"
-      :disabled="props.disabled"
-      @click="emit('search-metadata-bulk')"
-    >
-      <UiIcon name="search" /> Search Match
-    </button>
-    <button type="button" class="vo-btn" @click="emit('clear-selection')">
-      <span aria-hidden="true">🧹</span> Clear
-    </button>
-  </div>
-
-  <div
-    v-if="props.conflictCount > 0"
-    class="vo-conflict-banner-bar"
-    role="region"
-    aria-label="Output conflicts"
-  >
-    <span class="vo-conflict-banner-title vo-mono">
-      ⚠ {{ props.conflictCount }} output conflict(s) detected — resolve every conflict in the table
-      before processing
-    </span>
-    <div class="vo-conflict-banner-actions">
+  <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+    <div v-if="props.selectedCount > 0" class="vo-bulk-bar" role="region" aria-label="Bulk actions">
+      <span class="vo-bulk-count vo-mono">{{ props.selectedCount }} selected</span>
+      <select
+        class="vo-select"
+        aria-label="Bulk set type"
+        :disabled="props.disabled"
+        @change="onBulkKindChange"
+      >
+        <option value="">Set Type...</option>
+        <option v-for="kind in MEDIA_KINDS" :key="kind" :value="kind">
+          {{ kind === 'tv' ? 'Series' : 'Movie' }}
+        </option>
+      </select>
+      <select
+        class="vo-select"
+        aria-label="Bulk set library"
+        :disabled="props.disabled"
+        @change="onBulkCategoryChange"
+      >
+        <option value="">Set Library...</option>
+        <option v-for="cat in OUTPUT_CATEGORIES" :key="cat" :value="cat">
+          {{ CATEGORY_LABELS[cat] }}
+        </option>
+      </select>
+      <select
+        class="vo-select"
+        aria-label="Bulk set audio normalization"
+        :disabled="props.disabled"
+        @change="onBulkAudioChange"
+      >
+        <option value="">Set Audio...</option>
+        <option v-for="mode in AUDIO_NORMALIZATION_MODES" :key="mode" :value="mode">
+          {{ AUDIO_MODE_LABELS[mode] }}
+        </option>
+      </select>
       <button
         type="button"
         class="vo-btn"
         :disabled="props.disabled"
-        @click="emit('resolve-all-conflicts', 'overwrite')"
+        @click="emit('edit-tracks-bulk')"
       >
-        <span aria-hidden="true">✅</span> Overwrite All Conflicts
+        <span aria-hidden="true">🎛️</span> Edit Tracks
       </button>
       <button
         type="button"
         class="vo-btn"
         :disabled="props.disabled"
-        @click="emit('resolve-all-conflicts', 'ignore')"
+        @click="emit('search-metadata-bulk')"
       >
-        <span aria-hidden="true">⏭️</span> Ignore All Conflicts
+        <UiIcon name="search" /> Search Match
+      </button>
+      <button type="button" class="vo-btn" @click="emit('clear-selection')">
+        <span aria-hidden="true">🧹</span> Clear
       </button>
     </div>
-  </div>
+  </Transition>
+
+  <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+    <div
+      v-if="props.conflictCount > 0"
+      class="vo-conflict-banner-bar"
+      role="region"
+      aria-label="Output conflicts"
+    >
+      <span class="vo-conflict-banner-title vo-mono">
+        ⚠ {{ props.conflictCount }} output conflict(s) detected — resolve every conflict in the
+        table before processing
+      </span>
+      <div class="vo-conflict-banner-actions">
+        <button
+          type="button"
+          class="vo-btn"
+          :disabled="props.disabled"
+          @click="emit('resolve-all-conflicts', 'overwrite')"
+        >
+          <span aria-hidden="true">✅</span> Overwrite All Conflicts
+        </button>
+        <button
+          type="button"
+          class="vo-btn"
+          :disabled="props.disabled"
+          @click="emit('resolve-all-conflicts', 'ignore')"
+        >
+          <span aria-hidden="true">⏭️</span> Ignore All Conflicts
+        </button>
+      </div>
+    </div>
+  </Transition>
 </template>
 
 <style scoped lang="scss">

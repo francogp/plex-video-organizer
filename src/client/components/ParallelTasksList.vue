@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import {
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+  type ComponentPublicInstance
+} from 'vue';
 
 import type { ActiveParallelTask, ItemId } from '../../domain/types.ts';
+import { animatePanelEnter, animatePanelLeave } from '../composables/useGsapMotion.ts';
 
 const props = defineProps<{
   readonly tasks: readonly ActiveParallelTask[];
@@ -13,12 +21,23 @@ const emit = defineEmits<{
 }>();
 
 const skippingIds = ref<ReadonlySet<ItemId>>(new Set());
-const listRef = ref<HTMLUListElement | null>(null);
+const listRef = ref<HTMLElement | ComponentPublicInstance | null>(null);
 const minHeightPx = ref(0);
 let resizeObserver: ResizeObserver | null = null;
 
+function resolveListElement(): HTMLElement | null {
+  const val = listRef.value;
+  if (!val) {
+    return null;
+  }
+  if (val instanceof HTMLElement) {
+    return val;
+  }
+  return val.$el instanceof HTMLElement ? val.$el : null;
+}
+
 function updateMinHeight(): void {
-  const el = listRef.value;
+  const el = resolveListElement();
   if (!el) {
     return;
   }
@@ -30,11 +49,12 @@ function updateMinHeight(): void {
 
 onMounted((): void => {
   updateMinHeight();
-  if (typeof ResizeObserver !== 'undefined' && listRef.value) {
+  const el = resolveListElement();
+  if (typeof ResizeObserver !== 'undefined' && el) {
     resizeObserver = new ResizeObserver((): void => {
       updateMinHeight();
     });
-    resizeObserver.observe(listRef.value);
+    resizeObserver.observe(el);
   }
 });
 
@@ -70,15 +90,21 @@ function handleSkip(itemId: ItemId): void {
 </script>
 
 <template>
-  <ul
+  <TransitionGroup
     v-if="props.tasks.length > 0 || minHeightPx > 0"
     ref="listRef"
+    tag="div"
+    role="list"
+    :css="false"
     class="vo-progress__files vo-mono"
     :style="minHeightPx > 0 ? { minBlockSize: `${String(minHeightPx)}px` } : undefined"
+    @enter="animatePanelEnter"
+    @leave="animatePanelLeave"
   >
-    <li
+    <div
       v-for="task in props.tasks"
       :key="task.slot"
+      role="listitem"
       class="vo-progress__file"
       :class="{ 'vo-progress__file--skippable': Boolean(props.canSkip && task.itemId) }"
     >
@@ -95,8 +121,8 @@ function handleSkip(itemId: ItemId): void {
       >
         {{ skippingIds.has(task.itemId) ? 'Skipping...' : 'Skip' }}
       </button>
-    </li>
-  </ul>
+    </div>
+  </TransitionGroup>
 </template>
 
 <style scoped lang="scss">

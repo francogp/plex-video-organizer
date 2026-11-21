@@ -85,6 +85,7 @@ import { searchOpenSubtitlesStremio } from '../../src/server/services/subtitles/
 import { searchPodnapisiSubtitles } from '../../src/server/services/subtitles/providers/podnapisiProvider.ts';
 import { searchSubdlSubtitles } from '../../src/server/services/subtitles/providers/subdlProvider.ts';
 import { searchYifySubtitles } from '../../src/server/services/subtitles/providers/yifySubtitlesProvider.ts';
+import { detectSubtitleTextLanguage } from '../../src/server/services/subtitles/subtitleLanguageDetector.ts';
 import {
   detectSpanishVariant,
   rankSubtitleCandidates
@@ -1640,6 +1641,42 @@ describe('subtitles & verifier tag recalculation', () => {
         await pendingDownload?.catch(() => undefined);
         await runner.unlock(clientId, true).catch(() => undefined);
       }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('detects ASS/SSA and UTF-16LE subtitle languages via franc-min and ignores non-text files', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-sub-detect-'));
+    try {
+      const assPath = path.join(tmpDir, 'sample.ass');
+      await fs.writeFile(
+        assPath,
+        [
+          '[Script Info]',
+          'Title: Sample',
+          '[Events]',
+          'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+          'Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,{\\an8}Buenas noches, ¿cómo están todos hoy en la ciudad?',
+          'Dialogue: 0,0:00:06.00,0:00:10.00,Default,,0,0,0,,No te preocupes, mañana también vamos a resolver este asunto.',
+          'Dialogue: 0,0:00:11.00,0:00:15.00,Default,,0,0,0,,La película empieza después de las nueve con subtítulos en español.'
+        ].join('\n')
+      );
+      await expect(detectSubtitleTextLanguage(assPath)).resolves.toBe('spa');
+
+      const utf16Path = path.join(tmpDir, 'utf16.srt');
+      const srtBody =
+        '1\n00:00:01,000 --> 00:00:04,000\nGood evening, we need to leave the building right now before the rain starts.\n';
+      const bom = Buffer.from([0xff, 0xfe]);
+      await fs.writeFile(utf16Path, Buffer.concat([bom, Buffer.from(srtBody, 'utf16le')]));
+      await expect(detectSubtitleTextLanguage(utf16Path)).resolves.toBe('eng');
+
+      await expect(
+        detectSubtitleTextLanguage(path.join(tmpDir, 'movie.idx'))
+      ).resolves.toBeUndefined();
+      await expect(
+        detectSubtitleTextLanguage(path.join(tmpDir, 'missing.srt'))
+      ).resolves.toBeUndefined();
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

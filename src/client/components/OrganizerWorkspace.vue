@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 
 import type {
   ActiveJobProgress,
@@ -18,6 +18,13 @@ import type {
   VerifierEntryId,
   VerifierState
 } from '../../domain/types.ts';
+import {
+  animatePanelEnter,
+  animatePanelLeave,
+  animateTabViewEnter,
+  animateTabViewLeave,
+  smoothScrollToElement
+} from '../composables/useGsapMotion.ts';
 import {
   useOrganizerWorkflow,
   type WorkflowStorePort
@@ -70,11 +77,27 @@ const props = defineProps<{
 }>();
 
 const activeTab = ref<WorkspaceTab>('organizer');
+const tabDirection = ref<-1 | 1>(1);
 const logsContainerRef = ref<HTMLElement | null>(null);
 const wf = useOrganizerWorkflow(props.store);
 
+watch(activeTab, (next, prev) => {
+  if (next === prev) {
+    return;
+  }
+  tabDirection.value = next === 'verifier' ? 1 : -1;
+});
+
 function scrollToLogs(): void {
-  logsContainerRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  smoothScrollToElement(logsContainerRef.value);
+}
+
+function onTabEnter(el: Element, done: () => void): void {
+  animateTabViewEnter(el, done, tabDirection.value);
+}
+
+function onTabLeave(el: Element, done: () => void): void {
+  animateTabViewLeave(el, done, tabDirection.value);
 }
 
 const initBannerText = computed((): string =>
@@ -137,112 +160,122 @@ const activeJobSummaryText = computed<string>(() => {
     @set-audio-preferred-languages="(langs) => void store.setAudioPreferredLanguages(langs)"
   />
 
-  <section
-    v-if="store.isInitializing"
-    class="vo-banner vo-banner--initializing vo-panel"
-    role="status"
-    aria-live="polite"
-  >
-    <span>
-      <span aria-hidden="true">⏳</span>
-      {{ initBannerText }}
-    </span>
-  </section>
-
-  <section v-if="store.isLockedByOther" class="vo-banner vo-panel">
-    <span>
-      Active session locked by <strong class="vo-mono">{{ store.lockOwnerClientId }}</strong>.
-    </span>
-    <div v-if="!wf.confirmUnlockOpen.value">
-      <button
-        type="button"
-        class="vo-btn vo-btn--danger"
-        @click="wf.confirmUnlockOpen.value = true"
-      >
-        <span aria-hidden="true">🔓</span> Force Unlock
-      </button>
-    </div>
-    <div v-else class="vo-header-actions">
-      <span>Confirm overriding active session lock?</span>
-      <button type="button" class="vo-btn vo-btn--danger" @click="wf.handleForceUnlock()">
-        <span aria-hidden="true">🔓</span> Confirm Unlock
-      </button>
-      <button type="button" class="vo-btn" @click="wf.confirmUnlockOpen.value = false">
-        <span aria-hidden="true">✖️</span> Cancel
-      </button>
-    </div>
-  </section>
-
-  <template v-if="activeTab === 'organizer'">
-    <OrganizerStatusBar
-      :is-busy="store.isBusy"
-      :active-job="store.activeJob"
-      :error-message="store.errorMessage"
-      :is-locked-by-other="store.isLockedByOther"
-      :is-cancelling-job="wf.isCancellingJob.value"
-      :is-draining-job="wf.isDrainingJob.value"
-      :can-skip-tasks="store.activeJob?.jobId === 'scan' && !store.isLockedByOther"
-      :can-inspect-eta="wf.includedQueueCount.value > 0"
-      :item-count="store.items.length"
-      :summary-text="activeJobSummaryText"
-      :phase="store.phase"
-      @cancel="wf.handleCancelJob"
-      @drain="wf.handleDrainJob"
-      @dismiss-error="store.clearError()"
-      @open-eta-simulation="wf.openEtaSimulation"
-      @skip-task="void store.skipScanTask($event).catch(() => undefined)"
-    />
-
-    <section class="vo-panel">
-      <QueueTable
-        :items="store.items"
-        :disabled="tablesDisabled"
-        :conflicts="store.preflightConflicts"
-        :conflict-resolutions="store.savedConflictResolutions"
-        :job-errors="store.lastJobErrors"
-        :subtitle-picker="wf.subtitlePicker.value"
-        @search-subtitles="wf.handleSearchSubtitles"
-        @preview-subtitle="wf.handleTestSubtitleInPlayer"
-        @toggle-include="(item, inc) => wf.patchItemAndRefresh(item.id, { include: inc })"
-        @change-media-kind="
-          (item, kind: MediaKind) => wf.patchItemAndRefresh(item.id, { mediaKind: kind })
-        "
-        @change-category="
-          (item, cat: OutputCategory) => wf.patchItemAndRefresh(item.id, { category: cat })
-        "
-        @change-edition="(item, ed: string) => wf.patchItemAndRefresh(item.id, { edition: ed })"
-        @change-candidate="
-          (item, idx) =>
-            item.candidates[idx] &&
-            wf.patchItemAndRefresh(item.id, { selectedMetadata: item.candidates[idx] })
-        "
-        @search-metadata="wf.openSingleMetadataSearch"
-        @search-metadata-bulk="wf.handleOpenBulkMetadata"
-        @edit-tracks-bulk="wf.handleOpenBulkTracks"
-        @bulk-include="wf.handleBulkInclude"
-        @bulk-media-kind="wf.handleBulkMediaKind"
-        @bulk-category="wf.handleBulkCategory"
-        @change-audio-normalization="
-          (item, audioNormalization: AudioNormalizationConfig) =>
-            store.patchItem(item.id, { audioNormalization })
-        "
-        @bulk-audio-normalization="wf.handleBulkAudioNormalization"
-        @inspect-tracks="wf.openSingleTrackInspector"
-        @open-conflict-modal="wf.handleOpenOrganizerConflictModal"
-        @resolve-all-conflicts="wf.handleResolveAllConflicts"
-      />
+  <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+    <section
+      v-if="store.isInitializing"
+      class="vo-banner vo-banner--initializing vo-panel"
+      role="status"
+      aria-live="polite"
+    >
+      <span>
+        <span aria-hidden="true">⏳</span>
+        {{ initBannerText }}
+      </span>
     </section>
-  </template>
+  </Transition>
 
-  <VerifierView
-    v-else
-    :state="store.verifierState"
-    :disabled="tablesDisabled"
-    :conflict-resolutions="wf.verifierConflictResolutions.value"
-    @update:selected-ids="(ids: readonly VerifierEntryId[]) => (wf.selectedVerifierIds.value = ids)"
-    @dismiss-error="store.clearVerifierErrors()"
-    @resolve-conflict="wf.handleResolveVerifierConflict"
-  />
+  <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+    <section v-if="store.isLockedByOther" class="vo-banner vo-panel">
+      <span>
+        Active session locked by <strong class="vo-mono">{{ store.lockOwnerClientId }}</strong>.
+      </span>
+      <div v-if="!wf.confirmUnlockOpen.value">
+        <button
+          type="button"
+          class="vo-btn vo-btn--danger"
+          @click="wf.confirmUnlockOpen.value = true"
+        >
+          <span aria-hidden="true">🔓</span> Force Unlock
+        </button>
+      </div>
+      <div v-else class="vo-header-actions">
+        <span>Confirm overriding active session lock?</span>
+        <button type="button" class="vo-btn vo-btn--danger" @click="wf.handleForceUnlock()">
+          <span aria-hidden="true">🔓</span> Confirm Unlock
+        </button>
+        <button type="button" class="vo-btn" @click="wf.confirmUnlockOpen.value = false">
+          <span aria-hidden="true">✖️</span> Cancel
+        </button>
+      </div>
+    </section>
+  </Transition>
+
+  <Transition :css="false" mode="out-in" @enter="onTabEnter" @leave="onTabLeave">
+    <div :key="activeTab" class="vo-workspace-tab">
+      <template v-if="activeTab === 'organizer'">
+        <OrganizerStatusBar
+          :is-busy="store.isBusy"
+          :active-job="store.activeJob"
+          :error-message="store.errorMessage"
+          :is-locked-by-other="store.isLockedByOther"
+          :is-cancelling-job="wf.isCancellingJob.value"
+          :is-draining-job="wf.isDrainingJob.value"
+          :can-skip-tasks="store.activeJob?.jobId === 'scan' && !store.isLockedByOther"
+          :can-inspect-eta="wf.includedQueueCount.value > 0"
+          :item-count="store.items.length"
+          :summary-text="activeJobSummaryText"
+          :phase="store.phase"
+          @cancel="wf.handleCancelJob"
+          @drain="wf.handleDrainJob"
+          @dismiss-error="store.clearError()"
+          @open-eta-simulation="wf.openEtaSimulation"
+          @skip-task="void store.skipScanTask($event).catch(() => undefined)"
+        />
+
+        <section class="vo-panel">
+          <QueueTable
+            :items="store.items"
+            :disabled="tablesDisabled"
+            :conflicts="store.preflightConflicts"
+            :conflict-resolutions="store.savedConflictResolutions"
+            :job-errors="store.lastJobErrors"
+            :subtitle-picker="wf.subtitlePicker.value"
+            @search-subtitles="wf.handleSearchSubtitles"
+            @preview-subtitle="wf.handleTestSubtitleInPlayer"
+            @toggle-include="(item, inc) => wf.patchItemAndRefresh(item.id, { include: inc })"
+            @change-media-kind="
+              (item, kind: MediaKind) => wf.patchItemAndRefresh(item.id, { mediaKind: kind })
+            "
+            @change-category="
+              (item, cat: OutputCategory) => wf.patchItemAndRefresh(item.id, { category: cat })
+            "
+            @change-edition="(item, ed: string) => wf.patchItemAndRefresh(item.id, { edition: ed })"
+            @change-candidate="
+              (item, idx) =>
+                item.candidates[idx] &&
+                wf.patchItemAndRefresh(item.id, { selectedMetadata: item.candidates[idx] })
+            "
+            @search-metadata="wf.openSingleMetadataSearch"
+            @search-metadata-bulk="wf.handleOpenBulkMetadata"
+            @edit-tracks-bulk="wf.handleOpenBulkTracks"
+            @bulk-include="wf.handleBulkInclude"
+            @bulk-media-kind="wf.handleBulkMediaKind"
+            @bulk-category="wf.handleBulkCategory"
+            @change-audio-normalization="
+              (item, audioNormalization: AudioNormalizationConfig) =>
+                store.patchItem(item.id, { audioNormalization })
+            "
+            @bulk-audio-normalization="wf.handleBulkAudioNormalization"
+            @inspect-tracks="wf.openSingleTrackInspector"
+            @open-conflict-modal="wf.handleOpenOrganizerConflictModal"
+            @resolve-all-conflicts="wf.handleResolveAllConflicts"
+          />
+        </section>
+      </template>
+
+      <VerifierView
+        v-else
+        :state="store.verifierState"
+        :disabled="tablesDisabled"
+        :conflict-resolutions="wf.verifierConflictResolutions.value"
+        @update:selected-ids="
+          (ids: readonly VerifierEntryId[]) => (wf.selectedVerifierIds.value = ids)
+        "
+        @dismiss-error="store.clearVerifierErrors()"
+        @resolve-conflict="wf.handleResolveVerifierConflict"
+      />
+    </div>
+  </Transition>
 
   <div ref="logsContainerRef">
     <ServerLogsPanel :logs="store.logs" @clear="store.clearLogs()" />
@@ -258,6 +291,12 @@ const activeJobSummaryText = computed<string>(() => {
 </template>
 
 <style scoped lang="scss">
+.vo-workspace-tab {
+  display: grid;
+  gap: var(--vo-space-3);
+  min-width: 0;
+}
+
 .vo-panel {
   min-width: 0;
   max-width: 100%;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 
 import { getWorkUnitKind } from '../../domain/eta.ts';
 import type {
@@ -10,6 +10,11 @@ import type {
   EtaSimulatedStep,
   EtaWorkType
 } from '../../domain/types.ts';
+import {
+  animateGanttSegments,
+  animatePanelEnter,
+  animatePanelLeave
+} from '../composables/useGsapMotion.ts';
 import {
   formatDurationCompact,
   formatFinishClockTime,
@@ -64,6 +69,19 @@ const emit = defineEmits<{
 }>();
 
 const ratesExpanded = ref(false);
+const slotListRef = ref<HTMLElement | null>(null);
+
+watch(
+  () => props.data?.generatedAtMs,
+  async (ts) => {
+    if (!ts || !props.open) {
+      return;
+    }
+    await nextTick();
+    animateGanttSegments(slotListRef.value);
+  },
+  { immediate: true }
+);
 
 const modeBadge = computed<string | undefined>(() =>
   props.data ? MODE_LABELS[props.data.mode] : undefined
@@ -184,10 +202,13 @@ function formatRateTuple(diag: EtaRateDiagnostic): string {
     :z-offset="1"
     @close="emit('close')"
   >
-    <template #header-actions>
+    <template #header-meta>
       <span v-if="updatedClockLabel" class="vo-hint vo-mono vo-eta-updated">
         Updated {{ updatedClockLabel }}
       </span>
+    </template>
+
+    <template #header-actions>
       <button
         type="button"
         class="vo-btn vo-eta-refresh"
@@ -268,7 +289,7 @@ function formatRateTuple(diag: EtaRateDiagnostic): string {
           </div>
         </div>
 
-        <div class="vo-slot-list">
+        <div ref="slotListRef" class="vo-slot-list">
           <div v-for="slot in props.data.slots" :key="slot.slotIndex" class="vo-slot-row">
             <span class="vo-slot-label vo-mono">Slot {{ slot.slotIndex + 1 }}</span>
             <div class="vo-slot-track">
@@ -345,19 +366,21 @@ function formatRateTuple(diag: EtaRateDiagnostic): string {
           </button>
         </div>
 
-        <div v-if="ratesExpanded" class="vo-operator-list">
-          <div
-            v-for="diag in props.data.rates"
-            :key="`${diag.workType}:${diag.profile}`"
-            class="vo-operator-row vo-rate-row"
-          >
-            <div class="vo-rate-identity">
-              <span class="vo-mono">{{ diag.workType }}:{{ diag.profile }}</span>
-              <span class="vo-badge vo-mono">{{ diag.source }} ({{ diag.sampleCount }})</span>
+        <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+          <div v-if="ratesExpanded" class="vo-operator-list">
+            <div
+              v-for="diag in props.data.rates"
+              :key="`${diag.workType}:${diag.profile}`"
+              class="vo-operator-row vo-rate-row"
+            >
+              <div class="vo-rate-identity">
+                <span class="vo-mono">{{ diag.workType }}:{{ diag.profile }}</span>
+                <span class="vo-badge vo-mono">{{ diag.source }} ({{ diag.sampleCount }})</span>
+              </div>
+              <span class="vo-hint vo-mono vo-rate-values">{{ formatRateTuple(diag) }}</span>
             </div>
-            <span class="vo-hint vo-mono vo-rate-values">{{ formatRateTuple(diag) }}</span>
           </div>
-        </div>
+        </Transition>
       </section>
     </template>
   </BaseModalShell>

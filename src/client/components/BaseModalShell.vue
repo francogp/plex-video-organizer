@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue';
 
-import { useModalVars } from '../composables/useGsapMotion.ts';
+import {
+  animateModalEnter,
+  animateModalLeave,
+  useModalVars
+} from '../composables/useGsapMotion.ts';
 
 const props = defineProps<{
   readonly open: boolean;
@@ -36,57 +40,59 @@ watch(
 </script>
 
 <template>
-  <div
-    v-if="props.open"
-    ref="dialogRef"
-    class="vo-modal-backdrop"
-    :style="modalVars"
-    role="dialog"
-    aria-modal="true"
-    :aria-label="props.ariaLabel ?? props.title"
-    tabindex="-1"
-    @click.self="emit('close')"
-    @keydown.esc.stop="emit('close')"
-  >
+  <Transition :css="false" @enter="animateModalEnter" @leave="animateModalLeave">
     <div
-      class="vo-modal-card vo-operator-modal"
-      :class="props.cardClass"
-      :style="props.maxWidth ? { maxInlineSize: props.maxWidth } : undefined"
+      v-if="props.open"
+      ref="dialogRef"
+      class="vo-modal-backdrop"
+      :style="modalVars"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="props.ariaLabel ?? props.title"
+      tabindex="-1"
+      @click.self="emit('close')"
+      @keydown.esc.stop="emit('close')"
     >
-      <header class="vo-modal-header vo-operator-modal__header">
-        <div class="vo-operator-modal__heading">
-          <div class="vo-operator-modal__title-row">
-            <h2 class="vo-modal__title">{{ props.title }}</h2>
-            <span v-if="props.badge" class="vo-badge vo-mono">{{ props.badge }}</span>
-            <slot name="header-meta" />
+      <div
+        class="vo-modal-card vo-operator-modal"
+        :class="props.cardClass"
+        :style="props.maxWidth ? { maxInlineSize: props.maxWidth } : undefined"
+      >
+        <header class="vo-modal-header vo-operator-modal__header">
+          <div class="vo-operator-modal__heading">
+            <div class="vo-operator-modal__title-row">
+              <h2 class="vo-modal__title">{{ props.title }}</h2>
+              <span v-if="props.badge" class="vo-badge vo-mono">{{ props.badge }}</span>
+              <slot name="header-meta" />
+            </div>
+            <p v-if="props.subtitle" class="vo-operator-modal__sub vo-mono" :title="props.subtitle">
+              {{ props.subtitle }}
+            </p>
           </div>
-          <p v-if="props.subtitle" class="vo-operator-modal__sub vo-mono" :title="props.subtitle">
-            {{ props.subtitle }}
-          </p>
-        </div>
-        <div class="vo-operator-modal__header-actions">
-          <slot name="header-actions" />
-          <button
-            type="button"
-            class="vo-btn vo-operator-modal__close"
-            :aria-label="props.closeAriaLabel ?? `Close ${props.title}`"
-            title="Close (Esc)"
-            @click="emit('close')"
-          >
-            <span aria-hidden="true">✕</span>
-          </button>
-        </div>
-      </header>
+          <div class="vo-operator-modal__header-actions">
+            <slot name="header-actions" />
+            <button
+              type="button"
+              class="vo-btn vo-operator-modal__close"
+              :aria-label="props.closeAriaLabel ?? `Close ${props.title}`"
+              title="Close (Esc)"
+              @click="emit('close')"
+            >
+              <span aria-hidden="true">✕</span>
+            </button>
+          </div>
+        </header>
 
-      <div class="vo-operator-modal__body">
-        <slot />
+        <div class="vo-operator-modal__body">
+          <slot />
+        </div>
+
+        <footer v-if="$slots.footer" class="vo-modal-footer vo-operator-modal__footer">
+          <slot name="footer" />
+        </footer>
       </div>
-
-      <footer v-if="$slots.footer" class="vo-modal-footer vo-operator-modal__footer">
-        <slot name="footer" />
-      </footer>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <style scoped lang="scss">
@@ -100,8 +106,9 @@ watch(
 
 .vo-operator-modal__header {
   display: flex;
+  flex-wrap: nowrap;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--vo-space-3);
   padding: var(--vo-space-3) var(--vo-space-4);
   background-color: var(--vo-surface-elevated);
@@ -112,7 +119,7 @@ watch(
   display: grid;
   gap: calc(var(--vo-space-1) / 2);
   min-inline-size: 0;
-  flex: 1 1 auto;
+  flex: 1 1 0;
 }
 
 .vo-operator-modal__title-row {
@@ -140,6 +147,8 @@ watch(
 
 .vo-operator-modal__header-actions {
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: var(--vo-space-2);
   flex-shrink: 0;
@@ -173,5 +182,13 @@ watch(
   padding: var(--vo-space-3) var(--vo-space-4);
   background-color: var(--vo-surface-elevated);
   border-block-start: 1px solid var(--vo-border);
+}
+
+@media (width <= 600px) {
+  .vo-operator-modal__header,
+  .vo-operator-modal__body,
+  .vo-operator-modal__footer {
+    padding-inline: var(--vo-space-3);
+  }
 }
 </style>

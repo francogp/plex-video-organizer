@@ -239,7 +239,7 @@ const filePillLabel = computed<string>(() => {
   grid-template-columns: repeat(12, minmax(0, 1fr));
 
   @media (width <= 600px) {
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -257,6 +257,10 @@ const filePillLabel = computed<string>(() => {
 
   @media (width <= 600px) {
     grid-column: auto;
+
+    &--title {
+      grid-column: 1 / -1;
+    }
   }
 
   .vo-input {

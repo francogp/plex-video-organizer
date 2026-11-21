@@ -60,6 +60,7 @@ import {
   probeVideoWithCache,
   type ScanCacheDb
 } from './scanCacheDb.ts';
+import { detectSubtitleTextLanguage } from './subtitles/subtitleLanguageDetector.ts';
 
 const SEASON_FOLDER_REGEX = /\b(?:season|temporada|specials)\s*(\d{0,2})\b/i;
 const STANDALONE_SEASON_REGEX = /(?:^|[\s._-])s\d{1,2}(?=$|[\s._-])/i;
@@ -417,14 +418,17 @@ async function resolveExternalSubtitleEntry(
     }
   }
 
+  const resolvedLang =
+    detectedLang ?? (ext !== '.sub' ? await detectSubtitleTextLanguage(fullPath) : undefined);
+
   return {
     path: fullPath,
     relativePath: path.relative(inputDir, fullPath),
     extension: ext,
-    language: detectedLang ?? asIso639_2Code('und'),
+    language: resolvedLang ?? asIso639_2Code('und'),
     isForced,
     isHearingImpaired,
-    isLanguageAmbiguous: !detectedLang,
+    isLanguageAmbiguous: !resolvedLang,
     idxPairPath,
     missingIdxWarning
   };

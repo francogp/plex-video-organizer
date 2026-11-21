@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { mount } from '@vue/test-utils';
+import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { defineComponent, nextTick, ref } from 'vue';
@@ -271,7 +271,7 @@ describe('Client Modals & App', () => {
     );
 
     const wrapper = mount(App);
-    await new Promise((r) => setTimeout(r, 20));
+    await flushPromises();
     expect(wrapper.text()).toContain('Plex Video Organizer');
     const brandIcon = wrapper.find('img.vo-brand-icon');
     expect(brandIcon.exists()).toBe(true);
@@ -329,7 +329,7 @@ describe('Client Modals & App', () => {
     );
 
     const wrapper = mount(App);
-    await new Promise((r) => setTimeout(r, 20));
+    await flushPromises();
     const metaText = wrapper.find('.vo-progress__meta').text();
     expect(metaText).toContain('Analyzing audio (6/10)');
     expect(metaText).not.toContain('Supergirl.2026.2160p.mp4');
@@ -393,7 +393,7 @@ describe('Client Modals & App', () => {
     });
 
     await wrapper.find('.vo-btn--primary').trigger('click');
-    await new Promise((r) => setTimeout(r, 10));
+    await flushPromises();
     expect(searchFn).toHaveBeenCalled();
     expect(wrapper.text()).toContain('Andor');
     expect(wrapper.find('a.vo-provider-link--tvdb').attributes('href')).toContain('416744');
@@ -1109,5 +1109,97 @@ describe('Client Modals & App', () => {
       }
     });
     expect(emptyPreviewWrapper.text()).toContain('No pending work');
+  });
+
+  it('useGsapMotion isolates shell timeline from row entrance and attaches delegated interactions', async () => {
+    const { useGsapMotion } = await import('../../src/client/composables/useGsapMotion.ts');
+    const root = document.createElement('div');
+    const header = document.createElement('header');
+    header.className = 'vo-header vo-panel';
+    const panel = document.createElement('section');
+    panel.className = 'vo-panel';
+    const btn = document.createElement('button');
+    btn.className = 'vo-btn';
+    const input = document.createElement('input');
+    input.className = 'vo-input';
+    const row = document.createElement('div');
+    row.className = 'vo-queue-row';
+    root.append(header, panel, btn, input, row);
+    document.body.append(root);
+
+    const HostComp = {
+      template: '<div />',
+      setup() {
+        const rootRef = { value: root };
+        const motion = useGsapMotion(rootRef as never);
+        motion.animateShellTimeline();
+        motion.attachInteractiveMotion();
+        motion.animateEntrance('.vo-queue-row');
+        return {};
+      }
+    };
+    const host = mount(HostComp);
+
+    btn.dispatchEvent(new Event('pointerover', { bubbles: true }));
+    btn.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    btn.dispatchEvent(new Event('pointerup', { bubbles: true }));
+    btn.dispatchEvent(new Event('pointerout', { bubbles: true }));
+    input.dispatchEvent(new Event('focusin', { bubbles: true }));
+    input.dispatchEvent(new Event('focusout', { bubbles: true }));
+    const select = document.createElement('select');
+    select.className = 'vo-select';
+    root.append(select);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const motionMod = await import('../../src/client/composables/useGsapMotion.ts');
+    const modalBackdrop = document.createElement('div');
+    const modalCard = document.createElement('div');
+    modalCard.className = 'vo-operator-modal';
+    const modalBody = document.createElement('div');
+    modalBody.className = 'vo-operator-modal__body';
+    const bodyChild = document.createElement('div');
+    modalBody.append(bodyChild);
+    modalCard.append(modalBody);
+    modalBackdrop.append(modalCard);
+    const ganttWrap = document.createElement('div');
+    const ganttSeg = document.createElement('div');
+    ganttSeg.className = 'vo-slot-seg';
+    ganttWrap.append(ganttSeg);
+    root.append(modalBackdrop, ganttWrap);
+
+    const enterPanelEl = document.createElement('div');
+    const enterToastEl = document.createElement('div');
+    const enterTabEl = document.createElement('div');
+    const leavePanelEl = document.createElement('div');
+    const leaveToastEl = document.createElement('div');
+    const leaveTabEl = document.createElement('div');
+    root.append(enterPanelEl, enterToastEl, enterTabEl, leavePanelEl, leaveToastEl, leaveTabEl);
+    let doneCount = 0;
+    const onDone = (): void => {
+      doneCount += 1;
+    };
+    motionMod.animateModalEnter(modalBackdrop, onDone);
+    motionMod.animateModalLeave(modalBackdrop, onDone);
+    motionMod.animatePanelEnter(enterPanelEl, onDone);
+    motionMod.animatePanelLeave(leavePanelEl, onDone);
+    motionMod.animateToastEnter(enterToastEl, onDone);
+    motionMod.animateToastLeave(leaveToastEl, onDone);
+    motionMod.animateTabViewEnter(enterTabEl, onDone, 1);
+    motionMod.animateTabViewLeave(leaveTabEl, onDone, -1);
+    motionMod.animateStaggerList(modalBody, 'div');
+    motionMod.animateGanttSegments(ganttWrap);
+    motionMod.playFlip(motionMod.captureFlipState(panel));
+    motionMod.smoothScrollToElement(panel);
+
+    const { default: gsap } = await import('gsap');
+    await new Promise<void>((resolve) => {
+      gsap.delayedCall(0.45, resolve);
+    });
+
+    expect(doneCount).toBe(8);
+    expect(header.style.opacity).toBe('');
+    expect(panel.style.opacity).toBe('');
+    host.unmount();
+    root.remove();
   });
 });

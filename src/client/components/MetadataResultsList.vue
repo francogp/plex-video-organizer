@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue';
+
 import { formatTitleWithYear } from '../../domain/plexFormatter.ts';
 import type { MediaKind, MetadataCandidate } from '../../domain/types.ts';
+import { animateStaggerList } from '../composables/useGsapMotion.ts';
 import { extractCandidateLinks } from '../utils/formatters.ts';
 import MountBadge from './MountBadge.vue';
 import ProviderLinks from './ProviderLinks.vue';
@@ -14,10 +17,24 @@ const props = defineProps<{
 const emit = defineEmits<{
   select: [candidate: MetadataCandidate];
 }>();
+
+const listRef = ref<HTMLElement | null>(null);
+
+watch(
+  () => props.results,
+  async (next) => {
+    if (next.length === 0) {
+      return;
+    }
+    await nextTick();
+    animateStaggerList(listRef.value, '.vo-result-item');
+  },
+  { immediate: true }
+);
 </script>
 
 <template>
-  <div class="vo-results-list vo-operator-list">
+  <div ref="listRef" class="vo-results-list vo-operator-list">
     <article
       v-for="(cand, idx) in props.results"
       :key="`${cand.source}-${String(idx)}`"
@@ -65,11 +82,20 @@ const emit = defineEmits<{
   gap: var(--vo-space-3);
   grid-template-columns: 6.25rem minmax(0, 1fr);
   min-inline-size: 0;
+
+  @media (width <= 600px) {
+    gap: var(--vo-space-2);
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .vo-result-item__btn {
   justify-content: center;
   inline-size: 100%;
+
+  @media (width <= 600px) {
+    order: 2;
+  }
 }
 
 .vo-result-item__meta {

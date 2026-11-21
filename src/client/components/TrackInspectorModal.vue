@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, toRaw, watch } from 'vue';
+import { computed, nextTick, ref, toRaw, watch } from 'vue';
 
 import {
   ISO_639_2_LABELS,
@@ -13,6 +13,12 @@ import {
   type SubtitleMergeMode,
   type TrackSelection
 } from '../../domain/types.ts';
+import {
+  animatePanelEnter,
+  animatePanelLeave,
+  captureFlipState,
+  playFlip
+} from '../composables/useGsapMotion.ts';
 import BaseModalShell from './BaseModalShell.vue';
 
 const props = defineProps<{
@@ -28,6 +34,7 @@ const emit = defineEmits<{
 const draft = ref<TrackSelection | null>(null);
 const applyToSeries = ref(false);
 const internalStreamsExpanded = ref(false);
+const extSubsListRef = ref<HTMLElement | null>(null);
 const isBulkMode = computed<boolean>(() => (props.bulkCount ?? 0) > 1);
 const canCollapseInternalStreams = computed<boolean>(
   () => draft.value?.subtitleMergeMode !== 'selected-only' && !draft.value?.promptReason
@@ -167,7 +174,7 @@ function toggleInternalSubtitle(streamOrder: number, checked: boolean): void {
   };
 }
 
-function moveExternalSubtitle(idx: number, delta: -1 | 1): void {
+async function moveExternalSubtitle(idx: number, delta: -1 | 1): Promise<void> {
   if (!draft.value) {
     return;
   }
@@ -176,10 +183,16 @@ function moveExternalSubtitle(idx: number, delta: -1 | 1): void {
   if (nextIdx < 0 || nextIdx >= list.length) {
     return;
   }
+  const flipTargets = extSubsListRef.value
+    ? Array.from(extSubsListRef.value.querySelectorAll<HTMLElement>('.vo-ext-row'))
+    : [];
+  const state = flipTargets.length > 0 ? captureFlipState(flipTargets) : null;
   const current = list[idx]!;
   list[idx] = list[nextIdx]!;
   list[nextIdx] = current;
   draft.value = { ...draft.value, externalSubtitleOrder: list };
+  await nextTick();
+  playFlip(state);
 }
 
 function mergeModeDescription(mode: SubtitleMergeMode): string {
@@ -420,39 +433,45 @@ function handleSave(): void {
               </button>
             </div>
 
+            <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+              <div
+                v-if="item.probe.subtitleStreams.length > 0 && showInternalSubtitles"
+                class="vo-sub-list"
+              >
+                <label
+                  v-for="sub in item.probe.subtitleStreams"
+                  :key="sub.streamOrder"
+                  class="vo-sub-check"
+                >
+                  <input
+                    v-if="draft.subtitleMergeMode === 'selected-only'"
+                    type="checkbox"
+                    :checked="draft.includedInternalSubtitles.includes(sub.streamOrder)"
+                    :aria-label="`Include internal subtitle stream ${String(sub.streamOrder)}`"
+                    @change="
+                      toggleInternalSubtitle(
+                        sub.streamOrder,
+                        ($event.target as HTMLInputElement).checked
+                      )
+                    "
+                  />
+                  <span class="vo-mono vo-sub-meta">
+                    #{{ sub.streamOrder }} · {{ sub.language }} ({{ sub.codecName }})
+                    <template v-if="sub.title"> · {{ sub.title }}</template>
+                  </span>
+                  <span class="vo-sub-flags">
+                    <span v-if="sub.isDefault" class="vo-badge vo-badge--ok">default</span>
+                    <span v-if="sub.isForced" class="vo-badge vo-badge--warn">forced</span>
+                  </span>
+                </label>
+              </div>
+            </Transition>
+
             <div
-              v-if="item.probe.subtitleStreams.length > 0 && showInternalSubtitles"
+              v-if="draft.externalSubtitleOrder.length > 0"
+              ref="extSubsListRef"
               class="vo-sub-list"
             >
-              <label
-                v-for="sub in item.probe.subtitleStreams"
-                :key="sub.streamOrder"
-                class="vo-sub-check"
-              >
-                <input
-                  v-if="draft.subtitleMergeMode === 'selected-only'"
-                  type="checkbox"
-                  :checked="draft.includedInternalSubtitles.includes(sub.streamOrder)"
-                  :aria-label="`Include internal subtitle stream ${String(sub.streamOrder)}`"
-                  @change="
-                    toggleInternalSubtitle(
-                      sub.streamOrder,
-                      ($event.target as HTMLInputElement).checked
-                    )
-                  "
-                />
-                <span class="vo-mono vo-sub-meta">
-                  #{{ sub.streamOrder }} · {{ sub.language }} ({{ sub.codecName }})
-                  <template v-if="sub.title"> · {{ sub.title }}</template>
-                </span>
-                <span class="vo-sub-flags">
-                  <span v-if="sub.isDefault" class="vo-badge vo-badge--ok">default</span>
-                  <span v-if="sub.isForced" class="vo-badge vo-badge--warn">forced</span>
-                </span>
-              </label>
-            </div>
-
-            <div v-if="draft.externalSubtitleOrder.length > 0" class="vo-sub-list">
               <div
                 v-for="(extPath, idx) in draft.externalSubtitleOrder"
                 :key="extPath"

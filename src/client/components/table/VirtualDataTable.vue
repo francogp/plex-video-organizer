@@ -30,7 +30,6 @@ const {
   draggedColId,
   dragOverColId,
   resizingColId,
-  totalTableWidthPx,
   getColumnWidth,
   startDrag,
   onDragOver,
@@ -40,6 +39,38 @@ const {
   nudgeColumnWidth,
   resetColumns
 } = useTableColumns<ColId>(props.tableId, props.columns);
+
+const COMPACT_VIEWPORT_WIDTH_PX = 640;
+const isCompactViewport = ref(false);
+
+function resolveEffectiveWidth(col: TableColumnDef<ColId>): number {
+  const configured = getColumnWidth(col.id);
+  if (isCompactViewport.value && col.compactWidthPx !== undefined) {
+    return Math.min(configured, col.compactWidthPx);
+  }
+  return configured;
+}
+
+const effectiveTotalWidthPx = computed<number>(() => {
+  let sum = 0;
+  for (const col of orderedColumns.value) {
+    sum += resolveEffectiveWidth(col);
+  }
+  return sum;
+});
+
+const stickyOffsetMap = computed<ReadonlyMap<ColId, number>>(() => {
+  const map = new Map<ColId, number>();
+  let offset = 0;
+  for (const col of orderedColumns.value) {
+    if (!col.sticky) {
+      break;
+    }
+    map.set(col.id, offset);
+    offset += resolveEffectiveWidth(col);
+  }
+  return map;
+});
 
 const rowCount = computed((): number => props.indices.length);
 
@@ -151,12 +182,31 @@ function bindRowRef(
   reportCombinedHeight(displayIndex);
 }
 
+let viewportResizeObserver: ResizeObserver | null = null;
+
+function syncCompactViewport(): void {
+  const width =
+    scrollViewportRef.value?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 0);
+  if (width > 0) {
+    isCompactViewport.value = width <= COMPACT_VIEWPORT_WIDTH_PX;
+  }
+}
+
 onMounted((): void => {
   observeViewport(scrollViewportRef.value);
+  syncCompactViewport();
+  if (typeof ResizeObserver !== 'undefined' && scrollViewportRef.value) {
+    viewportResizeObserver = new ResizeObserver((): void => {
+      syncCompactViewport();
+    });
+    viewportResizeObserver.observe(scrollViewportRef.value);
+  }
 });
 
 onBeforeUnmount((): void => {
   observeViewport(null);
+  viewportResizeObserver?.disconnect();
+  viewportResizeObserver = null;
   if (rowResizeObserver) {
     rowResizeObserver.disconnect();
     rowResizeObserver = null;
@@ -171,12 +221,12 @@ defineExpose({
 <template>
   <div class="vo-vtable-shell" :class="{ 'vo-vtable-shell--resizing': resizingColId !== null }">
     <div ref="scrollViewportRef" class="vo-vtable-scroll" @scroll.passive="onViewportScroll">
-      <table class="vo-table vo-vtable" :style="{ width: `${totalTableWidthPx}px` }">
+      <table class="vo-table vo-vtable" :style="{ width: `${effectiveTotalWidthPx}px` }">
         <colgroup>
           <col
             v-for="col in orderedColumns"
             :key="col.id"
-            :style="{ width: `${getColumnWidth(col.id)}px` }"
+            :style="{ width: `${resolveEffectiveWidth(col)}px` }"
           />
         </colgroup>
         <thead>
@@ -186,10 +236,16 @@ defineExpose({
               :key="col.id"
               :draggable="col.reorderable !== false"
               :aria-sort="getAriaSort?.(col.id)"
+              :style="
+                stickyOffsetMap.has(col.id)
+                  ? { insetInlineStart: `${stickyOffsetMap.get(col.id)}px` }
+                  : undefined
+              "
               :class="[
                 'vo-vtable-th',
                 col.align ? `vo-td--${col.align}` : '',
                 {
+                  'vo-vtable-sticky': stickyOffsetMap.has(col.id),
                   'vo-vtable-th--reorderable': col.reorderable !== false,
                   'vo-vtable-th--dragging': draggedColId === col.id,
                   'vo-vtable-th--drag-over': dragOverColId === col.id
@@ -238,7 +294,15 @@ defineExpose({
                 <td
                   v-for="col in orderedColumns"
                   :key="col.id"
-                  :class="col.align ? `vo-td--${col.align}` : undefined"
+                  :style="
+                    stickyOffsetMap.has(col.id)
+                      ? { insetInlineStart: `${stickyOffsetMap.get(col.id)}px` }
+                      : undefined
+                  "
+                  :class="[
+                    col.align ? `vo-td--${col.align}` : '',
+                    { 'vo-vtable-sticky': stickyOffsetMap.has(col.id) }
+                  ]"
                 >
                   <slot
                     :name="`cell-${col.id}`"
@@ -294,7 +358,8 @@ defineExpose({
 .vo-vtable {
   width: 100%;
   table-layout: fixed;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
 
   :is(th, td) {
     min-width: 0;
@@ -309,6 +374,17 @@ defineExpose({
     &:last-child {
       border-inline-end: none;
     }
+  }
+
+  td.vo-vtable-sticky {
+    position: sticky;
+    z-index: calc(var(--vo-z-sticky, 3) - 1);
+    background-color: var(--vo-surface);
+  }
+
+  thead th.vo-vtable-sticky {
+    z-index: calc(var(--vo-z-sticky, 3) + 1);
+    background-color: var(--vo-surface-elevated);
   }
 
   td select,
@@ -426,5 +502,13 @@ defineExpose({
   td:first-child {
     border-inline-start: var(--vo-space-1) solid var(--vo-warning);
   }
+}
+
+.vo-vtable tr:is(.vo-row--has-conflict, .vo-row--has-error) > td.vo-vtable-sticky {
+  background-color: color-mix(in oklch, var(--vo-danger) 10%, var(--vo-surface));
+}
+
+.vo-vtable tr:is(.vo-row--has-conflict-resolved, .vo-row--has-warning) > td.vo-vtable-sticky {
+  background-color: color-mix(in oklch, var(--vo-warning) 10%, var(--vo-surface));
 }
 </style>

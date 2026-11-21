@@ -10,10 +10,11 @@ declare const __APP_SEMVER__: string;
 const store = useOrganizerStore();
 const appSemver = typeof __APP_SEMVER__ === 'string' ? __APP_SEMVER__ : 'v1.0.0';
 const rootRef = ref<HTMLElement | null>(null);
-const { animateShellTimeline, animateEntrance } = useGsapMotion(rootRef);
+const { animateShellTimeline, animateEntrance, attachInteractiveMotion } = useGsapMotion(rootRef);
 
 onMounted(async (): Promise<void> => {
   animateShellTimeline();
+  attachInteractiveMotion();
   await store.bootstrapConnection();
 });
 

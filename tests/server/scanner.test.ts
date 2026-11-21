@@ -888,4 +888,101 @@ describe('scanner', () => {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('detects language of untagged external SRT via franc-min without triggering false conflicts', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-sub-content-'));
+    try {
+      const folder = path.join(tmpDir, 'Movie 43 (2013) [1080p]');
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(path.join(folder, 'Movie.43.2013.1080p.BRrip.x264.GAZ.mp4'), 'v');
+      await fs.writeFile(
+        path.join(folder, 'Movie.43.2013.1080p.BRrip.x264.GAZ.srt'),
+        [
+          '1',
+          '00:00:58,184 --> 00:00:59,811',
+          '- Good. Are you on?',
+          "- Yeah, we're ready.",
+          '',
+          '2',
+          '00:01:01,187 --> 00:01:03,188',
+          '<i>My name is Calvin Cutler.</i>',
+          '',
+          '3',
+          '00:01:03,189 --> 00:01:06,066',
+          "What you're about to witness is the most incredible thing you'll ever see.",
+          '',
+          '4',
+          '00:01:11,573 --> 00:01:14,325',
+          "Oh, yeah. Don't try this at home.",
+          ''
+        ].join('\n')
+      );
+      await fs.writeFile(
+        path.join(folder, 'Movie.43.2013.1080p.BRrip.x264.GAZ.spa.srt'),
+        '1\n00:00:58,183 --> 00:00:59,767\n¿Está grabando? Listo.\n'
+      );
+
+      const items = await scanInputDirectory(tmpDir, async () => MOCK_PROBE);
+      expect(items).toHaveLength(1);
+      const subs = items[0]?.externalSubtitles ?? [];
+      expect(subs).toHaveLength(2);
+      const untagged = subs.find((s) => s.path.endsWith('GAZ.srt'));
+      expect(untagged?.language).toBe('eng');
+      expect(untagged?.isLanguageAmbiguous).toBe(false);
+      expect(items[0]?.trackSelection.needsUserPrompt).toBe(false);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('detects untagged Spanish SRT via franc-min so Spanish auto-download is not duplicated', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-sub-spa-'));
+    try {
+      await fs.writeFile(path.join(tmpDir, 'Pelicula.2022.mkv'), 'v');
+      await fs.writeFile(
+        path.join(tmpDir, 'Pelicula.2022.srt'),
+        [
+          '1',
+          '00:00:10,000 --> 00:00:14,000',
+          'Buenos días, ¿cómo estás hoy? Espero que hayas descansado bien.',
+          '',
+          '2',
+          '00:00:15,000 --> 00:00:19,000',
+          'Tenemos que salir temprano antes de que comience la tormenta en la ciudad.',
+          '',
+          '3',
+          '00:00:20,000 --> 00:00:24,000',
+          'No olvides traer las llaves de la casa y los documentos del viaje.',
+          ''
+        ].join('\n')
+      );
+
+      const items = await scanInputDirectory(tmpDir, async () => MOCK_PROBE);
+      expect(items).toHaveLength(1);
+      expect(items[0]?.externalSubtitles[0]?.language).toBe('spa');
+      expect(items[0]?.externalSubtitles[0]?.isLanguageAmbiguous).toBe(false);
+      expect(items[0]?.trackSelection.needsUserPrompt).toBe(false);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps untagged subtitle as und and ambiguous when text is too short to classify', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vo-scan-sub-short-'));
+    try {
+      await fs.writeFile(path.join(tmpDir, 'Short.2022.mkv'), 'v');
+      await fs.writeFile(
+        path.join(tmpDir, 'Short.2022.srt'),
+        '1\n00:00:01,000 --> 00:00:02,000\n...\n'
+      );
+
+      const items = await scanInputDirectory(tmpDir, async () => MOCK_PROBE);
+      expect(items).toHaveLength(1);
+      expect(items[0]?.externalSubtitles[0]?.language).toBe('und');
+      expect(items[0]?.externalSubtitles[0]?.isLanguageAmbiguous).toBe(true);
+      expect(items[0]?.trackSelection.needsUserPrompt).toBe(true);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

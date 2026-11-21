@@ -405,6 +405,10 @@ onBeforeUnmount(() => {
   inline-size: 100%;
   max-block-size: 65dvh;
   cursor: pointer;
+
+  @media (width <= 600px) {
+    max-block-size: 36dvh;
+  }
 }
 
 .vo-preview-error {
@@ -446,9 +450,25 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--vo-space-2);
+
+  @media (width <= 600px) {
+    display: grid;
+    gap: var(--vo-space-1);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+
+    .vo-btn {
+      justify-content: center;
+      padding: var(--vo-space-1) var(--vo-space-2);
+      font-size: var(--vo-text-xs);
+    }
+  }
 }
 
 .vo-preview-timeline__spacer {
   flex: 1;
+
+  @media (width <= 600px) {
+    display: none;
+  }
 }
 </style>

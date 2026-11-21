@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 
 import type { ScannedItem, SubtitleCandidate } from '../../domain/types.ts';
+import { animateStaggerList } from '../composables/useGsapMotion.ts';
 import BaseModalShell from './BaseModalShell.vue';
 import type { SubtitlePickerViewState } from './QueueTable.vue';
 import UiIcon from './UiIcon.vue';
@@ -17,6 +18,7 @@ const emit = defineEmits<{
 }>();
 
 const filterQuery = ref('');
+const listRef = ref<HTMLElement | null>(null);
 
 const filteredCandidates = computed((): readonly SubtitleCandidate[] => {
   const sorted = (props.picker?.candidates ?? []).toSorted(
@@ -39,6 +41,18 @@ watch(
   () => {
     filterQuery.value = '';
   }
+);
+
+watch(
+  () => filteredCandidates.value.length,
+  async (len) => {
+    if (len === 0) {
+      return;
+    }
+    await nextTick();
+    animateStaggerList(listRef.value, '.vo-subtitle-picker__row');
+  },
+  { immediate: true }
 );
 </script>
 
@@ -66,14 +80,14 @@ watch(
           v-model="filterQuery"
           type="search"
           class="vo-input vo-subtitle-picker__search"
-          placeholder="Filter by release, provider, or variant (e.g. AMZ, BluRay, latam)..."
+          placeholder="Filter release, provider, or variant..."
         />
         <span class="vo-mono vo-subtitle-picker__count">
           {{ filteredCandidates.length }} / {{ props.picker.candidates.length }}
         </span>
       </div>
 
-      <div class="vo-subtitle-picker__list vo-operator-list">
+      <div ref="listRef" class="vo-subtitle-picker__list vo-operator-list">
         <div
           v-for="(cand, idx) in filteredCandidates"
           :key="cand.id"
@@ -150,6 +164,11 @@ watch(
   gap: var(--vo-space-3);
   grid-template-columns: 7.25rem minmax(0, 1fr);
   min-inline-size: 0;
+
+  @media (width <= 600px) {
+    gap: var(--vo-space-2);
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .vo-subtitle-picker__info {
@@ -166,6 +185,11 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+
+  @media (width <= 600px) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 .vo-subtitle-picker__meta {
@@ -186,5 +210,9 @@ watch(
 .vo-subtitle-picker__dl {
   justify-content: center;
   inline-size: 100%;
+
+  @media (width <= 600px) {
+    order: 2;
+  }
 }
 </style>

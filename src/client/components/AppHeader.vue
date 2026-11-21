@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 
 import {
   AUDIO_LANGUAGE_CODES,
@@ -13,6 +13,12 @@ import type {
   MetadataLanguageCode,
   MountPaths
 } from '../../domain/types.ts';
+import {
+  animatePanelEnter,
+  animatePanelLeave,
+  captureFlipState,
+  playFlip
+} from '../composables/useGsapMotion.ts';
 import { formatPhaseLabel } from '../utils/formatters.ts';
 import LanguageOrderBar from './LanguageOrderBar.vue';
 import UiIcon, { type UiIconName } from './UiIcon.vue';
@@ -56,8 +62,26 @@ const emit = defineEmits<{
 }>();
 
 const mountsExpanded = ref(false);
+const tabsRef = ref<HTMLElement | null>(null);
 
 const mountsVisible = computed<boolean>(() => mountsExpanded.value && Boolean(props.mountPaths));
+
+watch(
+  () => props.activeTab,
+  async (next, prev) => {
+    if (!tabsRef.value || next === prev) {
+      return;
+    }
+    const pill = tabsRef.value.querySelector<HTMLElement>('.vo-tab__pill');
+    if (!pill) {
+      return;
+    }
+    const state = captureFlipState(pill);
+    await nextTick();
+    playFlip(state);
+  },
+  { flush: 'pre' }
+);
 
 const mountsToggle = computed<{ readonly icon: UiIconName; readonly label: string }>(() =>
   mountsExpanded.value
@@ -141,7 +165,7 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
           </template>
         </p>
       </div>
-      <nav class="vo-tabs" role="tablist" aria-label="Workspace mode">
+      <nav ref="tabsRef" class="vo-tabs" role="tablist" aria-label="Workspace mode">
         <button
           type="button"
           role="tab"
@@ -150,8 +174,14 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
           :data-active="props.activeTab === 'organizer'"
           @click="emit('update:activeTab', 'organizer')"
         >
-          Organizer
-          <span v-if="props.queueCount > 0" class="vo-badge vo-badge--compact">
+          <span
+            v-if="props.activeTab === 'organizer'"
+            data-flip-id="vo-active-tab-pill"
+            class="vo-tab__pill"
+            aria-hidden="true"
+          />
+          <span class="vo-tab__label">Organizer</span>
+          <span v-if="props.queueCount > 0" class="vo-badge vo-badge--compact vo-tab__badge">
             {{ props.queueCount }}
           </span>
         </button>
@@ -163,8 +193,17 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
           :data-active="props.activeTab === 'verifier'"
           @click="emit('update:activeTab', 'verifier')"
         >
-          Verifier
-          <span v-if="props.verifierCount > 0" class="vo-badge vo-badge--danger vo-badge--compact">
+          <span
+            v-if="props.activeTab === 'verifier'"
+            data-flip-id="vo-active-tab-pill"
+            class="vo-tab__pill"
+            aria-hidden="true"
+          />
+          <span class="vo-tab__label">Verifier</span>
+          <span
+            v-if="props.verifierCount > 0"
+            class="vo-badge vo-badge--danger vo-badge--compact vo-tab__badge"
+          >
             {{ props.verifierCount }}
           </span>
         </button>
@@ -247,15 +286,17 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
     </div>
   </header>
 
-  <section v-if="mountsVisible && props.mountPaths" class="vo-mounts vo-panel vo-mono">
-    <div>config: {{ props.mountPaths.configDir }}</div>
-    <div>input: {{ props.mountPaths.inputDir }}</div>
-    <div>backup: {{ props.mountPaths.backupDir }}</div>
-    <div>movies: {{ props.mountPaths.movies }}</div>
-    <div>animated-movies: {{ props.mountPaths['animated-movies'] }}</div>
-    <div>tv-shows: {{ props.mountPaths['tv-shows'] }}</div>
-    <div>animated-series: {{ props.mountPaths['animated-series'] }}</div>
-  </section>
+  <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+    <section v-if="mountsVisible && props.mountPaths" class="vo-mounts vo-panel vo-mono">
+      <div>config: {{ props.mountPaths.configDir }}</div>
+      <div>input: {{ props.mountPaths.inputDir }}</div>
+      <div>backup: {{ props.mountPaths.backupDir }}</div>
+      <div>movies: {{ props.mountPaths.movies }}</div>
+      <div>animated-movies: {{ props.mountPaths['animated-movies'] }}</div>
+      <div>tv-shows: {{ props.mountPaths['tv-shows'] }}</div>
+      <div>animated-series: {{ props.mountPaths['animated-series'] }}</div>
+    </section>
+  </Transition>
 
   <div class="vo-lang-bars">
     <LanguageOrderBar
@@ -394,6 +435,10 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
   align-items: center;
   gap: var(--vo-space-2);
   margin-inline-start: auto;
+
+  @media (width <= 600px) {
+    margin-inline-start: 0;
+  }
 }
 
 .vo-tabs {
@@ -406,6 +451,7 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
 }
 
 .vo-tab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--vo-space-1);
@@ -420,9 +466,22 @@ const verifierScanButton = computed<{ readonly icon: UiIconName; readonly label:
   cursor: pointer;
 
   &[data-active='true'] {
-    background: var(--vo-accent-gradient);
     color: var(--vo-accent-contrast);
   }
+}
+
+.vo-tab__pill {
+  position: absolute;
+  z-index: var(--vo-z-pill, 0);
+  border-radius: var(--vo-radius-sm);
+  background: var(--vo-accent-gradient);
+  inset: 0;
+}
+
+.vo-tab__label,
+.vo-tab__badge {
+  position: relative;
+  z-index: var(--vo-z-pill-label, 1);
 }
 
 .vo-mounts {

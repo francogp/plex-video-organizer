@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { animateToastEnter, animateToastLeave } from '../composables/useGsapMotion.ts';
 import type { ErrorToastState } from '../types.ts';
 
 const props = defineProps<{
@@ -12,47 +13,49 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <aside
-    v-if="props.state.visible"
-    class="vo-error-toast"
-    role="alert"
-    aria-live="assertive"
-    aria-label="Processing error notification"
-  >
-    <div class="vo-error-toast__body">
-      <div class="vo-error-toast__head">
-        <span class="vo-error-toast__title">
-          <span aria-hidden="true">⚠</span>
-          Errors occurred ({{ String(props.state.count) }})
-        </span>
-        <button
-          type="button"
-          class="vo-error-toast__close"
-          aria-label="Close error notification"
-          title="Close notification"
-          @click="emit('dismiss')"
+  <Transition :css="false" @enter="animateToastEnter" @leave="animateToastLeave">
+    <aside
+      v-if="props.state.visible"
+      class="vo-error-toast"
+      role="alert"
+      aria-live="assertive"
+      aria-label="Processing error notification"
+    >
+      <div class="vo-error-toast__body">
+        <div class="vo-error-toast__head">
+          <span class="vo-error-toast__title">
+            <span aria-hidden="true">⚠</span>
+            Errors occurred ({{ String(props.state.count) }})
+          </span>
+          <button
+            type="button"
+            class="vo-error-toast__close"
+            aria-label="Close error notification"
+            title="Close notification"
+            @click="emit('dismiss')"
+          >
+            ×
+          </button>
+        </div>
+        <p class="vo-error-toast__hint">Check <strong>Server Logs</strong> for details.</p>
+        <p
+          v-if="props.state.latestMessage"
+          class="vo-error-toast__msg vo-mono"
+          :title="props.state.latestMessage"
         >
-          ×
-        </button>
+          {{ props.state.latestMessage }}
+        </p>
+        <div class="vo-error-toast__actions">
+          <button type="button" class="vo-btn vo-btn--compact" @click="emit('view-logs')">
+            View logs
+          </button>
+          <button type="button" class="vo-btn vo-btn--compact" @click="emit('dismiss')">
+            Dismiss
+          </button>
+        </div>
       </div>
-      <p class="vo-error-toast__hint">Check <strong>Server Logs</strong> for details.</p>
-      <p
-        v-if="props.state.latestMessage"
-        class="vo-error-toast__msg vo-mono"
-        :title="props.state.latestMessage"
-      >
-        {{ props.state.latestMessage }}
-      </p>
-      <div class="vo-error-toast__actions">
-        <button type="button" class="vo-btn vo-btn--compact" @click="emit('view-logs')">
-          View logs
-        </button>
-        <button type="button" class="vo-btn vo-btn--compact" @click="emit('dismiss')">
-          Dismiss
-        </button>
-      </div>
-    </div>
-  </aside>
+    </aside>
+  </Transition>
 </template>
 
 <style scoped lang="scss">

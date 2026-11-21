@@ -46,6 +46,7 @@ const QUEUE_COLUMNS: readonly TableColumnDef<QueueColId>[] = [
     label: '',
     defaultWidthPx: 42,
     minWidthPx: 38,
+    sticky: true,
     resizable: false,
     reorderable: false,
     align: 'center'
@@ -54,7 +55,9 @@ const QUEUE_COLUMNS: readonly TableColumnDef<QueueColId>[] = [
     id: 'include',
     label: 'Run',
     defaultWidthPx: 60,
+    compactWidthPx: 54,
     minWidthPx: 54,
+    sticky: true,
     sortable: true,
     align: 'center'
   },
@@ -62,15 +65,43 @@ const QUEUE_COLUMNS: readonly TableColumnDef<QueueColId>[] = [
     id: 'source',
     label: 'Source -> Plex Output',
     defaultWidthPx: 360,
-    minWidthPx: 220,
+    compactWidthPx: 235,
+    minWidthPx: 200,
     sortable: true
   },
-  { id: 'type', label: 'Type', defaultWidthPx: 112, minWidthPx: 92, sortable: true },
-  { id: 'category', label: 'Category', defaultWidthPx: 158, minWidthPx: 120, sortable: true },
-  { id: 'metadata', label: 'Metadata Match', defaultWidthPx: 270, minWidthPx: 180 },
-  { id: 'size', label: 'Size', defaultWidthPx: 100, minWidthPx: 84, sortable: true },
-  { id: 'audio', label: 'Audio', defaultWidthPx: 275, minWidthPx: 210 },
-  { id: 'tracks', label: 'Tracks', defaultWidthPx: 185, minWidthPx: 140 }
+  {
+    id: 'type',
+    label: 'Type',
+    defaultWidthPx: 112,
+    compactWidthPx: 96,
+    minWidthPx: 92,
+    sortable: true
+  },
+  {
+    id: 'category',
+    label: 'Category',
+    defaultWidthPx: 158,
+    compactWidthPx: 132,
+    minWidthPx: 120,
+    sortable: true
+  },
+  {
+    id: 'metadata',
+    label: 'Metadata Match',
+    defaultWidthPx: 270,
+    compactWidthPx: 220,
+    minWidthPx: 180
+  },
+  {
+    id: 'size',
+    label: 'Size',
+    defaultWidthPx: 100,
+    compactWidthPx: 88,
+    minWidthPx: 84,
+    sortable: true
+  },
+  { id: 'audio', label: 'Audio', defaultWidthPx: 275, compactWidthPx: 225, minWidthPx: 210 },
+  { id: 'tracks', label: 'Tracks', defaultWidthPx: 185, compactWidthPx: 215, minWidthPx: 140 }
 ];
 
 type SortKey = 'include' | 'title' | 'mediaKind' | 'category' | 'size';

@@ -1,5 +1,14 @@
 <script setup lang="ts" generic="T extends string">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
+
+import {
+  animatePanelEnter,
+  animatePanelLeave,
+  captureFlipState,
+  playFlip
+} from '../composables/useGsapMotion.ts';
+
+const MENU_MIN_WIDTH_PX = 228;
 
 const props = defineProps<{
   label: string;
@@ -18,9 +27,27 @@ const emit = defineEmits<{
 
 const searchInputId = useId();
 const menuOpen = ref(false);
+const alignEnd = ref(false);
 const searchQuery = ref('');
+const chipsContainerRef = ref<HTMLElement | null>(null);
 const pickerRef = ref<HTMLElement | null>(null);
 const searchInputRef = ref<HTMLInputElement | null>(null);
+
+watch(
+  () => props.languages,
+  async (next, prev) => {
+    if (!chipsContainerRef.value || next.join(',') === prev.join(',')) {
+      return;
+    }
+    const chips = Array.from(
+      chipsContainerRef.value.querySelectorAll<HTMLElement>('.vo-lang-chip')
+    );
+    const state = captureFlipState(chips);
+    await nextTick();
+    playFlip(state);
+  },
+  { flush: 'pre' }
+);
 
 const availableExtraLanguages = computed<readonly T[]>(() =>
   props.allCodes.filter((code) => !props.languages.includes(code))
@@ -83,6 +110,10 @@ async function toggleMenu(): Promise<void> {
     return;
   }
   searchQuery.value = '';
+  const rect = pickerRef.value?.getBoundingClientRect();
+  alignEnd.value = Boolean(
+    rect && typeof window !== 'undefined' && rect.left + MENU_MIN_WIDTH_PX > window.innerWidth
+  );
   menuOpen.value = true;
   await nextTick();
   searchInputRef.value?.focus();
@@ -124,7 +155,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="vo-lang-bar vo-panel" :aria-label="props.ariaLabel">
     <span class="vo-lang-bar__label">{{ props.label }}</span>
-    <div class="vo-lang-bar__chips">
+    <div ref="chipsContainerRef" class="vo-lang-bar__chips">
       <span
         v-for="(lang, idx) in props.languages"
         :key="lang"
@@ -173,35 +204,41 @@ onBeforeUnmount(() => {
         >
           + Add
         </button>
-        <div v-if="menuOpen" class="vo-lang-picker__menu">
-          <label :for="searchInputId" class="vo-sr-only">Filter languages</label>
-          <input
-            :id="searchInputId"
-            ref="searchInputRef"
-            v-model="searchQuery"
-            type="search"
-            class="vo-lang-picker__search"
-            placeholder="Filter (e.g. kor, spanish)..."
-            @keydown.enter.prevent="selectFirstMatch"
-            @keydown.escape.prevent="closeMenu"
-          />
-          <div class="vo-lang-picker__list" role="listbox" :aria-label="props.addAriaLabel">
-            <button
-              v-for="code in filteredExtraLanguages"
-              :key="code"
-              type="button"
-              role="option"
-              aria-selected="false"
-              class="vo-lang-picker__option"
-              @click="selectLanguage(code)"
-            >
-              {{ props.labelsMap[code] ?? code }}
-            </button>
-            <div v-if="filteredExtraLanguages.length === 0" class="vo-lang-picker__empty">
-              No matching languages
+        <Transition :css="false" @enter="animatePanelEnter" @leave="animatePanelLeave">
+          <div
+            v-if="menuOpen"
+            class="vo-lang-picker__menu"
+            :class="{ 'vo-lang-picker__menu--end': alignEnd }"
+          >
+            <label :for="searchInputId" class="vo-sr-only">Filter languages</label>
+            <input
+              :id="searchInputId"
+              ref="searchInputRef"
+              v-model="searchQuery"
+              type="search"
+              class="vo-lang-picker__search"
+              placeholder="Filter (e.g. kor, spanish)..."
+              @keydown.enter.prevent="selectFirstMatch"
+              @keydown.escape.prevent="closeMenu"
+            />
+            <div class="vo-lang-picker__list" role="listbox" :aria-label="props.addAriaLabel">
+              <button
+                v-for="code in filteredExtraLanguages"
+                :key="code"
+                type="button"
+                role="option"
+                aria-selected="false"
+                class="vo-lang-picker__option"
+                @click="selectLanguage(code)"
+              >
+                {{ props.labelsMap[code] ?? code }}
+              </button>
+              <div v-if="filteredExtraLanguages.length === 0" class="vo-lang-picker__empty">
+                No matching languages
+              </div>
             </div>
           </div>
-        </div>
+        </Transition>
       </div>
     </div>
   </section>
@@ -209,6 +246,7 @@ onBeforeUnmount(() => {
 
 <style scoped lang="scss">
 .vo-lang-bar {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -302,7 +340,26 @@ onBeforeUnmount(() => {
   inset-block-start: calc(100% + var(--vo-space-1));
   inset-inline-start: 0;
   min-inline-size: 220px;
+  max-inline-size: calc(100dvw - 2rem);
   box-shadow: var(--vo-shadow-panel);
+}
+
+.vo-lang-picker__menu--end {
+  inset-inline: auto 0;
+}
+
+@media (width <= 600px) {
+  .vo-lang-picker {
+    position: static;
+  }
+
+  .vo-lang-picker__menu {
+    inset-block-start: calc(100% + var(--vo-space-1));
+    inset-inline: 0;
+    inline-size: 100%;
+    min-inline-size: 0;
+    max-inline-size: none;
+  }
 }
 
 .vo-lang-picker__search {

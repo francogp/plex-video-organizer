@@ -16,7 +16,9 @@ export interface TableColumnDef<ColId extends string = string> {
   readonly id: ColId;
   readonly label: string;
   readonly defaultWidthPx: number;
+  readonly compactWidthPx?: number;
   readonly minWidthPx: number;
+  readonly sticky?: boolean;
   readonly resizable?: boolean;
   readonly reorderable?: boolean;
   readonly sortable?: boolean;
