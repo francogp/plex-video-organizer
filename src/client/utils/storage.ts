@@ -13,6 +13,7 @@ export type ThemeMode = (typeof THEME_MODES)[number];
 const BROWSER_ID_KEY = 'vo_browser_id';
 const TAB_ID_KEY = 'vo_tab_id';
 const THEME_KEY = 'vo_theme_mode';
+const LOGS_AUTO_SCROLL_KEY = 'vo_logs_auto_scroll_v1';
 const PREFERRED_LANGS_KEY = 'vo_preferred_languages_v1';
 const AUDIO_PREFERRED_LANGS_KEY = 'vo_audio_preferred_languages_v1';
 const TABLE_PREFS_PREFIX = 'vo_table_prefs_v1_';
@@ -85,6 +86,18 @@ export function getInitialThemeMode(): ThemeMode {
 export function saveThemeMode(mode: ThemeMode): void {
   const local = typeof globalThis !== 'undefined' ? globalThis.localStorage : undefined;
   writeStorage(local, THEME_KEY, mode);
+}
+
+/** Reads persisted server logs auto-scroll preference, defaulting to enabled (`true`). */
+export function getLogsAutoScrollPreference(): boolean {
+  const local = typeof globalThis !== 'undefined' ? globalThis.localStorage : undefined;
+  return readStorage(local, LOGS_AUTO_SCROLL_KEY) !== 'false';
+}
+
+/** Persists server logs auto-scroll preference safely. */
+export function saveLogsAutoScrollPreference(enabled: boolean): void {
+  const local = typeof globalThis !== 'undefined' ? globalThis.localStorage : undefined;
+  writeStorage(local, LOGS_AUTO_SCROLL_KEY, String(enabled));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

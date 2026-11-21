@@ -1,6 +1,15 @@
 <script setup lang="ts">
+import { nextTick, onMounted, ref, useId, watch, type ComponentPublicInstance } from 'vue';
+
 import type { SseLogEvent } from '../../domain/types.ts';
+import {
+  animatePanelEnter,
+  animatePanelLeave,
+  animateStaggerList,
+  smoothScrollToBottom
+} from '../composables/useGsapMotion.ts';
 import { formatBuenosAiresTimestamp } from '../utils/formatters.ts';
+import { getLogsAutoScrollPreference, saveLogsAutoScrollPreference } from '../utils/storage.ts';
 
 const props = defineProps<{
   readonly logs: readonly SseLogEvent[];
@@ -9,6 +18,68 @@ const props = defineProps<{
 const emit = defineEmits<{
   clear: [];
 }>();
+
+const autoScrollId = useId();
+const autoScroll = ref(getLogsAutoScrollPreference());
+const listRef = ref<ComponentPublicInstance | HTMLElement | null>(null);
+const logKeyMap = new WeakMap<SseLogEvent, number>();
+let nextLogKey = 0;
+
+function getLogKey(entry: SseLogEvent): number {
+  const existing = logKeyMap.get(entry);
+  if (existing !== undefined) {
+    return existing;
+  }
+  nextLogKey += 1;
+  logKeyMap.set(entry, nextLogKey);
+  return nextLogKey;
+}
+
+function resolveListElement(): HTMLElement | null {
+  const target = listRef.value;
+  if (!target) {
+    return null;
+  }
+  if (target instanceof HTMLElement) {
+    return target;
+  }
+  return target.$el instanceof HTMLElement ? target.$el : null;
+}
+
+async function scrollLogsToLatest(): Promise<void> {
+  if (!autoScroll.value || props.logs.length === 0) {
+    return;
+  }
+  await nextTick();
+  smoothScrollToBottom(resolveListElement());
+}
+
+function onLogsContainerEnter(el: Element, done: () => void): void {
+  animatePanelEnter(el, done);
+  if (el instanceof HTMLElement && el.classList.contains('vo-logs__list')) {
+    animateStaggerList(el, '.vo-logs__item', true);
+  }
+}
+
+onMounted((): void => {
+  void scrollLogsToLatest().then((): void => {
+    animateStaggerList(resolveListElement(), '.vo-logs__item', true);
+  });
+});
+
+watch(
+  (): readonly SseLogEvent[] => props.logs,
+  (): void => {
+    void scrollLogsToLatest();
+  }
+);
+
+watch(autoScroll, (enabled: boolean): void => {
+  saveLogsAutoScrollPreference(enabled);
+  if (enabled) {
+    void scrollLogsToLatest();
+  }
+});
 </script>
 
 <template>
@@ -18,33 +89,57 @@ const emit = defineEmits<{
         Server Logs
         <span class="vo-badge vo-badge--compact">{{ String(props.logs.length) }}</span>
       </h2>
-      <button
-        type="button"
-        class="vo-btn"
-        :disabled="props.logs.length === 0"
-        @click="emit('clear')"
-      >
-        <span aria-hidden="true">🧹</span>
-        Clear
-      </button>
+      <div class="vo-logs__actions">
+        <label :for="autoScrollId" class="vo-logs__autoscroll">
+          <input
+            :id="autoScrollId"
+            v-model="autoScroll"
+            type="checkbox"
+            class="vo-logs__checkbox"
+          />
+          <span>Auto-scroll</span>
+        </label>
+        <button
+          type="button"
+          class="vo-btn"
+          :disabled="props.logs.length === 0"
+          @click="emit('clear')"
+        >
+          <span aria-hidden="true">🧹</span>
+          Clear
+        </button>
+      </div>
     </div>
-    <div v-if="props.logs.length === 0" class="vo-logs__empty vo-mono">
-      No server logs yet. Click Scan Input or Process Queue to see activity.
-    </div>
-    <ul v-else class="vo-logs__list vo-mono">
-      <li
-        v-for="(entry, idx) in props.logs"
-        :key="`${entry.timestamp}-${String(idx)}`"
-        class="vo-logs__item"
-        :data-level="entry.level"
+    <Transition mode="out-in" :css="false" @enter="onLogsContainerEnter" @leave="animatePanelLeave">
+      <div v-if="props.logs.length === 0" key="empty" class="vo-logs__empty vo-mono">
+        No server logs yet. Click Scan Input or Process Queue to see activity.
+      </div>
+      <TransitionGroup
+        v-else
+        key="list"
+        ref="listRef"
+        tag="div"
+        role="list"
+        :css="false"
+        class="vo-logs__list vo-mono"
+        @enter="animatePanelEnter"
+        @leave="animatePanelLeave"
       >
-        <time class="vo-logs__time" :datetime="entry.timestamp">
-          {{ formatBuenosAiresTimestamp(entry.timestamp) }}
-        </time>
-        <span class="vo-logs__level">[{{ entry.level.toUpperCase() }}]</span>
-        <span class="vo-logs__msg">{{ entry.message }}</span>
-      </li>
-    </ul>
+        <div
+          v-for="entry in props.logs"
+          :key="getLogKey(entry)"
+          role="listitem"
+          class="vo-logs__item"
+          :data-level="entry.level"
+        >
+          <time class="vo-logs__time" :datetime="entry.timestamp">
+            {{ formatBuenosAiresTimestamp(entry.timestamp) }}
+          </time>
+          <span class="vo-logs__level">[{{ entry.level.toUpperCase() }}]</span>
+          <span class="vo-logs__msg">{{ entry.message }}</span>
+        </div>
+      </TransitionGroup>
+    </Transition>
   </section>
 </template>
 
@@ -61,6 +156,7 @@ const emit = defineEmits<{
 
 .vo-logs__header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: var(--vo-space-2);
@@ -69,6 +165,28 @@ const emit = defineEmits<{
     margin: 0;
     font-size: var(--vo-text-md);
   }
+}
+
+.vo-logs__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--vo-space-3);
+}
+
+.vo-logs__autoscroll {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--vo-space-1);
+  color: var(--vo-text-muted);
+  font-size: var(--vo-text-xs);
+  cursor: pointer;
+  user-select: none;
+}
+
+.vo-logs__checkbox {
+  margin: 0;
+  cursor: pointer;
 }
 
 .vo-logs__empty {

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { mount } from '@vue/test-utils';
 import { describe, expect, it } from 'vite-plus/test';
+import { defineComponent, h, nextTick, ref } from 'vue';
 
 import AppHeader from '../../src/client/components/AppHeader.vue';
 import OrganizerStatusBar from '../../src/client/components/OrganizerStatusBar.vue';
@@ -196,8 +197,50 @@ describe('StatusPanels', () => {
     });
     expect(wrapper.text()).toContain('[INFO]');
     expect(wrapper.text()).toContain('Scan started');
+    const autoScrollCheckbox = wrapper.find<HTMLInputElement>('.vo-logs__checkbox');
+    expect(autoScrollCheckbox.element.checked).toBe(true);
     await wrapper.find('button').trigger('click');
     expect(wrapper.emitted('clear')).toHaveLength(1);
+  });
+
+  it('ServerLogsPanel auto-scrolls to newest entry only while Auto-scroll checkbox is enabled and persists to localStorage', async () => {
+    globalThis.localStorage.removeItem('vo_logs_auto_scroll_v1');
+    const firstLog = {
+      timestamp: '2026-11-14T12:00:00.000Z',
+      level: 'info' as const,
+      message: 'Entry 1'
+    };
+    const logs = ref([firstLog]);
+    const Host = defineComponent({
+      setup: () => () => h(ServerLogsPanel, { logs: logs.value })
+    });
+    const wrapper = mount(Host);
+    const listEl = wrapper.find('.vo-logs__list').element as HTMLElement;
+    Object.defineProperty(listEl, 'scrollHeight', { value: 420, configurable: true });
+    const checkbox = wrapper.find<HTMLInputElement>('.vo-logs__checkbox');
+    expect(checkbox.element.checked).toBe(true);
+
+    // Disable auto-scroll, verify persistence, and append a new entry: scrollTop remains untouched.
+    await checkbox.setValue(false);
+    expect(globalThis.localStorage.getItem('vo_logs_auto_scroll_v1')).toBe('false');
+    const secondWrapper = mount(Host);
+    expect(secondWrapper.find<HTMLInputElement>('.vo-logs__checkbox').element.checked).toBe(false);
+
+    listEl.scrollTop = 10;
+    const secondLog = {
+      timestamp: '2026-11-14T12:00:01.000Z',
+      level: 'info' as const,
+      message: 'Entry 2'
+    };
+    logs.value = [firstLog, secondLog];
+    await nextTick();
+    expect(listEl.scrollTop).toBe(10);
+
+    // Re-enable auto-scroll: persists true and triggers smooth scroll toward the latest entry.
+    await checkbox.setValue(true);
+    await nextTick();
+    expect(globalThis.localStorage.getItem('vo_logs_auto_scroll_v1')).toBe('true');
+    expect(wrapper.findAll('.vo-logs__item')).toHaveLength(2);
   });
 
   it('ParallelTasksList renders Skip button when canSkip and itemId are present and emits skip', async () => {

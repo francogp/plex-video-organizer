@@ -27,6 +27,7 @@ const TAB_SLIDE_X_PX = 24;
 const TAB_DURATION_SEC = 0.22;
 const FLIP_DURATION_SEC = 0.28;
 const SCROLL_DURATION_SEC = 0.45;
+const LOG_SCROLL_DURATION_SEC = 0.22;
 const SCROLL_OFFSET_Y_PX = 16;
 const LIST_STAGGER_SEC = 0.025;
 const MAX_STAGGER_ELEMENTS = 20;
@@ -285,14 +286,16 @@ export function animateTabViewLeave(el: Element, done: () => void, direction: -1
 }
 
 /** Animates staggered list/card items cleanly on mount or search refresh. */
-export function animateStaggerList(container: HTMLElement | null, selector: string): void {
+export function animateStaggerList(
+  container: HTMLElement | null,
+  selector: string,
+  fromEnd = false
+): void {
   if (!container || prefersReducedMotion()) {
     return;
   }
-  const items = Array.from(container.querySelectorAll<HTMLElement>(selector)).slice(
-    0,
-    MAX_STAGGER_ELEMENTS
-  );
+  const all = Array.from(container.querySelectorAll<HTMLElement>(selector));
+  const items = fromEnd ? all.slice(-MAX_STAGGER_ELEMENTS) : all.slice(0, MAX_STAGGER_ELEMENTS);
   if (items.length === 0) {
     return;
   }
@@ -368,6 +371,23 @@ export function smoothScrollToElement(target: HTMLElement | null): void {
     duration: SCROLL_DURATION_SEC,
     scrollTo: { y: target, offsetY: SCROLL_OFFSET_Y_PX },
     ease: 'power2.out'
+  });
+}
+
+/** Smoothly scrolls a scrollable container (e.g. server logs list) to its latest bottom entry. */
+export function smoothScrollToBottom(container: HTMLElement | null): void {
+  if (!container) {
+    return;
+  }
+  if (prefersReducedMotion()) {
+    container.scrollTop = container.scrollHeight;
+    return;
+  }
+  gsap.to(container, {
+    duration: LOG_SCROLL_DURATION_SEC,
+    scrollTo: { y: container.scrollHeight },
+    ease: 'power2.out',
+    overwrite: 'auto'
   });
 }
 

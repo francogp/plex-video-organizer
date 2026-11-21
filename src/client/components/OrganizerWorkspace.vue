@@ -92,12 +92,20 @@ function scrollToLogs(): void {
   smoothScrollToElement(logsContainerRef.value);
 }
 
+function noop(): void {}
+
 function onTabEnter(el: Element, done: () => void): void {
   animateTabViewEnter(el, done, tabDirection.value);
+  if (logsContainerRef.value) {
+    animateTabViewEnter(logsContainerRef.value, noop, tabDirection.value);
+  }
 }
 
 function onTabLeave(el: Element, done: () => void): void {
   animateTabViewLeave(el, done, tabDirection.value);
+  if (logsContainerRef.value) {
+    animateTabViewLeave(logsContainerRef.value, noop, tabDirection.value);
+  }
 }
 
 const initBannerText = computed((): string =>

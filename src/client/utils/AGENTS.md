@@ -14,7 +14,7 @@ Frontend Maintainers.
 
 - [formatters.ts](formatters.ts): Shared UI byte/size, Buenos Aires timestamp, ETA (`formatEta`), clickable candidate links (`extractCandidateLinks`, `formatMetadataIds`), and Plex filename preview helpers.
 - [organizerApi.ts](organizerApi.ts): Typed HTTP JSON client, SSE event source factory, and track-selection merge helper for `organizerStore.ts`.
-- [storage.ts](storage.ts): Safe client ID (`browserId:tabId`) and theme mode persistence.
+- [storage.ts](storage.ts): Safe `localStorage`/`sessionStorage` helpers for client IDs, theme, table layout, language orders, and server logs auto-scroll (`vo_logs_auto_scroll_v1`).
 
 ## Work Guidance
 
